@@ -58,6 +58,10 @@ public:
     virtual ~abstract_type() {}
     virtual void serialize(const boost::any& value, std::ostream& out) = 0;
     virtual bool less(bytes_view v1, bytes_view v2) = 0;
+    // returns a callable that can be called with two byte_views, and calls this->less() on them.
+    auto as_less_comparator() {
+        return [t = shared_from_this()] (bytes_view a, bytes_view b) { return t->less(a, b); };
+    }
     virtual size_t hash(bytes_view v) = 0;
     virtual bool equal(bytes_view v1, bytes_view v2) {
         if (is_byte_order_equal()) {
