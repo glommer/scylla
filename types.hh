@@ -579,3 +579,14 @@ void write_collection_size(std::ostream& out, int size, int version);
 void write_collection_value(std::ostream& out, int version, bytes_view val_bytes);
 void write_collection_value(std::ostream& out, int version, data_type type, const boost::any& value);
 
+template <typename BytesViewIterator>
+bytes
+collection_type_impl::pack(BytesViewIterator start, BytesViewIterator finish, int elements, int protocol_version) {
+    std::ostringstream out;
+    write_collection_size(out, elements, protocol_version);
+    while (start != finish) {
+        write_collection_value(out, protocol_version, *start++);
+    }
+    return out.str();
+}
+
