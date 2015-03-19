@@ -1261,7 +1261,7 @@ list_type_impl::serialize(const boost::any& value, bytes::iterator& out, seriali
     auto& s = boost::any_cast<const native_type&>(value);
     write_collection_size(out, s.size(), sf);
     for (auto&& e : s) {
-        write_collection_value(out, sf, _elements, e);
+        write_collection_value(out, sf, _elements, *e);
     }
 }
 
@@ -1271,7 +1271,7 @@ list_type_impl::serialized_size(const boost::any& value) {
     size_t len = collection_size_len(serialization_format::internal());
     size_t psz = collection_value_len(serialization_format::internal());
     for (auto&& e : s) {
-        len += psz + _elements->serialized_size(e);
+        len += psz + _elements->serialized_size(*e);
     }
     return len;
 }

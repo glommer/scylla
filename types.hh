@@ -466,7 +466,7 @@ class list_type_impl final : public collection_type_impl {
 public:
     // type returned by deserialize() and expected by serialize
     // does not support mutations/ttl/tombstone - purely for I/O.
-    using native_type = std::vector<boost::any>;
+    using native_type = std::vector<object_opt>;
     static list_type get_instance(data_type elements, bool is_multi_cell);
     list_type_impl(data_type elements, bool is_multi_cell);
     data_type get_elements_type() const { return _elements; }
