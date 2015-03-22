@@ -105,16 +105,25 @@ public:
         QueryProcessor.validateComposite(slice.finish, metadata.comparator);
         return new RangeTombstone(slice.start, slice.finish, timestamp - 1, localDeletionTime);
     }
-
-    public List<Cell> getPrefetchedList(ByteBuffer rowKey, ColumnIdentifier cql3ColumnName)
-    {
-        if (prefetchedLists == null)
-            return Collections.emptyList();
-
-        CQL3Row row = prefetchedLists.get(rowKey);
-        return row == null ? Collections.<Cell>emptyList() : row.getMultiCellColumn(cql3ColumnName);
-    }
 #endif
+
+    collection_mutation::view get_prefetched_list(const partition_key& pkey,
+            const clustering_key& row_key, const column_definition& column) const {
+        if (!_prefetched) {
+            return {};
+        }
+        auto i = _prefetched->find(pkey);
+        if (i == _prefetched->end()) {
+            return {};
+        }
+        // FIXME: we really won't modify pm, but the API is not const-correct yet.
+        mutation& pm = const_cast<mutation&>(i->second);
+        auto col = pm.get_cell(row_key, column);
+        if (!col) {
+            return {};
+        }
+        return col->as_collection_mutation();
+    }
 };
 
 }
