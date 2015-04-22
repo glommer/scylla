@@ -310,7 +310,7 @@ void gossiper::do_status_check() {
 
     // FIXME:
     // int64_t pending = ((JMXEnabledThreadPoolExecutor) StageManager.getStage(Stage.GOSSIP)).getPendingTasks();
-    int64_t pending = 1;
+    int64_t pending = 0;
     if (pending > 0 && _last_processed_message_at < now - 1000) {
         // FIXME: SLEEP
         // if some new messages just arrived, give the executor some time to work on them
