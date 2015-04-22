@@ -43,8 +43,9 @@ int main(int ac, char ** av) {
                     reporter->set_callback ([reporter] {
                         auto& gossiper = gms::get_local_gossiper();
                         gossiper.dump_endpoint_state_map();
-                        auto& fd = gms::get_local_failure_detector();
-                        print("%s", fd);
+                        //auto& fd = gms::get_local_failure_detector();
+                        //print("%s", fd);
+                        //print("%s", fd.get_all_endpoint_states());
                     });
                     reporter->arm_periodic(std::chrono::milliseconds(1000));
 

@@ -277,6 +277,7 @@ void gossiper::apply_state_locally(std::map<inet_address, endpoint_state>& map) 
 }
 
 void gossiper::remove_endpoint(inet_address endpoint) {
+    print("In remove_endpoint ---> removing ep=%s\n", endpoint);
     // do subscribers first so anything in the subscriber that depends on gossiper state won't get confused
     for (auto& subscriber : _subscribers) {
         subscriber->on_remove(endpoint);
@@ -311,6 +312,7 @@ void gossiper::do_status_check() {
     // FIXME:
     // int64_t pending = ((JMXEnabledThreadPoolExecutor) StageManager.getStage(Stage.GOSSIP)).getPendingTasks();
     int64_t pending = 0;
+    print("In do_status_check now=%ld, _last_processed_message_at=%ld\n", now, _last_processed_message_at);
     if (pending > 0 && _last_processed_message_at < now - 1000) {
         // FIXME: SLEEP
         // if some new messages just arrived, give the executor some time to work on them

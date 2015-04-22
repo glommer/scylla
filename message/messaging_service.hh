@@ -300,6 +300,7 @@ public:
                 auto ret = f.get();
                 return make_ready_future<MsgIn>(std::move(std::get<0>(ret)));
             } catch (std::runtime_error&) {
+                print("exception happended 1\n");
                 remove_rpc_client(id);
                 throw;
             }

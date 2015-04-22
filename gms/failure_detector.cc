@@ -70,6 +70,7 @@ long arrival_window::get_max_interval() {
 }
 
 void arrival_window::add(long value) {
+    printf("arrival_window::add value=%ld,inter_arrival_time=%ld,_tlast=%ld\n", value, value - _tlast, _tlast);
     assert(_tlast >= 0);
     if (_tlast > 0L) {
         long inter_arrival_time = value - _tlast;
@@ -92,12 +93,14 @@ double arrival_window::mean() {
 }
 
 double arrival_window::phi(long tnow) {
+    print("arrival_window::phi: size=%d, _tlast=%ld, aw=%s\n", _arrival_intervals.size(), _tlast, *this);
     assert(_arrival_intervals.size() > 0 && _tlast > 0); // should not be called before any samples arrive
     long t = tnow - _tlast;
     return t / mean();
 }
 
 std::ostream& operator<<(std::ostream& os, const arrival_window& w) {
+    os << "size = " << w._arrival_intervals.deque().size();
     for (auto& x : w._arrival_intervals.deque()) {
         os << x << " ";
     }
@@ -216,7 +219,9 @@ void failure_detector::report(inet_address ep) {
         auto heartbeat_window = arrival_window(SAMPLE_SIZE);
         heartbeat_window.add(now);
         _arrival_samples.emplace(ep, heartbeat_window);
+        print("report A: ep=%s, now=%d, aw=%s\n", ep, now, heartbeat_window);
     } else {
+        print("report B: ep=%s, now=%d\n", ep, now);
         it->second.add(now);
     }
 }
@@ -224,6 +229,7 @@ void failure_detector::report(inet_address ep) {
 void failure_detector::interpret(inet_address ep) {
     auto it = _arrival_samples.find(ep);
     if (it == _arrival_samples.end()) {
+        print("interpret A: ep=%s\n", ep);
         return;
     }
     arrival_window& hb_wnd = it->second;
@@ -233,11 +239,14 @@ void failure_detector::interpret(inet_address ep) {
     //     logger.trace("PHI for {} : {}", ep, phi);
 
     if (PHI_FACTOR * phi > get_phi_convict_threshold()) {
+        print("interpret B: ep=%s, phi=%f\n", ep, phi);
         // logger.trace("notifying listeners that {} is down", ep);
         // logger.trace("intervals: {} mean: {}", hb_wnd, hb_wnd.mean());
         for (auto& listener : _fd_evnt_listeners) {
             listener->convict(ep, phi);
         }
+    } else {
+        print("interpret C: ep=%s, phi=%f\n", ep, phi);
     }
 }
 
