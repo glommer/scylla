@@ -1048,11 +1048,17 @@ future<size_t> pollable_fd::read_some(const std::vector<iovec>& iov) {
 
 inline
 future<> pollable_fd::write_all(const char* buffer, size_t size) {
+    if (!_s) {
+        throw std::system_error(EPIPE, std::system_category());
+    }
     return engine().write_all(*_s, buffer, size);
 }
 
 inline
 future<> pollable_fd::write_all(const uint8_t* buffer, size_t size) {
+    if (!_s) {
+        throw std::system_error(EPIPE, std::system_category());
+    }
     return engine().write_all(*_s, buffer, size);
 }
 
@@ -1097,6 +1103,9 @@ future<> pollable_fd::readable() {
 
 inline
 future<> pollable_fd::writeable() {
+    if (!_s) {
+        throw std::system_error(EPIPE, std::system_category());
+    }
     return engine().writeable(*_s);
 }
 
