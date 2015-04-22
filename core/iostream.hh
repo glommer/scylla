@@ -38,6 +38,7 @@
 #include "future.hh"
 #include "temporary_buffer.hh"
 #include "scattered_message.hh"
+#include <system_error>
 
 namespace net { class packet; }
 
@@ -56,7 +57,12 @@ public:
     explicit data_source(std::unique_ptr<data_source_impl> dsi) : _dsi(std::move(dsi)) {}
     data_source(data_source&& x) = default;
     data_source& operator=(data_source&& x) = default;
-    future<temporary_buffer<char>> get() { return _dsi->get(); }
+    future<temporary_buffer<char>> get() {
+        if (!_dsi) {
+            throw std::system_error(EPIPE, std::system_category(), "data_souce::_dsi is nullptr");
+        }
+        return _dsi->get();
+    }
 };
 
 class data_sink_impl {
