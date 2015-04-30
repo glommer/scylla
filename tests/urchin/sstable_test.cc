@@ -328,7 +328,7 @@ SEASTAR_TEST_CASE(datafile_generation_01) {
 
     auto cfp = make_shared<column_family>(std::move(cf));
 
-    return sstables::write_datafile(*cfp, "tests/urchin/sstables/Data.tmp.db").then([cfp, s] {
+    return sstables::write_datafile(cfp->testonly_all_memtables()[0], "tests/urchin/sstables/Data.tmp.db").then([cfp, s] {
         return engine().open_file_dma("tests/urchin/sstables/Data.tmp.db", open_flags::ro).then([] (file f) {
             auto bufptr = allocate_aligned_buffer<char>(4096, 4096);
 
@@ -393,7 +393,7 @@ SEASTAR_TEST_CASE(datafile_generation_02) {
 
     auto cfp = make_shared<column_family>(std::move(cf));
 
-    return sstables::write_datafile(*cfp, "tests/urchin/sstables/Data2.tmp.db").then([cfp, s] {
+    return sstables::write_datafile(cfp->testonly_all_memtables()[0], "tests/urchin/sstables/Data2.tmp.db").then([cfp, s] {
         return engine().open_file_dma("tests/urchin/sstables/Data2.tmp.db", open_flags::ro).then([] (file f) {
             auto bufptr = allocate_aligned_buffer<char>(4096, 4096);
 
@@ -460,7 +460,7 @@ SEASTAR_TEST_CASE(datafile_generation_03) {
 
     auto cfp = make_shared<column_family>(std::move(cf));
 
-    return sstables::write_datafile(*cfp, "tests/urchin/sstables/Data3.tmp.db").then([cfp, s] {
+    return sstables::write_datafile(cfp->testonly_all_memtables()[0], "tests/urchin/sstables/Data3.tmp.db").then([cfp, s] {
         return engine().open_file_dma("tests/urchin/sstables/Data3.tmp.db", open_flags::ro).then([] (file f) {
             auto bufptr = allocate_aligned_buffer<char>(4096, 4096);
 
@@ -530,7 +530,7 @@ SEASTAR_TEST_CASE(datafile_generation_04) {
 
     auto cfp = make_shared<column_family>(std::move(cf));
 
-    return sstables::write_datafile(*cfp, "tests/urchin/sstables/Data4.tmp.db").then([cfp, s] {
+    return sstables::write_datafile(cfp->testonly_all_memtables()[0], "tests/urchin/sstables/Data4.tmp.db").then([cfp, s] {
         return engine().open_file_dma("tests/urchin/sstables/Data4.tmp.db", open_flags::ro).then([] (file f) {
             auto bufptr = allocate_aligned_buffer<char>(4096, 4096);
 
