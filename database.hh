@@ -89,6 +89,7 @@ private:
     // generation -> sstable. Ordered by key so we can easily get the most recent.
     std::map<unsigned long, std::unique_ptr<sstables::sstable>> _sstables;
     unsigned _sstable_generation = 1;
+    unsigned _mutation_count = 0;
 private:
     memtable& active_memtable() { return _memtables.back(); }
     struct merge_comparator;
@@ -255,7 +256,12 @@ column_family::find_or_create_partition(const dht::decorated_key& key) {
 inline
 void
 column_family::apply(const mutation& m) {
-    return active_memtable().apply(m);
+    active_memtable().apply(m);
+    // FIXME: something better
+    if (++_mutation_count == 10000) {
+        _mutation_count = 0;
+        seal_active_memtable();
+    }
 }
 
 inline
