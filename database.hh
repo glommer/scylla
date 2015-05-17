@@ -128,6 +128,7 @@ private:
     template <typename Func>
     bool for_all_partitions(Func&& func) const;
     future<> probe_file(sstring sstdir, sstring fname);
+    void seal_on_overflow();
 public:
     // Iterate over all partitions.  Protocol is the same as std::all_of(),
     // so that iteration can be stopped by returning false.
@@ -266,6 +267,12 @@ inline
 void
 column_family::apply(const mutation& m) {
     active_memtable().apply(m);
+    seal_on_overflow();
+}
+
+inline
+void
+column_family::seal_on_overflow() {
     // FIXME: something better
     if (++_mutation_count == 10000) {
         _mutation_count = 0;
@@ -276,7 +283,8 @@ column_family::apply(const mutation& m) {
 inline
 void
 column_family::apply(const frozen_mutation& m) {
-    return active_memtable().apply(m);
+    active_memtable().apply(m);
+    seal_on_overflow();
 }
 
 #endif /* DATABASE_HH_ */
