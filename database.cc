@@ -208,6 +208,12 @@ make_memtable_subscription(const memtable& mt) {
     return st->listen();
 }
 
+// Convert an sstable to a subscription<mutation>
+subscription<mutation>
+make_sstable_subscription(sstables::sstable& sst, schema_ptr schema) {
+    return sst.read_range_rows(std::move(schema), dht::minimum_token(), dht::maximum_token());
+}
+
 template <typename Func>
 future<bool>
 column_family::for_all_partitions(Func&& func) const {
@@ -233,11 +239,12 @@ column_family::for_all_partitions(Func&& func) const {
         // mutation being merged from ptables
         std::experimental::optional<mutation> current;
         lw_shared_ptr<memtable_list> memtables;
+        lw_shared_ptr<sstable_list> sstables;
         Func func;
         bool ok = true;
         bool done() const { return !ok || ptables.empty(); }
         iteration_state(const column_family& cf, Func&& func)
-                : memtables(cf._memtables), func(std::move(func)) {
+                : memtables(cf._memtables), sstables(cf._sstables), func(std::move(func)) {
         }
     };
     iteration_state is(*this, std::move(func));
@@ -247,6 +254,9 @@ column_family::for_all_partitions(Func&& func) const {
             if (!mtp->empty()) {
                 is.tables.emplace_back(make_memtable_subscription(*mtp));
             }
+        }
+        for (auto sstp : *is.sstables | boost::adaptors::map_values) {
+            is.tables.emplace_back(make_sstable_subscription(*sstp, _schema));
         }
         // Get first element from mutation_cursor, if any, and set up ptables
         return parallel_for_each(is.tables, [this, &is] (mutation_cursor& mc) {
