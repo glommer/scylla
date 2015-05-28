@@ -423,9 +423,16 @@ sstables::sstable::read_row(schema_ptr schema, const sstables::key& key) {
 subscription<mutation>
 sstables::sstable::read_range_rows(schema_ptr schema, const dht::token& min_token, const dht::token& max_token,
                                   std::function<future<> (mutation m)> walker) {
+    auto sub = read_range_rows(std::move(schema), min_token, max_token);
+    sub.start(std::move(walker));
+    return sub;
+}
+
+subscription<mutation>
+sstables::sstable::read_range_rows(schema_ptr schema, const dht::token& min_token, const dht::token& max_token) {
     auto pstream = make_lw_shared<stream<mutation>>();
 
-    auto ret = pstream->listen(std::move(walker));
+    auto ret = pstream->listen();
     pstream->started().then([this, pstream, schema, min_token, max_token] {
         if (max_token < min_token) {
             return make_ready_future<>();

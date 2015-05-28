@@ -111,6 +111,16 @@ public:
     subscription<mutation>
     read_range_rows(schema_ptr schema, const dht::token& min, const dht::token& max, std::function<future<> (mutation m)> walker);
 
+    /** Create a mutation stream for a row range.
+     *
+     * @param schema a schema_ptr object describing this table
+     * @param min the minimum token we want to search for (inclusive)
+     * @param max the maximum token we want to search for (inclusive)
+     * @return an unstarted subscription receiving every mutation found.
+     */
+    subscription<mutation>
+    read_range_rows(schema_ptr schema, const dht::token& min, const dht::token& max);
+
     // Write sstable components from a memtable.
     future<> write_components(const memtable& mt);
 private:
