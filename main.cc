@@ -63,7 +63,6 @@ int main(int ac, char** av) {
                                 return i_endpoint_snitch::stop_snitch();
                             });
                         });
-                        return db.invoke_on_all(&database::init_from_data_directory);
                     });
                 });
             }).then([listen_address, seed_provider] {
@@ -75,6 +74,10 @@ int main(int ac, char** av) {
             }).then([&db, &proxy, &qp] {
                 return qp.start(std::ref(proxy), std::ref(db)).then([&qp] {
                     engine().at_exit([&qp] { return qp.stop(); });
+                });
+            }).then([&db] {
+                return db.invoke_on_all([&proxy] (database& db) {
+                    return db.init_from_data_directory();
                 });
             }).then([rpc_address] {
                 return dns::gethostbyname(rpc_address);
