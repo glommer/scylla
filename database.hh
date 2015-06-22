@@ -290,6 +290,7 @@ class database {
     future<> populate(sstring datadir);
     future<> populate_keyspace(sstring datadir, sstring ks_name);
 public:
+    future<> parse_system_tables(distributed<service::storage_proxy>&);
     database();
     database(const db::config&);
     database(database&&) = default;

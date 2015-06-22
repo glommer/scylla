@@ -557,12 +557,50 @@ future<> database::populate(sstring datadir) {
     });
 }
 
+template <typename Func>
+static future<>
+do_parse_system_tables(distributed<service::storage_proxy>& proxy, const column_family& cf, Func&& func) {
+    using namespace db::legacy_schema_tables;
+    static_assert(std::is_same<void, std::result_of_t<Func(schema_result::value_type&&)>>::value,
+                  "bad Func signature");
+
+    auto schema = cf.schema();
+    auto reads = make_lw_shared<seastar::gate>();
+    return cf.for_all_partitions_slow([schema, &proxy, reads, &cf, func = std::move(func)] (const dht::decorated_key& dk, const mutation_partition& p) {
+        auto k = boost::any_cast<sstring>(utf8_type->deserialize(dk._key.get_component(*schema, 0)));
+        if (k == "system") {
+            return true;
+        }
+
+        reads->enter();
+        read_schema_partition_for_keyspace(proxy, cf.schema()->cf_name(), k).then([reads, func = std::move(func)] (auto&& v) {
+            func(std::move(v));
+            reads->leave();
+        });
+        return true;
+    }).discard_result().then([reads] {
+        return reads->close().then([reads] {});
+    });
+}
+
+future<> database::parse_system_tables(distributed<service::storage_proxy>& proxy) {
+    using namespace db::legacy_schema_tables;
+    auto& keyspaces = find_column_family(db::system_keyspace::NAME, KEYSPACES);
+    return do_parse_system_tables(proxy, keyspaces, [this] (schema_result::value_type &&v) {
+        auto ksm = create_keyspace_from_schema_partition(v);
+        keyspace ks(ksm, this->make_keyspace_config(*ksm));
+        this->add_keyspace(ksm->name(), std::move(ks));
+    });
+}
+
 future<>
 database::init_from_data_directory(distributed<service::storage_proxy>& proxy) {
     // FIXME support multiple directories
-    return touch_directory(_cfg->data_file_directories()[0] + "/" + db::system_keyspace::NAME).then([this] {
-        return populate_keyspace(_cfg->data_file_directories()[0], db::system_keyspace::NAME).then([this]() {
-            return populate(_cfg->data_file_directories()[0]);
+    return touch_directory(_cfg->data_file_directories()[0] + "/" + db::system_keyspace::NAME).then([this, &proxy] {
+        return populate_keyspace(_cfg->data_file_directories()[0], db::system_keyspace::NAME).then([this, &proxy]() {
+            return parse_system_tables(proxy).then([this] {
+                return populate(_cfg->data_file_directories()[0]);
+            });
         }).then([this] {
             return init_commitlog();
         });
