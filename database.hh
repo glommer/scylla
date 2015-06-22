@@ -47,6 +47,10 @@
 
 class frozen_mutation;
 
+namespace service {
+class storage_proxy;
+}
+
 namespace sstables {
 
 class sstable;
@@ -295,7 +299,7 @@ public:
         return _commitlog.get();
     }
 
-    future<> init_from_data_directory();
+    future<> init_from_data_directory(distributed<service::storage_proxy>& p);
 
     // but see: create_keyspace(distributed<database>&, sstring)
     void add_keyspace(sstring name, keyspace k);
