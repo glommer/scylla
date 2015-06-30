@@ -52,6 +52,46 @@ private:
     size_t _size;
 };
 
+template <typename T>
+class integral_serializer {
+    const T& _item;
+public:
+    using type = T;
+    using output = data_output;
+    using input = data_input;
+public:
+    integral_serializer(const T& item) : _item(item) {}
+    const serializer<T>& operator()(output& out) const {
+        write(out, _item);
+        return static_cast<const serializer<T>&>(*this);
+    }
+    static void write(output& out, const T& item) {
+        out.write_integral<T>(item);
+    }
+    static void read(T& item, input& in) {
+        item = read(in);
+    }
+    static T read(input& in) {
+        return in.read<T>(in);
+    }
+    static void skip(input& in) {
+        in.skip(sizeof(T));
+    }
+    static size_t size() {
+        return sizeof(T);
+    }
+};
+
+template <> struct serializer<bool> : integral_serializer<bool> { using integral_serializer<bool>::integral_serializer; };
+template <> struct serializer<int8_t> : integral_serializer<int8_t> { using integral_serializer<int8_t>::integral_serializer; };
+template <> struct serializer<uint8_t> : integral_serializer<uint8_t> { using integral_serializer<uint8_t>::integral_serializer; };
+template <> struct serializer<int16_t> : integral_serializer<int16_t> { using integral_serializer<int16_t>::integral_serializer; };
+template <> struct serializer<uint16_t> : integral_serializer<uint16_t> { using integral_serializer<uint16_t>::integral_serializer; };
+template <> struct serializer<int32_t> : integral_serializer<int32_t> { using integral_serializer<int32_t>::integral_serializer; };
+template <> struct serializer<uint32_t> : integral_serializer<uint32_t> { using integral_serializer<uint32_t>::integral_serializer; };
+template <> struct serializer<int64_t> : integral_serializer<int64_t> { using integral_serializer<int64_t>::integral_serializer; };
+template <> struct serializer<uint64_t> : integral_serializer<uint64_t> { using integral_serializer<uint64_t>::integral_serializer; };
+
 template<> serializer<utils::UUID>::serializer(const utils::UUID &);
 template<> void serializer<utils::UUID>::write(output&, const type&);
 template<> void serializer<utils::UUID>::read(utils::UUID&, input&);
