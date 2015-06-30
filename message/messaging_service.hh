@@ -196,7 +196,7 @@ struct serializer {
         return out.write(reinterpret_cast<const char*>(b.c_str()), sz);
     }
     inline auto operator()(input_stream<char>& in, frozen_mutation& v) {
-        static auto sz = data_output::serialized_size<uint32_t>();
+        static auto sz = db::serializer<uint32_t>::size();
         return in.read_exactly(sz).then([&v, &in] (temporary_buffer<char> buf) mutable {
             if (buf.size() != sz) {
                 throw rpc::closed_error();
