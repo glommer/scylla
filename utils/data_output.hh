@@ -94,7 +94,11 @@ public:
     inline data_output& write_integral(T t);
 
     template<typename T>
-    inline std::enable_if_t<std::is_fundamental<T>::value, data_output&> write(T t);
+    inline data_output& write(const T& data) {
+        db::serializer<T> s(data);
+        s(*this);
+        return *this;
+    }
 
     data_output& write(const sstring& s) {
         ensure(serialized_size(s));
@@ -136,11 +140,11 @@ private:
 };
 
 template<>
-inline data_output& data_output::write(bool b) {
+inline data_output& data_output::write(const bool& b) {
     return write<uint8_t>(b);
 }
 template<>
-inline data_output& data_output::write(char c) {
+inline data_output& data_output::write(const char& c) {
     ensure(1);
     *_ptr++ = c;
     return *this;
@@ -153,12 +157,6 @@ inline data_output& data_output::write_integral(
     *reinterpret_cast<net::packed<T> *>(_ptr) = net::hton(t);
     _ptr += sizeof(T);
     return *this;
-}
-
-template<typename T>
-inline std::enable_if_t<std::is_fundamental<T>::value, data_output&> data_output::write(
-        T t) {
-    return write_integral(t);
 }
 
 #endif /* UTILS_DATA_OUTPUT_HH_ */
