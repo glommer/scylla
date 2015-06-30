@@ -40,12 +40,21 @@ public:
     }
 
     template<typename T>
-    static inline std::enable_if_t<std::is_fundamental<T>::value, size_t> serialized_size(const T&) {
+    static inline size_t serialized_size_integral(const T&) {
         return sizeof(T);
     }
     template<typename T>
-    static inline std::enable_if_t<std::is_fundamental<T>::value, size_t> serialized_size() {
+    static inline size_t serialized_size_integral() {
         return sizeof(T);
+    }
+
+    template<typename T>
+    static inline std::enable_if_t<std::is_fundamental<T>::value, size_t> serialized_size(const T& x) {
+        return serialized_size_integral(x);
+    }
+    template<typename T>
+    static inline std::enable_if_t<std::is_fundamental<T>::value, size_t> serialized_size() {
+        return serialized_size_integral<T>();
     }
     static inline size_t serialized_size(const sstring& s) {
         if (s.size() > std::numeric_limits<uint16_t>::max()) {
@@ -76,6 +85,9 @@ public:
         _ptr += s;
         return *this;
     }
+
+    template<typename T>
+    inline data_output& write_integral(T t);
 
     template<typename T>
     inline std::enable_if_t<std::is_fundamental<T>::value, data_output&> write(T t);
@@ -129,13 +141,20 @@ inline data_output& data_output::write(char c) {
     *_ptr++ = c;
     return *this;
 }
+
 template<typename T>
-inline std::enable_if_t<std::is_fundamental<T>::value, data_output&> data_output::write(
+inline data_output& data_output::write_integral(
         T t) {
     ensure(sizeof(T));
     *reinterpret_cast<net::packed<T> *>(_ptr) = net::hton(t);
     _ptr += sizeof(T);
     return *this;
+}
+
+template<typename T>
+inline std::enable_if_t<std::is_fundamental<T>::value, data_output&> data_output::write(
+        T t) {
+    return write_integral(t);
 }
 
 #endif /* UTILS_DATA_OUTPUT_HH_ */
