@@ -8,6 +8,13 @@
 #include "bytes.hh"
 #include "net/byteorder.hh"
 
+namespace db {
+
+template <typename T>
+class serializer;
+
+}
+
 /**
  * Data output interface for Java-esqe wire serialization of
  * basic type, including strings and bytes. The latter I've opted
@@ -49,12 +56,9 @@ public:
     }
 
     template<typename T>
-    static inline std::enable_if_t<std::is_fundamental<T>::value, size_t> serialized_size(const T& x) {
-        return serialized_size_integral(x);
-    }
-    template<typename T>
-    static inline std::enable_if_t<std::is_fundamental<T>::value, size_t> serialized_size() {
-        return serialized_size_integral<T>();
+    static inline size_t serialized_size(const T& x) {
+        db::serializer<T> s(x);
+        return s.size();
     }
     static inline size_t serialized_size(const sstring& s) {
         if (s.size() > std::numeric_limits<uint16_t>::max()) {

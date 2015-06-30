@@ -17,6 +17,7 @@
 #include "core/reactor.hh"
 #include "utils/UUID_gen.hh"
 #include "db/commitlog/commitlog.hh"
+#include "db/serializer.hh"
 
 using namespace db;
 

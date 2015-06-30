@@ -38,6 +38,7 @@
 #include "net/byteorder.hh"
 #include "commitlog.hh"
 #include "db/config.hh"
+#include "db/serializer.hh"
 #include "utils/data_input.hh"
 
 class crc32: public boost::crc_32_type {
