@@ -36,6 +36,7 @@
 #include "dht/i_partitioner.hh"
 #include "version.hh"
 #include "thrift/server.hh"
+#include "exceptions/exceptions.hh"
 
 namespace db {
 namespace system_keyspace {
@@ -399,12 +400,16 @@ static future<> setup_version() {
     ).discard_result();
 }
 
+future<> check_health();
+
 future<> setup(distributed<database>& db, distributed<cql3::query_processor>& qp) {
     auto new_ctx = std::make_unique<query_context>(db, qp);
     qctx.swap(new_ctx);
     assert(!new_ctx);
     return setup_version().then([] {
         return update_schema_version(utils::make_random_uuid()); // FIXME: should not be random
+    }).then([] {
+        return check_health();
     });
 }
 
@@ -762,49 +767,51 @@ future<> update_schema_version(utils::UUID version) {
         return result;
     }
 
-    /**
-     * One of three things will happen if you try to read the system keyspace:
-     * 1. files are present and you can read them: great
-     * 2. no files are there: great (new node is assumed)
-     * 3. files are present but you can't read them: bad
-     * @throws ConfigurationException
-     */
-    public static void checkHealth() throws ConfigurationException
-    {
-        Keyspace keyspace;
-        try
-        {
-            keyspace = Keyspace.open(NAME);
-        }
-        catch (AssertionError err)
-        {
-            // this happens when a user switches from OPP to RP.
-            ConfigurationException ex = new ConfigurationException("Could not read system keyspace!");
-            ex.initCause(err);
-            throw ex;
-        }
-        ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(LOCAL);
+#endif
+/**
+ * One of three things will happen if you try to read the system keyspace:
+ * 1. files are present and you can read them: great
+ * 2. no files are there: great (new node is assumed)
+ * 3. files are present but you can't read them: bad
+ */
+future<> check_health() {
+    using namespace transport::messages;
+    sstring req = "SELECT cluster_name FROM system.%s WHERE key='%s'";
+    return execute_cql(req, LOCAL, LOCAL).then([] (::shared_ptr<result_message> msg) {
 
-        String req = "SELECT cluster_name FROM system.%s WHERE key='%s'";
-        UntypedResultSet result = executeInternal(String.format(req, LOCAL, LOCAL));
+        auto rows = dynamic_pointer_cast<transport::messages::result_message::rows>(msg);
+        auto& rs = rows->rs();
 
-        if (result.isEmpty() || !result.one().has("cluster_name"))
-        {
+        // We always have at least one row because other functions are called before check_health,
+        // therefore populating the local keyspace - even for a fresh node. The particular cluster_name
+        // column, though, may or may not exist.
+        if (rs.size() != 1) {
+            throw std::runtime_error(sprint("Expected 1 row. Found %ld\n", rs.size()));
+        }
+
+        // First (and only) row, firt (and only attribute)
+        auto saved_cluster_name_opt = rs.rows()[0][0];
+        if (rs.empty() || !saved_cluster_name_opt) {
             // this is a brand new node
-            if (!cfs.getSSTables().isEmpty())
-                throw new ConfigurationException("Found system keyspace files, but they couldn't be loaded!");
+            sstring ins_req = "INSERT INTO system.%s (key, cluster_name) VALUES ('%s', '%s')";
+            return execute_cql(ins_req, LOCAL, LOCAL, qctx->db().get_config().cluster_name()).discard_result();
+        } else {
 
-            // no system files.  this is a new node.
-            req = "INSERT INTO system.%s (key, cluster_name) VALUES ('%s', ?)";
-            executeInternal(String.format(req, LOCAL, LOCAL), DatabaseDescriptor.getClusterName());
-            return;
+            auto cdef = *(local()->get_column_definition("cluster_name"));
+            auto saved_cluster_name = boost::any_cast<sstring>(cdef.type->deserialize(*saved_cluster_name_opt));
+
+            sstring cluster_name = qctx->db().get_config().cluster_name();
+
+            if (cluster_name != saved_cluster_name) {
+                throw exceptions::configuration_exception("Saved cluster name " + saved_cluster_name + " != configured name " + cluster_name);
+            }
+
+            return make_ready_future<>();
         }
+    });
+}
 
-        String savedClusterName = result.one().getString("cluster_name");
-        if (!DatabaseDescriptor.getClusterName().equals(savedClusterName))
-            throw new ConfigurationException("Saved cluster name " + savedClusterName + " != configured name " + DatabaseDescriptor.getClusterName());
-    }
-
+#if 0
     public static Collection<Token> getSavedTokens()
     {
         String req = "SELECT tokens FROM system.%s WHERE key='%s'";
