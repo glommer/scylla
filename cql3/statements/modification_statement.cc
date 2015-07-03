@@ -346,6 +346,24 @@ modification_statement::execute(distributed<service::storage_proxy>& proxy, serv
     });
 }
 
+
+future<::shared_ptr<transport::messages::result_message>>
+modification_statement::execute_internal(distributed<service::storage_proxy>& proxy, service::query_state& qs, const query_options& options) {
+    if (has_conditions() || is_counter()) {
+        throw new exceptions::invalid_request_exception("Conditional updates and counters are not supported by internal calls.");
+    }
+
+    return get_mutations(proxy, options, false, options.get_timestamp(qs)).then([&proxy] (auto mutations) {
+        if (mutations.empty()) {
+            return now();
+        }
+        return proxy.local().mutate_locally(std::move(mutations));
+    }).then([] {
+        return make_ready_future<::shared_ptr<transport::messages::result_message>>(
+                ::shared_ptr<transport::messages::result_message>{});
+    });
+}
+
 future<>
 modification_statement::execute_without_condition(distributed<service::storage_proxy>& proxy, service::query_state& qs, const query_options& options) {
     auto cl = options.get_consistency();
