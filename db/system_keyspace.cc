@@ -32,6 +32,10 @@
 #include "service/query_state.hh"
 #include "cql3/query_options.hh"
 #include "cql3/query_processor.hh"
+#include "utils/fb_utilities.hh"
+#include "dht/i_partitioner.hh"
+#include "version.hh"
+#include "thrift/server.hh"
 
 namespace db {
 namespace system_keyspace {
@@ -332,14 +336,6 @@ struct query_context {
 
 static std::unique_ptr<query_context> qctx = {};
 
-future<> setup(distributed<database>& db, distributed<cql3::query_processor>& qp) {
-    auto new_ctx = std::make_unique<query_context>(db, qp);
-    qctx.swap(new_ctx);
-    assert(!new_ctx);
-
-    return make_ready_future<>();
-}
-
 // Sometimes we are not concerned about system tables at all - for instance, when we are testing. In those cases, just pretend
 // we executed the query, and return an empty result
 template <typename... Args>
@@ -384,27 +380,34 @@ static future<::shared_ptr<transport::messages::result_message>> execute_cql(sst
         return StorageService.getPartitioner().decorateKey(key);
     }
 
-    public static void finishStartup()
-    {
-        setupVersion();
-        LegacySchemaTables.saveSystemKeyspaceSchema();
-    }
+#endif
 
-    private static void setupVersion()
-    {
-        String req = "INSERT INTO system.%s (key, release_version, cql_version, thrift_version, native_protocol_version, data_center, rack, partitioner) VALUES (?, ?, ?, ?, ?, ?, ?, ?)";
-        IEndpointSnitch snitch = DatabaseDescriptor.getEndpointSnitch();
-        executeOnceInternal(String.format(req, LOCAL),
-                            LOCAL,
-                            FBUtilities.getReleaseVersionString(),
-                            QueryProcessor.CQL_VERSION.toString(),
-                            cassandraConstants.VERSION,
-                            String.valueOf(Server.CURRENT_VERSION),
-                            snitch.getDatacenter(FBUtilities.getBroadcastAddress()),
-                            snitch.getRack(FBUtilities.getBroadcastAddress()),
-                            DatabaseDescriptor.getPartitioner().getClass().getName());
-    }
+static future<> setup_version() {
+    sstring req = "INSERT INTO system.%s (key, release_version, cql_version, thrift_version, native_protocol_version, data_center, rack, partitioner) VALUES ('%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s')";
+    auto& snitch = locator::i_endpoint_snitch::get_local_snitch_ptr();
 
+    return execute_cql(req,
+                             db::system_keyspace::LOCAL,
+                             db::system_keyspace::LOCAL,
+                             version::release(),
+                             cql3::query_processor::CQL_VERSION,
+                             org::apache::cassandra::thrift_version,
+                             version::current(),
+                             snitch->get_datacenter(utils::fb_utilities::get_broadcast_address()),
+                             snitch->get_rack(utils::fb_utilities::get_broadcast_address()),
+                             dht::global_partitioner().name()
+    ).discard_result();
+}
+
+
+future<> setup(distributed<database>& db, distributed<cql3::query_processor>& qp) {
+    auto new_ctx = std::make_unique<query_context>(db, qp);
+    qctx.swap(new_ctx);
+    assert(!new_ctx);
+    return setup_version();
+}
+
+#if 0
     /**
      * Write compaction log, except columfamilies under system keyspace.
      *
