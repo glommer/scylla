@@ -28,6 +28,10 @@
 #include "types.hh"
 #include "service/storage_service.hh"
 #include "service/storage_proxy.hh"
+#include "service/client_state.hh"
+#include "service/query_state.hh"
+#include "cql3/query_options.hh"
+#include "cql3/query_processor.hh"
 
 namespace db {
 namespace system_keyspace {
@@ -300,6 +304,50 @@ schema_ptr built_indexes() {
         "historic sstable read rates"
         ));
     return sstable_activity;
+}
+
+static thread_local service::client_state client_state = service::client_state(service::client_state::for_internal_calls());
+struct query_context {
+    distributed<database>& _db;
+    distributed<cql3::query_processor>& _qp;
+
+    query_context(distributed<database>& db, distributed<cql3::query_processor>& qp) : _db(db), _qp(qp) {}
+
+    template <typename... Args>
+    future<::shared_ptr<transport::messages::result_message>> execute_cql(sstring text, Args&&... args) {
+        cql3::query_options qo{db::consistency_level::ONE, std::experimental::nullopt, {}, false,
+                              cql3::query_options::specific_options::DEFAULT, 3, serialization_format::use_32_bit()};
+
+        sstring req = sprint(text, std::forward<Args>(args)...);
+
+        return do_with(std::move(qo), [this, req = std::move(req)] (auto& qo) {
+            auto query_state = ::make_shared<service::query_state>(client_state);
+            return this->_qp.local().process(req, *query_state, qo).finally([query_state] {});
+        });
+    }
+    database& db() {
+        return _db.local();
+    }
+};
+
+static std::unique_ptr<query_context> qctx = {};
+
+future<> setup(distributed<database>& db, distributed<cql3::query_processor>& qp) {
+    auto new_ctx = std::make_unique<query_context>(db, qp);
+    qctx.swap(new_ctx);
+    assert(!new_ctx);
+
+    return make_ready_future<>();
+}
+
+// Sometimes we are not concerned about system tables at all - for instance, when we are testing. In those cases, just pretend
+// we executed the query, and return an empty result
+template <typename... Args>
+static future<::shared_ptr<transport::messages::result_message>> execute_cql(sstring text, Args&&... args) {
+    if (qctx) {
+        return qctx->execute_cql(text, std::forward<Args>(args)...);
+    }
+    return make_ready_future<::shared_ptr<transport::messages::result_message>>(::make_shared<transport::messages::result_message::void_message>());
 }
 
 #if 0
