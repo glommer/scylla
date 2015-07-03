@@ -196,6 +196,18 @@ select_statement::execute(distributed<service::storage_proxy>& proxy, service::q
 }
 
 future<shared_ptr<transport::messages::result_message>>
+select_statement::execute_internal(distributed<service::storage_proxy>& proxy, service::query_state& state, const query_options& options) {
+    int32_t limit = get_limit(options);
+    auto now = db_clock::now();
+    auto cmd = ::make_lw_shared<query::read_command>(_schema->id(), make_partition_slice(options), limit, to_gc_clock(now));
+
+    return proxy.local().query_internal(cmd, _restrictions->get_partition_key_ranges(options))
+        .then([this, &options, now, cmd] (auto result) {
+            return this->process_results(std::move(result), cmd, options, now);
+        });
+}
+
+future<shared_ptr<transport::messages::result_message>>
 select_statement::execute(distributed<service::storage_proxy>& proxy, lw_shared_ptr<query::read_command> cmd, std::vector<query::partition_range>&& partition_ranges,
         service::query_state& state, const query_options& options, db_clock::time_point now) {
     return proxy.local().query(cmd, std::move(partition_ranges), options.get_consistency())
