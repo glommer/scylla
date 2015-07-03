@@ -16,6 +16,8 @@ class database;
 
 namespace org { namespace apache { namespace cassandra {
 
+static constexpr auto thrift_version = "20.1.0";
+
 class CassandraCobSvIfFactory;
 
 }}}
