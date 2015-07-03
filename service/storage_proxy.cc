@@ -1603,6 +1603,39 @@ storage_proxy::query(lw_shared_ptr<query::read_command> cmd, std::vector<query::
     }).finally([cmd] {});
 }
 
+future<foreign_ptr<lw_shared_ptr<query::result>>>
+storage_proxy::query_internal(lw_shared_ptr<query::read_command> cmd, std::vector<query::partition_range>&& partition_ranges) {
+    static auto make_empty = [] {
+        return make_ready_future<foreign_ptr<lw_shared_ptr<query::result>>>(make_foreign(make_lw_shared<query::result>()));
+    };
+
+    if (partition_ranges.empty()) {
+        return make_empty();
+    }
+
+    if (partition_ranges[0].is_singular()) { // do not support mixed partitions (yet?)
+        try {
+            return query_singular_local(cmd, partition_ranges[0]);
+        } catch (const no_such_column_family&) {
+            return make_empty();
+        }
+    }
+
+    if (partition_ranges.size() != 1) {
+        // FIXME: implement
+        throw std::runtime_error("more than one non singular range not supported yet");
+    }
+
+    // FIXME: Respect cmd->row_limit to avoid unnecessary transfer
+    query::result_merger merger;
+    merger.reserve(smp::count);
+    return _db.map_reduce(std::move(merger), [cmd, partition_ranges = std::move(partition_ranges)] (database& db) {
+        return db.query(*cmd, partition_ranges).then([] (auto&& f) {
+            return make_foreign(std::move(f));
+        });
+    }).finally([cmd] {});
+}
+
 // The query_local() method returns a result set value object (which is
 // copyable) that is accessible on the local CPU without having to use
 // the foreign_ptr<> annotation. The result set object is constructed by
