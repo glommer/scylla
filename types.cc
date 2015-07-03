@@ -447,10 +447,18 @@ struct uuid_type_impl : abstract_type {
         return std::hash<bytes_view>()(v);
     }
     virtual bytes from_string(sstring_view s) const override {
-        throw std::runtime_error("not implemented");
+        auto uuid = utils::UUID(s);
+
+        bytes b(bytes::initialized_later(), serialized_size(uuid));
+
+        bytes::iterator out = b.begin();
+        boost::any v(uuid);
+        serialize(v, out);
+        return b;
     }
     virtual sstring to_string(const bytes& b) const override {
-        throw std::runtime_error("not implemented");
+        auto uuid = boost::any_cast<utils::UUID>(deserialize(b));
+        return uuid.to_sstring();
     }
     virtual ::shared_ptr<cql3::cql3_type> as_cql3_type() const override {
         return cql3::cql3_type::uuid;
