@@ -399,12 +399,13 @@ static future<> setup_version() {
     ).discard_result();
 }
 
-
 future<> setup(distributed<database>& db, distributed<cql3::query_processor>& qp) {
     auto new_ctx = std::make_unique<query_context>(db, qp);
     qctx.swap(new_ctx);
     assert(!new_ctx);
-    return setup_version();
+    return setup_version().then([] {
+        return update_schema_version(utils::make_random_uuid()); // FIXME: should not be random
+    });
 }
 
 #if 0
@@ -622,12 +623,14 @@ future<> setup(distributed<database>& db, distributed<cql3::query_processor>& qp
         String req = "UPDATE system.%s USING TTL 2592000 SET hints_dropped[ ? ] = ? WHERE peer = ?";
         executeInternal(String.format(req, PEER_EVENTS), timePeriod, value, ep);
     }
+#endif
 
-    public static synchronized void updateSchemaVersion(UUID version)
-    {
-        String req = "INSERT INTO system.%s (key, schema_version) VALUES ('%s', ?)";
-        executeInternal(String.format(req, LOCAL, LOCAL), version);
-    }
+future<> update_schema_version(utils::UUID version) {
+    sstring req = "INSERT INTO system.%s (key, schema_version) VALUES ('%s', %s)";
+    return execute_cql(req, LOCAL, LOCAL, version.to_sstring()).discard_result();
+}
+
+#if 0
 
     private static Set<String> tokensAsSet(Collection<Token> tokens)
     {
