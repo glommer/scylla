@@ -1111,26 +1111,44 @@ void make(database& db, bool durable) {
     }
 }
 
-utils::UUID get_local_host_id() {
-#if 0
-    String req = "SELECT host_id FROM system.%s WHERE key='%s'";
-    UntypedResultSet result = executeInternal(String.format(req, LOCAL, LOCAL));
+future<utils::UUID> get_local_host_id() {
+    using namespace transport::messages;
+    sstring req = "SELECT host_id FROM system.%s WHERE key='%s'";
+    return execute_cql(req, LOCAL, LOCAL).then([] (::shared_ptr<result_message> msg) {
+        auto new_id = [] {
+            auto host_id = utils::make_random_uuid();
+            return make_ready_future<utils::UUID>(host_id);
+        };
 
-    // Look up the Host UUID (return it if found)
-    if (!result.isEmpty() && result.one().has("host_id"))
-        return result.one().getUUID("host_id");
-#endif
+        auto rows = dynamic_pointer_cast<transport::messages::result_message::rows>(msg);
+        if (!rows) {
+            return new_id();
+        }
 
-    // ID not found, generate a new one, persist, and then return it.
-    auto host_id = utils::make_random_uuid();
-    //logger.warn("No host ID found, created {} (Note: This should happen exactly once per node).", hostId);
-    return set_local_host_id(host_id);
+        auto& rs = rows->rs();
+
+        if (rs.size() != 1) {
+            throw std::runtime_error(sprint("Expected 1 row. Found %ld\n", rs.size()));
+        }
+        auto host_id_opt = rs.rows()[0][0];
+        if (!host_id_opt) {
+            // ID not found, generate a new one, persist, and then return it.
+            return new_id();
+        }
+        auto cdef = *(local()->get_column_definition("host_id"));
+        auto host_id = boost::any_cast<utils::UUID>(cdef.type->deserialize(*host_id_opt));
+
+        return make_ready_future<utils::UUID>(host_id);
+    });
 }
 
-utils::UUID set_local_host_id(const utils::UUID& host_id) {
-    // String req = "INSERT INTO system.%s (key, host_id) VALUES ('%s', ?)";
-    // executeInternal(String.format(req, LOCAL, LOCAL), hostId);
-    return host_id;
+future<utils::UUID> set_local_host_id(const utils::UUID& host_id) {
+    sstring req = "INSERT INTO system.%s (key, host_id) VALUES ('%s', %s)";
+    return execute_cql(req, LOCAL, LOCAL, host_id.to_sstring()).then([] (auto msg) {
+        return force_blocking_flush(LOCAL);
+    }).then([host_id] {
+        return host_id;
+    });
 }
 std::unordered_map<gms::inet_address, locator::endpoint_dc_rack>
 load_dc_rack_info()
