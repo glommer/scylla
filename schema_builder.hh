@@ -47,6 +47,14 @@ public:
     gc_clock::duration default_time_to_live() const {
         return _raw._default_time_to_live;
     }
+
+    void set_default_validator(const data_type& validator) {
+        _raw._default_validator = validator;
+    }
+    const data_type& get_default_validator() const {
+        return _raw._default_validator;
+    }
+
     void set_bloom_filter_fp_chance(double fp) {
         _raw._bloom_filter_fp_chance = fp;
     }
