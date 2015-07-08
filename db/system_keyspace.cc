@@ -397,12 +397,40 @@ static future<> setup_version() {
 future<> check_health();
 future<> force_blocking_flush(sstring cfname);
 
+// Changing the real load_dc_rack_info into a future would trigger a tidal wave of futurization that would spread
+// even into simple string operations like get_rack() / get_dc(). We will cache those at startup, and then change
+// our view of it every time we do updates on those values.
+//
+// The caches are kept separate so we don't suffer from normalization problems, since the values are not guaranteed to be
+// updated together or even sequentially at the same core.
+static std::unordered_map<gms::inet_address, sstring> _cached_rack_info;
+static std::unordered_map<gms::inet_address, sstring> _cached_dc_info;
+
+static future<> build_dc_rack_info() {
+    return execute_cql("SELECT peer, data_center, rack from system.%s", PEERS).then([] (::shared_ptr<cql3::untyped_result_set> msg) {
+        for (auto& row: *msg) {
+            // Not ideal to assume ipv4 here, but currently this is what the cql types wraps.
+            net::ipv4_address peer = row.get_as<net::ipv4_address>("peer");
+            if (row.has("data_center") && row.has("rack")) {
+                gms::inet_address gms_addr(std::move(peer));
+                sstring dc = row.get_as<sstring>("data_center");
+                sstring rack = row.get_as<sstring>("rack");
+
+                _cached_rack_info.emplace(gms_addr, rack);
+                _cached_dc_info.emplace(gms_addr, dc);
+            }
+        }
+    });
+}
+
 future<> setup(distributed<database>& db, distributed<cql3::query_processor>& qp) {
     auto new_ctx = std::make_unique<query_context>(db, qp);
     qctx.swap(new_ctx);
     assert(!new_ctx);
     return setup_version().then([] {
         return update_schema_version(utils::make_random_uuid()); // FIXME: should not be random
+    }).then([] {
+        return build_dc_rack_info();
     }).then([] {
         return check_health();
     });
@@ -1109,23 +1137,18 @@ future<utils::UUID> set_local_host_id(const utils::UUID& host_id) {
 }
 
 std::unordered_map<gms::inet_address, locator::endpoint_dc_rack>
-load_dc_rack_info()
-{
-    std::unordered_map<gms::inet_address, locator::endpoint_dc_rack> result;
-#if 0 //TODO
-    for (UntypedResultSet.Row row : executeInternal("SELECT peer, data_center, rack from system." + PEERS))
-    {
-        InetAddress peer = row.getInetAddress("peer");
-        if (row.has("data_center") && row.has("rack"))
-        {
-            Map<String, String> dcRack = new HashMap<>();
-            dcRack.put("data_center", row.getString("data_center"));
-            dcRack.put("rack", row.getString("rack"));
-            result.put(peer, dcRack);
+load_dc_rack_info() {
+    std::unordered_map<gms::inet_address, locator::endpoint_dc_rack> results;
+
+    for (auto& pair: _cached_dc_info) {
+        if (_cached_rack_info.count(pair.first) == 0) {
+            continue;
         }
+
+        locator::endpoint_dc_rack endpoint = { pair.second, _cached_rack_info.at(pair.first) };
+        results.emplace(pair.first, endpoint);
     }
-#endif
-    return result;
+    return results;
 }
 
 future<lw_shared_ptr<query::result_set>>
