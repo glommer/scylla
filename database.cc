@@ -625,7 +625,7 @@ database::init_commitlog() {
         cfg.commit_log_location = logdir;
 
         return db::commitlog::create_commitlog(cfg).then([this](db::commitlog&& log) {
-            _commitlog = std::make_unique<db::commitlog>(std::move(log));
+            _commitlog = make_lw_shared<db::commitlog>(std::move(log));
         });
     });
 }
@@ -1009,7 +1009,7 @@ future<> database::apply(const frozen_mutation& m) {
     // I'm doing a nullcheck here since the init code path for db etc
     // is a little in flux and commitlog is created only when db is
     // initied from datadir.
-    if (_commitlog != nullptr) {
+    if (_commitlog) {
         auto uuid = m.column_family_id();
         bytes_view repr = m.representation();
         auto write_repr = [repr] (data_output& out) { out.write(repr.begin(), repr.end()); };

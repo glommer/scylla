@@ -30,6 +30,7 @@
 #include "core/gate.hh"
 #include "cql3/column_specification.hh"
 #include "db/commitlog/replay_position.hh"
+#include "db/commitlog/commitlog.hh"
 #include <limits>
 #include <cstddef>
 #include "schema.hh"
@@ -62,7 +63,6 @@ namespace db {
 template<typename T>
 class serializer;
 
-class commitlog;
 class config;
 
 namespace system_keyspace {
@@ -315,7 +315,7 @@ class database {
     std::unordered_map<sstring, keyspace> _keyspaces;
     std::unordered_map<utils::UUID, lw_shared_ptr<column_family>> _column_families;
     std::unordered_map<std::pair<sstring, sstring>, utils::UUID, utils::tuple_hash> _ks_cf_to_uuid;
-    std::unique_ptr<db::commitlog> _commitlog;
+    lw_shared_ptr<db::commitlog> _commitlog;
     std::unique_ptr<db::config> _cfg;
 
     future<> init_commitlog();
