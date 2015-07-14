@@ -35,12 +35,13 @@
 
 thread_local logging::logger dblog("database");
 
-column_family::column_family(schema_ptr schema, config config)
+column_family::column_family(schema_ptr schema, config config, lw_shared_ptr<db::commitlog> cl)
     : _schema(std::move(schema))
     , _config(std::move(config))
     , _memtables(make_lw_shared(memtable_list{}))
     , _sstables(make_lw_shared<sstable_list>())
     , _cache(_schema, sstables_as_mutation_source(), global_cache_tracker())
+    , _commitlog(std::move(cl))
 {
     add_memtable();
 }
@@ -666,7 +667,7 @@ void database::drop_keyspace(const sstring& name) {
 
 void database::add_column_family(schema_ptr schema, column_family::config cfg) {
     auto uuid = schema->id();
-    auto cf = make_lw_shared<column_family>(schema, std::move(cfg));
+    auto cf = make_lw_shared<column_family>(schema, std::move(cfg), _commitlog);
     auto ks = _keyspaces.find(schema->ks_name());
     if (ks == _keyspaces.end()) {
         throw std::invalid_argument("Keyspace " + schema->ks_name() + " not defined");
