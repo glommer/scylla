@@ -87,14 +87,14 @@ void create_table_from_table_row_and_column_rows(schema_builder& builder, const 
 
 std::vector<column_definition> create_columns_from_column_rows(const schema_result::mapped_type& rows,
                                                                const sstring& keyspace,
-                                                               const sstring& table,/*,
-                                                               AbstractType<?> rawComparator, */
+                                                               const sstring& table,
+                                                               const cell_name_type_ptr& rawComparator,
                                                                bool is_super);
 
 column_definition create_column_from_column_row(const query::result_set_row& row,
                                                 sstring keyspace,
-                                                sstring table, /*,
-                                                AbstractType<?> rawComparator, */
+                                                sstring table,
+                                                cell_name_type_ptr comparator,
                                                 bool is_super);
 
 

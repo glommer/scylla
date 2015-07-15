@@ -43,6 +43,8 @@
 #include <boost/range/algorithm/copy.hpp>
 #include <boost/range/adaptor/map.hpp>
 
+#include "cell_name.hh"
+
 using namespace db::system_keyspace;
 
 /** system.schema_* tables used to store keyspace/table/type attributes prior to C* 3.0 */
@@ -1033,7 +1035,7 @@ future<> save_system_keyspace_schema() {
             adder.add("subcomparator", table.comparator.subtype(1).toString());
 #endif
         } else {
-            m.set_clustered_cell(ckey, "comparator", table->regular_column_name_type()->name(), timestamp);
+            m.set_clustered_cell(ckey, "comparator", table->cell_name_type()->to_sstring(), timestamp);
         }
 
         m.set_clustered_cell(ckey, "bloom_filter_fp_chance", table->bloom_filter_fp_chance(), timestamp);
@@ -1237,10 +1239,16 @@ future<> save_system_keyspace_schema() {
         auto ks_name = table_row.get_nonnull<sstring>("keyspace_name");
         auto cf_name = table_row.get_nonnull<sstring>("columnfamily_name");
 
-#if 0
-        AbstractType<?> rawComparator = TypeParser.parse(result.getString("comparator"));
-        AbstractType<?> subComparator = result.has("subcomparator") ? TypeParser.parse(result.getString("subcomparator")) : null;
-#endif
+        sstring comp(table_row.get_nonnull<sstring>("comparator")); // type_parser takes a reference
+        auto parser = db::marshal::type_parser(comp);
+        auto raw_comparator = parser.parse_compound();
+
+        cell_name_type_ptr sub_comparator = nullptr;
+        if (table_row.has("sub_comparator")) {
+            sstring subcomp(table_row.get_nonnull<sstring>("subcomparator"));
+            auto subparser = db::marshal::type_parser(subcomp);
+            sub_comparator = parser.parse_compound();
+        }
 
         cf_type cf = cf_type::standard;
         if (table_row.has("type")) {
@@ -1249,14 +1257,13 @@ future<> save_system_keyspace_schema() {
                 fail(unimplemented::cause::SUPER);
             }
         }
-#if 0
-        AbstractType<?> fullRawComparator = CFMetaData.makeRawAbstractType(rawComparator, subComparator);
-#endif
+
+        auto full_raw_comparator = raw_comparator->accumulate(std::move(sub_comparator));
 
         std::vector<column_definition> column_defs = create_columns_from_column_rows(serialized_column_definitions,
                                                                         ks_name,
-                                                                        cf_name,/*,
-                                                                        fullRawComparator, */
+                                                                        cf_name,
+                                                                        full_raw_comparator,
                                                                         cf == cf_type::super);
 
         bool is_dense;
@@ -1268,9 +1275,9 @@ future<> save_system_keyspace_schema() {
             throw std::runtime_error("not implemented");
         }
 
+        full_raw_comparator->update_dense(is_dense);
+        builder.set_cell_name_type(full_raw_comparator);
 #if 0
-        CellNameType comparator = CellNames.fromAbstractType(fullRawComparator, isDense);
-
         // if we are upgrading, we use id generated from names initially
         UUID cfId = result.has("cf_id")
                   ? result.getUUID("cf_id")
@@ -1421,21 +1428,21 @@ future<> save_system_keyspace_schema() {
 
     std::vector<column_definition> create_columns_from_column_rows(const schema_result::mapped_type& rows,
                                                                    const sstring& keyspace,
-                                                                   const sstring& table, /*,
-                                                                   AbstractType<?> rawComparator, */
+                                                                   const sstring& table,
+                                                                   const cell_name_type_ptr& raw_comparator,
                                                                    bool is_super)
     {
         std::vector<column_definition> columns;
         for (auto&& row : rows->rows()) {
-            columns.emplace_back(std::move(create_column_from_column_row(row, keyspace, table, /*, rawComparator, */ is_super)));
+            columns.emplace_back(std::move(create_column_from_column_row(row, keyspace, table,  raw_comparator, is_super)));
         }
         return columns;
     }
 
     column_definition create_column_from_column_row(const query::result_set_row& row,
                                                 sstring keyspace,
-                                                sstring table, /*,
-                                                AbstractType<?> rawComparator, */
+                                                sstring table,
+                                                cell_name_type_ptr raw_comparator,
                                                 bool is_super)
     {
         auto kind = deserialize_kind(row.get_nonnull<sstring>("type"));
