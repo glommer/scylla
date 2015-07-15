@@ -404,6 +404,7 @@ public:
         std::vector<std::pair<bytes_view, atomic_cell_view>> cells;
         mutation materialize() const;
     };
+    virtual sstring hashed_name() const = 0;
     virtual data_type name_comparator() const = 0;
     virtual data_type value_comparator() const = 0;
     shared_ptr<cql3::column_specification> make_collection_receiver(shared_ptr<cql3::column_specification> collection, bool is_key) const;
@@ -476,6 +477,16 @@ public:
         }
         return i->second;
     }
+
+    // There is no guarantee that we will hash the same as Origin on this.
+    //
+    // Normally this is fine, because Origin will read this info from disk, and populate
+    // itself so as long as the hash values are well distributed we're covered. But we will
+    // have problems if we want to have mixed nodes, since the types won't match
+    static sstring get_hash_sstring(BaseTypes... keys) {
+        auto val = hash_type()(std::make_tuple(keys...));
+        return to_sstring_sprintf<sstring>(val, "%llx");
+    }
 };
 
 template <typename InternedType, typename... BaseTypes>
@@ -501,6 +512,7 @@ public:
     data_type get_values_type() const { return _values; }
     virtual data_type name_comparator() const override { return _keys; }
     virtual data_type value_comparator() const override { return _values; }
+    virtual sstring hashed_name() const override { return intern::get_hash_sstring(_keys, _values, _is_multi_cell) + ":" + name(); }
     virtual bool is_multi_cell() const override { return _is_multi_cell; }
     virtual data_type freeze() const override;
     virtual bool is_compatible_with_frozen(const collection_type_impl& previous) const override;
@@ -541,6 +553,7 @@ public:
     data_type get_elements_type() const { return _elements; }
     virtual data_type name_comparator() const override { return _elements; }
     virtual data_type value_comparator() const override;
+    virtual sstring hashed_name() const override { return intern::get_hash_sstring(_elements, _is_multi_cell) + ":" + name(); }
     virtual bool is_multi_cell() const override { return _is_multi_cell; }
     virtual data_type freeze() const override;
     virtual bool is_compatible_with_frozen(const collection_type_impl& previous) const override;
@@ -580,6 +593,7 @@ public:
     data_type get_elements_type() const { return _elements; }
     virtual data_type name_comparator() const override;
     virtual data_type value_comparator() const override;
+    virtual sstring hashed_name() const override { return intern::get_hash_sstring(_elements, _is_multi_cell) + ":" + name(); }
     virtual bool is_multi_cell() const override { return _is_multi_cell; }
     virtual data_type freeze() const override;
     virtual bool is_compatible_with_frozen(const collection_type_impl& previous) const override;
