@@ -120,6 +120,11 @@ public:
     void set_is_dense(bool is_dense) {
         _raw._is_dense = is_dense;
     }
+
+    void set_cell_name_type(cell_name_type_ptr ptr) {
+        _raw._cell_name_type = ptr;
+    }
+
     column_definition& find_column(const cql3::column_identifier&);
     schema_builder& with_column(const column_definition& c);
     schema_builder& with_column(bytes name, data_type type, column_kind kind = column_kind::regular_column);
