@@ -20,6 +20,8 @@
 #include <boost/date_time/posix_time/posix_time.hpp>
 #include <boost/date_time/c_local_time_adjustor.hpp>
 #include <boost/locale/encoding_utf.hpp>
+#include <boost/algorithm/string/split.hpp>
+#include <boost/algorithm/string/classification.hpp>
 
 template<typename T>
 struct simple_type_traits {
@@ -1993,6 +1995,60 @@ thread_local const shared_ptr<const abstract_type> float_type(make_shared<float_
 thread_local const shared_ptr<const abstract_type> double_type(make_shared<double_type_impl>());
 thread_local const data_type empty_type(make_shared<empty_type_impl>());
 
+static collection_type parse_collection_type(sstring name) {
+    static sstring frozen_str("org.apache.cassandra.db.marshal.FrozenType");
+
+    // given a string of form type(X) will return X.
+    auto match_str = [&name] (sstring token) {
+        if (name.compare(0, token.size(), token) == 0) {
+            name = name.substr(token.size() + 1, name.size() - token.size() - 2);
+            return true;
+        }
+        return false;
+    };
+
+    bool is_multi_cell = true;
+    if (match_str(frozen_str)) {
+        is_multi_cell = false;
+    }
+
+    auto hash = name.find(':');
+    if (hash != sstring::npos) {
+        // As long as we always use get_instance to generate the types, they
+        // will always hash equally. So instead of complicating the collection
+        // internals with a specialized version of get_instance to look for
+        // this particular hash, just remove the string and recreate the type
+        name = name.substr(hash + 1, name.size());
+    }
+
+    auto params = [&name] (size_t expected) {
+        std::vector<sstring> types_str;
+        boost::split(types_str, name, boost::is_any_of(","));
+        if (types_str.size() != expected) {
+            throw std::invalid_argument(sprint("Could not parse types in %s\n", name));
+        }
+
+        std::vector<data_type> types_vec;
+        for (auto&&t : types_str) {
+            types_vec.push_back(abstract_type::parse_type(t));
+        }
+        return types_vec;
+    };
+
+    if (match_str("org.apache.cassandra.db.marshal.MapType")) {
+        auto p = params(2);
+        return static_pointer_cast<const collection_type_impl>(map_type_impl::get_instance(p[0], p[1], is_multi_cell));
+    } else if (match_str("org.apache.cassandra.db.marshal.SetType")) {
+        auto p = params(1);
+        return static_pointer_cast<const collection_type_impl>(set_type_impl::get_instance(p[0], is_multi_cell));
+    } else if (match_str("org.apache.cassandra.db.marshal.ListType")) {
+        auto p = params(1);
+        return static_pointer_cast<const collection_type_impl>(list_type_impl::get_instance(p[0], is_multi_cell));
+    } else {
+        throw std::invalid_argument(sprint("unknown type: %s\n", name));
+    }
+}
+
 data_type abstract_type::parse_type(const sstring& name)
 {
     static thread_local const std::unordered_map<sstring, data_type> types = {
@@ -2011,8 +2067,8 @@ data_type abstract_type::parse_type(const sstring& name)
         { "org.apache.cassandra.db.marshal.EmptyType",       empty_type     },
     };
     auto it = types.find(name);
-    if (it == types.end()) {
-        throw std::invalid_argument(sprint("unknown type: %s\n", name));
+    if (it != types.end()) {
+        return it->second;
     }
-    return it->second;
+    return parse_collection_type(name);
 }
