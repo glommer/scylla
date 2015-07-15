@@ -38,6 +38,7 @@ namespace marshal {
 class type_parser {
     sstring _str;
     size_t _idx;
+    bool _is_collection_multicell = true;
 
 #if 0
     // A cache of parsed string, specially useful for DynamicCompositeType
