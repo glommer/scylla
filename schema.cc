@@ -348,5 +348,32 @@ schema_ptr schema_builder::build(compact_storage cp) {
     // Dense means that no part of the comparator stores a CQL column name. This means
     // COMPACT STORAGE with at least one columnAliases (otherwise it's a thrift "static" CF).
     s._raw._is_dense = (cp == compact_storage::yes) && (s.clustering_key_size() == 0);
+
+    std::vector<collection_type> multi_cell = {};
+    for (auto& cdef: s.all_columns_in_select_order()) {
+        if (cdef.type->is_collection()) {
+            auto collection = static_pointer_cast<const collection_type_impl>(cdef.type);
+            if (collection->is_multi_cell()) {
+                multi_cell.push_back(collection);
+            }
+        }
+    }
+
+    if (s.clustering_key_size() == 0) {
+        if (cp == compact_storage::yes) {
+            s._raw._cell_name_type = ::make_shared<simple_sparse_cell_name_type>(std::vector<data_type>({ _raw._regular_column_name_type }));
+        } else {
+            s._raw._cell_name_type = ::make_shared<compound_sparse_cell_name_type>(std::vector<data_type>({ _raw._regular_column_name_type }), multi_cell);
+        }
+    } else {
+        auto ck_types = s._clustering_key_type->types();
+        if ((cp == compact_storage::yes) && s.clustering_key_size() == 1) {
+            s._raw._cell_name_type = ::make_shared<simple_dense_cell_name_type>(ck_types);
+        } else if (cp == compact_storage::yes) {
+            s._raw._cell_name_type = ::make_shared<compound_dense_cell_name_type>(ck_types, multi_cell);
+        } else {
+            s._raw._cell_name_type = ::make_shared<compound_sparse_cell_name_type>(ck_types, multi_cell);
+        }
+    }
     return make_lw_shared<schema>(std::move(s));
 }

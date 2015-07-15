@@ -13,6 +13,7 @@
 #include "core/shared_ptr.hh"
 #include "types.hh"
 #include "compound.hh"
+#include "cell_name.hh"
 #include "gc_clock.hh"
 #include "unimplemented.hh"
 #include "utils/UUID.hh"
@@ -168,6 +169,7 @@ private:
         gc_clock::duration _default_time_to_live = gc_clock::duration::zero();
         data_type _default_validator = bytes_type;
         data_type _regular_column_name_type;
+        cell_name_type_ptr _cell_name_type;
         double _bloom_filter_fp_chance = 0.01;
         compression_parameters _compressor_params;
         bool _is_dense = false;
@@ -287,6 +289,10 @@ public:
 
     int32_t max_index_interval() const {
         return _raw._max_index_interval;
+    }
+
+    cell_name_type_ptr cell_name_type() const {
+        return _raw._cell_name_type;
     }
 
     const column_definition* get_column_definition(const bytes& name) const;
