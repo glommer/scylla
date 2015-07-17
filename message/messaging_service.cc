@@ -74,6 +74,9 @@ future<> des_sstring(input_stream<char>& in, sstring& v) {
     });
 }
 
+
+constexpr int32_t messaging_service::current_version;
+
 distributed<messaging_service> _the_messaging_service;
 
 future<> deinit_messaging_service() {
