@@ -118,8 +118,6 @@ void create_table_statement::apply_properties_to(schema_builder& builder) {
     cfmd.defaultValidator(defaultValidator)
         .addAllColumnDefinitions(getColumns(cfmd))
 #endif
-    builder.set_is_dense(_is_dense);
-
     add_column_metadata_from_aliases(builder, _key_aliases, _partition_key_types, column_kind::partition_key);
     add_column_metadata_from_aliases(builder, _column_aliases, _clustering_key_types, column_kind::clustering_key);
 #if 0
@@ -201,10 +199,6 @@ create_table_statement::raw_statement::raw_statement(::shared_ptr<cf_name> name,
         key_types.emplace_back(t);
     }
     stmt->_partition_key_types = key_types;
-
-    // Dense means that no part of the comparator stores a CQL column name. This means
-    // COMPACT STORAGE with at least one columnAliases (otherwise it's a thrift "static" CF).
-    stmt->_is_dense = _use_compact_storage && !_column_aliases.empty();
 
     // Handle column aliases
     if (_column_aliases.empty()) {
