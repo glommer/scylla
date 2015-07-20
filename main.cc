@@ -208,6 +208,8 @@ int main(int ac, char** av) {
                 }).then([api_address, api_port] {
                     print("Seastar HTTP server listening on %s:%s ...\n", api_address, api_port);
                 });
+            }).then([&qp] {
+                return streaming::stream_session::test(qp);
             });
         }).or_terminate();
     });
