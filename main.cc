@@ -158,6 +158,8 @@ int main(int ac, char** av) {
                 }).then([api_port] {
                     std::cout << "Seastar HTTP server listening on port " << api_port << " ...\n";
                 });
+            }).then([&qp] {
+                return streaming::stream_session::test(qp);
             }).or_terminate();
         });
     });
