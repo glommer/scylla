@@ -25,7 +25,7 @@
 #pragma once
 
 #include "types.hh"
-
+#include "cell_name.hh"
 #include "core/sstring.hh"
 
 namespace db {
@@ -70,6 +70,11 @@ public:
      * Parse an AbstractType from current position of this parser.
      */
     data_type parse();
+
+    /**
+     * Parses a string possibly containing a CompositeType
+     */
+    cell_name_type_ptr parse_compound();
 
 #if 0
     public Map<String, String> getKeyValueParameters() throws SyntaxException

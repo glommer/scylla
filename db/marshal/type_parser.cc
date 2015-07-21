@@ -25,6 +25,7 @@
 #include "db/marshal/type_parser.hh"
 
 #include "exceptions/exceptions.hh"
+#include "core/shared_ptr.hh"
 
 #include <stdexcept>
 #include <string>
@@ -164,6 +165,44 @@ data_type type_parser::get_abstract_type(const sstring& compare_with, type_parse
         return tuple_type_impl::get_instance(l);
     } else {
         throw std::runtime_error("unknown type: " + class_name);
+    }
+}
+
+cell_name_type_ptr type_parser::parse_compound() {
+    skip_blank();
+
+    sstring name = read_next_identifier();
+
+    std::vector<data_type> types;
+    std::vector<collection_type> collections;
+    if (name == "org.apache.cassandra.db.marshal.CompositeType") {
+        if (_str[_idx++] != '(') {
+            throw std::logic_error("internal error");
+        }
+
+        while (!is_eos()) {
+            name = read_next_identifier();
+            if (name == "") {
+                break;
+            }
+            skip_blank();
+            if (_str[_idx] == ',') {
+                _idx++;
+            }
+            if (name == "org.apache.cassandra.db.marshal.ColumnToCollectionType") {
+                auto col_types = get_type_parameters();
+                for (auto& t: col_types) {
+                    collections.push_back(static_pointer_cast<const collection_type_impl>(t));
+                }
+            } else {
+                types.push_back(get_abstract_type(name));
+            }
+        }
+
+        return ::make_shared<compound_sparse_cell_name_type>(types, collections);
+    } else {
+        types.push_back(get_abstract_type(name));
+        return ::make_shared<simple_sparse_cell_name_type>(types);
     }
 }
 
