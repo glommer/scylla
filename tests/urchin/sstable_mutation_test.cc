@@ -518,3 +518,18 @@ SEASTAR_TEST_CASE(test_range_reads_on_large_sstable) {
         test_slice(128, ordered_partitions.size() - 1);
     });
 }
+
+SEASTAR_TEST_CASE(compact_storage_sparse_read) {
+    return reusable_sst("tests/urchin/sstables/compact_sparse", 1).then([] (auto sstp) {
+        return do_with(sstables::key("first_row"), [sstp] (auto& key) {
+            auto s = compact_sparse_schema();
+            return sstp->read_row(s, key).then([sstp, s, &key] (auto mutation) {
+                auto& mp = mutation->partition();
+                auto row = mp.clustered_row(clustering_key::make_empty(*s));
+                match_live_cell(row.cells(), *s, "cl1", boost::any(to_bytes("cl1")));
+                match_live_cell(row.cells(), *s, "cl2", boost::any(to_bytes("cl2")));
+                return make_ready_future<>();
+            });
+        });
+    });
+}
