@@ -361,5 +361,12 @@ schema_ptr schema_builder::build(compact_storage cp) {
         }
     }
     s._thrift._compound = s._raw._is_compound;
+    if (s._raw._is_dense) {
+        // In Origin, dense CFs always have at least one regular column
+        if (s.regular_columns_count() == 0) {
+            s._raw._columns.emplace_back(bytes(""), s.regular_column_name_type(), column_kind::regular_column, 0, index_info());
+            s.rebuild();
+        }
+    }
     return make_lw_shared<schema>(std::move(s));
 }
