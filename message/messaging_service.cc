@@ -283,6 +283,8 @@ messaging_service::rpc_protocol_client_wrapper& messaging_service::get_rpc_clien
 
 void messaging_service::remove_rpc_client(shard_id id) {
     print("Remove client = %s !!!!!\n", id);
+    _clients.erase(id);
+#if 0
     auto it = _clients.find(id);
     if (it != _clients.end()) {
         print("Remove client = %s found !!!!!\n", id);
@@ -298,6 +300,7 @@ void messaging_service::remove_rpc_client(shard_id id) {
             _clients.erase(id);
         });
     }
+#endif
 }
 
 std::unique_ptr<messaging_service::rpc_protocol_wrapper>& messaging_service::rpc() {

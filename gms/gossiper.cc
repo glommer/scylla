@@ -906,7 +906,7 @@ void gossiper::mark_alive(inet_address addr, endpoint_state local_state) {
             this->real_mark_alive(addr, local_state);
             logger.debug("GOT ECHO Replay OK !!!!!!!!!!!!!!!!!!!!!!!!");
         } catch (...) {
-            logger.debug("GOT ECHO Replay FAIL !!!!!!!!!!!!!!!!!!!!!!!!", std::current_exception());
+            logger.debug("GOT ECHO Replay FAIL {} !!!!!!!!!!!!!!!!!!!!!!!!", std::current_exception());
         }
     });
     // this->set_last_processed_message_at(now_millis());
