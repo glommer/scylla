@@ -275,8 +275,10 @@ messaging_service::rpc_protocol_client_wrapper& messaging_service::get_rpc_clien
         auto remote_addr = ipv4_addr(id.addr.raw_addr(), _port);
         auto client = std::make_unique<rpc_protocol_client_wrapper>(*_rpc, remote_addr, ipv4_addr{_listen_address.raw_addr(), 0});
         it = _clients.emplace(id, shard_info(std::move(client))).first;
+        print("ADDDDDDDDDDDDDDDDDDDDDDDDDDD new client %s\n", id);
         return *it->second.rpc_client;
     } else {
+        print("GETTTTTTTTTTTTTTTTTTTTTTTTTT new client %s\n", id);
         return *it->second.rpc_client;
     }
 }
