@@ -48,6 +48,7 @@ public:
     thrift_server(distributed<database>& db);
     ~thrift_server();
     future<> listen(ipv4_addr addr);
+    future<> stop() { return make_ready_future<>(); }
     void do_accepts(int which);
     class connection;
     uint64_t total_connections() const;
