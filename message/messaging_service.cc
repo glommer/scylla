@@ -282,7 +282,22 @@ messaging_service::rpc_protocol_client_wrapper& messaging_service::get_rpc_clien
 }
 
 void messaging_service::remove_rpc_client(shard_id id) {
-    _clients.erase(id);
+    print("Remove client = %s !!!!!\n", id);
+    auto it = _clients.find(id);
+    if (it != _clients.end()) {
+        print("Remove client = %s found !!!!!\n", id);
+        auto& client = it->second.rpc_client;
+        assert(client);
+        client->stop().then_wrapped([this, id] (auto&& f) {
+            try {
+                f.get();
+                print("stop client OK\n");
+            } catch (...) {
+                print("stop client FAIL\n");
+            }
+            _clients.erase(id);
+        });
+    }
 }
 
 std::unique_ptr<messaging_service::rpc_protocol_wrapper>& messaging_service::rpc() {

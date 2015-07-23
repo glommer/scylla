@@ -53,7 +53,7 @@ int main(int ac, char ** av) {
                 auto& fd = gms::get_local_failure_detector();
                 print("%s", fd);
             });
-            reporter->arm_periodic(std::chrono::milliseconds(1000));
+            //reporter->arm_periodic(std::chrono::milliseconds(1000));
 
             auto app_state_adder = std::make_shared<timer<lowres_clock>>();
             app_state_adder->set_callback ([app_state_adder] {

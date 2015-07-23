@@ -132,6 +132,7 @@ void gossiper::init_messaging_service_handler() {
     ms().register_echo([] {
         // TODO: Use time_point instead of long for timing.
         return smp::submit_to(0, [] {
+            print("GOT ECHO MESSAGE!!!!!!!\n");
             auto& gossiper = gms::get_local_gossiper();
             gossiper.set_last_processed_message_at(now_millis());
             return make_ready_future<>();
@@ -395,6 +396,8 @@ void gossiper::run() {
     logger.trace("My heartbeat is now {}", endpoint_state_map[br_addr].get_heart_beat_state().get_heart_beat_version());
     std::vector<gossip_digest> g_digests;
     this->make_random_gossip_digest(g_digests);
+
+    logger.debug("run: digests.size= {}", g_digests.size());
 
     if (g_digests.size() > 0) {
         gossip_digest_syn message(get_cluster_name(), get_partitioner_name(), g_digests);
@@ -728,6 +731,7 @@ int gossiper::get_current_generation_number(inet_address endpoint) {
 }
 
 bool gossiper::do_gossip_to_live_member(gossip_digest_syn message) {
+    logger.trace("LIVE: _live_endpoints nr = {}", _live_endpoints.size());
     size_t size = _live_endpoints.size();
     if (size == 0) {
         return false;
@@ -738,6 +742,7 @@ bool gossiper::do_gossip_to_live_member(gossip_digest_syn message) {
 void gossiper::do_gossip_to_unreachable_member(gossip_digest_syn message) {
     double live_endpoint_count = _live_endpoints.size();
     double unreachable_endpoint_count = _unreachable_endpoints.size();
+    logger.trace("UNREACHABLE: _live_endpoints nr = {}, _unreachable_endpoints nr = {}", _live_endpoints.size(), _unreachable_endpoints.size());
     if (unreachable_endpoint_count > 0) {
         /* based on some probability */
         double prob = unreachable_endpoint_count / (live_endpoint_count + 1);
@@ -892,12 +897,20 @@ void gossiper::mark_alive(inet_address addr, endpoint_state local_state) {
     // }
 
     local_state.mark_dead();
-    logger.trace("Sending a EchoMessage to {}", addr);
+    logger.trace("Sending a EchoMessage to {} !!!!!!!!!!!!!!!!!!!!!!!!", addr);
     shard_id id = get_shard_id(addr);
-    ms().send_echo(id).then([this, addr, local_state = std::move(local_state)] () mutable {
-        this->set_last_processed_message_at(now_millis());
-        this->real_mark_alive(addr, local_state);
+    ms().send_echo(id).then_wrapped([this, addr, local_state = std::move(local_state)] (auto&& f) mutable {
+        try {
+            f.get();
+            this->set_last_processed_message_at(now_millis());
+            this->real_mark_alive(addr, local_state);
+            logger.debug("GOT ECHO Replay OK !!!!!!!!!!!!!!!!!!!!!!!!");
+        } catch (...) {
+            logger.debug("GOT ECHO Replay FAIL !!!!!!!!!!!!!!!!!!!!!!!!", std::current_exception());
+        }
     });
+    // this->set_last_processed_message_at(now_millis());
+    // this->real_mark_alive(addr, local_state);
 }
 
 void gossiper::real_mark_alive(inet_address addr, endpoint_state local_state) {
@@ -1092,6 +1105,7 @@ future<> gossiper::start(int generation_number) {
 }
 
 future<> gossiper::start(int generation_nbr, std::map<application_state, versioned_value> preload_local_states) {
+    logger.set_level(logging::log_level::trace);
     // Although gossiper runs on cpu0 only, we need to listen incoming gossip
     // message on all cpus and forard them to cpu0 to process.
     return _handlers.start().then([this] {
