@@ -191,6 +191,7 @@ urchin_libs = '-llz4 -lsnappy -lz -lboost_thread -lcryptopp -lrt -lyaml-cpp -lbo
 cassandra_interface = Thrift(source = 'interface/cassandra.thrift', service = 'Cassandra')
 
 urchin_core = (['database.cc',
+                 'control_group.cc',
                  'schema.cc',
                  'bytes.cc',
                  'mutation.cc',
