@@ -96,7 +96,7 @@ SEASTAR_TEST_CASE(test_query_of_incomplete_range_goes_to_underlying) {
             return m1.decorated_key().less_compare(*s, m2.decorated_key());
         });
 
-        auto mt = make_lw_shared<memtable>(s);
+        auto mt = make_lw_shared<memtable>(s, make_control_group());
 
         for (auto&& m : mutations) {
             mt->apply(m);

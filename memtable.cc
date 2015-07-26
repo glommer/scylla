@@ -5,12 +5,14 @@
 #include "memtable.hh"
 #include "frozen_mutation.hh"
 
-memtable::memtable(schema_ptr schema)
+memtable::memtable(schema_ptr schema, control_group cgroup)
         : _schema(std::move(schema))
-        , partitions(partition_entry::compare(_schema)) {
+        , partitions(partition_entry::compare(_schema))
+        , _cgroup(std::move(cgroup)) {
 }
 
 memtable::~memtable() {
+    _cgroup.remove_dirty_memory(partitions.size());
     partitions.clear_and_dispose(std::default_delete<partition_entry>());
 }
 
@@ -37,6 +39,7 @@ memtable::find_or_create_partition(const dht::decorated_key& key) {
     auto i = partitions.lower_bound(key, partition_entry::compare(_schema));
     if (i == partitions.end() || !key.equal(*_schema, i->key())) {
         auto entry = std::make_unique<partition_entry>(std::move(key), mutation_partition(_schema));
+        _cgroup.add_dirty_memory(1);
         i = partitions.insert(i, *entry.release());
     }
     return i->partition();

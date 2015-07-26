@@ -14,7 +14,7 @@
 SEASTAR_TEST_CASE(test_memtable_conforms_to_mutation_source) {
     return seastar::async([] {
         run_mutation_source_tests([](schema_ptr s, const std::vector<mutation>& partitions) {
-            auto mt = make_lw_shared<memtable>(s);
+            auto mt = make_lw_shared<memtable>(s, make_control_group());
 
             for (auto&& m : partitions) {
                 mt->apply(m);

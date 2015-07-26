@@ -11,6 +11,7 @@
 #include "schema.hh"
 #include "mutation_reader.hh"
 #include "db/commitlog/replay_position.hh"
+#include "control_group.hh"
 
 class frozen_mutation;
 
@@ -64,18 +65,21 @@ public:
 // Managed by lw_shared_ptr<>.
 class memtable final : public enable_lw_shared_from_this<memtable> {
 public:
-    using partitions_type = bi::set<partition_entry, bi::compare<partition_entry::compare>>;
+    using partitions_type = bi::set<partition_entry,
+                                    bi::compare<partition_entry::compare>,
+                                    bi::constant_time_size<true>>;
 private:
     schema_ptr _schema;
     partitions_type partitions;
     db::replay_position _replay_position;
+    control_group _cgroup;
     void update(const db::replay_position&);
 private:
     boost::iterator_range<partitions_type::const_iterator> slice(const query::partition_range& r) const;
 public:
     using const_mutation_partition_ptr = std::unique_ptr<const mutation_partition>;
 public:
-    explicit memtable(schema_ptr schema);
+    explicit memtable(schema_ptr schema, control_group cgroup);
     ~memtable();
     schema_ptr schema() const { return _schema; }
     mutation_partition& find_or_create_partition(const dht::decorated_key& key);

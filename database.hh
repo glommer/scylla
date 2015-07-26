@@ -31,6 +31,7 @@
 #include "core/gate.hh"
 #include "cql3/column_specification.hh"
 #include "db/commitlog/replay_position.hh"
+#include "control_group.hh"
 #include <limits>
 #include <cstddef>
 #include "schema.hh"
@@ -80,6 +81,7 @@ using sstable_list = std::map<unsigned long, lw_shared_ptr<sstables::sstable>>;
 class column_family {
 public:
     struct config {
+        control_group cgroup;
         sstring datadir;
         bool enable_disk_writes = true;
         bool enable_disk_reads = true;
@@ -278,6 +280,7 @@ class keyspace {
 public:
     struct config {
         sstring datadir;
+        control_group cgroup;
         bool enable_disk_reads = true;
         bool enable_disk_writes = true;
     };
@@ -334,6 +337,7 @@ class database {
     std::unique_ptr<db::commitlog> _commitlog;
     std::unique_ptr<db::config> _cfg;
     utils::UUID _version;
+    control_group _cgroup = make_control_group();
 
     future<> init_commitlog();
     future<> apply_in_memory(const frozen_mutation&, const db::replay_position&);

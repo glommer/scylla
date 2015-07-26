@@ -358,7 +358,7 @@ void column_family::add_sstable(sstables::sstable&& sstable) {
 void column_family::add_memtable() {
     // allow in-progress reads to continue using old list
     _memtables = make_lw_shared(memtable_list(*_memtables));
-    _memtables->emplace_back(make_lw_shared<memtable>(_schema));
+    _memtables->emplace_back(make_lw_shared<memtable>(_schema, _config.cgroup));
 }
 
 future<>
@@ -872,6 +872,7 @@ column_family::config
 keyspace::make_column_family_config(const schema& s) const {
     column_family::config cfg;
     cfg.datadir = column_family_directory(s.cf_name(), s.id());
+    cfg.cgroup = _config.cgroup;
     cfg.enable_disk_reads = _config.enable_disk_reads;
     cfg.enable_disk_writes = _config.enable_disk_writes;
     return cfg;
@@ -1105,31 +1106,34 @@ future<> database::apply(const frozen_mutation& m) {
     // I'm doing a nullcheck here since the init code path for db etc
     // is a little in flux and commitlog is created only when db is
     // initied from datadir.
-    if (_commitlog != nullptr) {
-        auto uuid = m.column_family_id();
-        bytes_view repr = m.representation();
-        auto write_repr = [repr] (data_output& out) { out.write(repr.begin(), repr.end()); };
-        return _commitlog->add_mutation(uuid, repr.size(), write_repr).then([&m, this](auto rp) {
-            try {
-                return this->apply_in_memory(m, rp);
-            } catch (replay_position_reordered_exception&) {
-                // expensive, but we're assuming this is super rare.
-                // if we failed to apply the mutation due to future re-ordering
-                // (which should be the ever only reason for rp mismatch in CF)
-                // let's just try again, add the mutation to the CL once more,
-                // and assume success in inevitable eventually.
-                dblog.warn("replay_position reordering detected");
-                return this->apply(m);
-            }
-        });
-    }
-    return apply_in_memory(m, db::replay_position());
+    return with_control_group(_cgroup, [this, &m] {
+        if (_commitlog != nullptr) {
+            auto uuid = m.column_family_id();
+            bytes_view repr = m.representation();
+            auto write_repr = [repr] (data_output& out) { out.write(repr.begin(), repr.end()); };
+            return _commitlog->add_mutation(uuid, repr.size(), write_repr).then([&m, this](auto rp) {
+                try {
+                    return this->apply_in_memory(m, rp);
+                } catch (replay_position_reordered_exception&) {
+                    // expensive, but we're assuming this is super rare.
+                    // if we failed to apply the mutation due to future re-ordering
+                    // (which should be the ever only reason for rp mismatch in CF)
+                    // let's just try again, add the mutation to the CL once more,
+                    // and assume success in inevitable eventually.
+                    dblog.warn("replay_position reordering detected");
+                    return this->apply(m);
+                }
+            });
+        }
+        return apply_in_memory(m, db::replay_position());
+    });
 }
 
 keyspace::config
 database::make_keyspace_config(const keyspace_metadata& ksm) const {
     // FIXME support multiple directories
     keyspace::config cfg;
+    cfg.cgroup = _cgroup;
     if (_cfg->data_file_directories().size() > 0) {
         cfg.datadir = sprint("%s/%s", _cfg->data_file_directories()[0], ksm.name());
         cfg.enable_disk_writes = ksm.durable_writes();

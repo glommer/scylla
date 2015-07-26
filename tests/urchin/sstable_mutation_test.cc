@@ -350,7 +350,7 @@ SEASTAR_TEST_CASE(test_sstable_conforms_to_mutation_source) {
                 sstables::sstable::format_types::big);
             dirs.emplace_back(std::move(sstable_dir));
 
-            auto mt = make_lw_shared<memtable>(s);
+            auto mt = make_lw_shared<memtable>(s, make_control_group());
 
             for (auto&& m : partitions) {
                 mt->apply(m);

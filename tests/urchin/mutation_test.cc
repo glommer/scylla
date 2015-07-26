@@ -37,7 +37,7 @@ SEASTAR_TEST_CASE(test_mutation_is_applied) {
     auto s = make_lw_shared(schema({}, some_keyspace, some_column_family,
         {{"p1", utf8_type}}, {{"c1", int32_type}}, {{"r1", int32_type}}, {}, utf8_type));
 
-    memtable mt(s);
+    memtable mt(s, make_control_group());
 
     const column_definition& r1_col = *s->get_column_definition("r1");
     auto key = partition_key::from_exploded(*s, {to_bytes("key1")});
@@ -95,7 +95,7 @@ SEASTAR_TEST_CASE(test_row_tombstone_updates) {
     auto s = make_lw_shared(schema({}, some_keyspace, some_column_family,
         {{"p1", utf8_type}}, {{"c1", int32_type}, {"c2", int32_type}}, {{"r1", int32_type}}, {}, utf8_type));
 
-    memtable mt(s);
+    memtable mt(s, make_control_group());
 
     auto key = partition_key::from_exploded(*s, {to_bytes("key1")});
     auto c_key1 = clustering_key::from_deeply_exploded(*s, {1, 0});
@@ -121,7 +121,7 @@ SEASTAR_TEST_CASE(test_map_mutations) {
     auto my_map_type = map_type_impl::get_instance(int32_type, utf8_type, true);
     auto s = make_lw_shared(schema({}, some_keyspace, some_column_family,
         {{"p1", utf8_type}}, {{"c1", int32_type}}, {}, {{"s1", my_map_type}}, utf8_type));
-    memtable mt(s);
+    memtable mt(s, make_control_group());
     auto key = partition_key::from_exploded(*s, {to_bytes("key1")});
     auto& column = *s->get_column_definition("s1");
     map_type_impl::mutation mmut1{{}, {{int32_type->decompose(101), make_atomic_cell(utf8_type->decompose(sstring("101")))}}};
@@ -155,7 +155,7 @@ SEASTAR_TEST_CASE(test_set_mutations) {
     auto my_set_type = set_type_impl::get_instance(int32_type, true);
     auto s = make_lw_shared(schema({}, some_keyspace, some_column_family,
         {{"p1", utf8_type}}, {{"c1", int32_type}}, {}, {{"s1", my_set_type}}, utf8_type));
-    memtable mt(s);
+    memtable mt(s, make_control_group());
     auto key = partition_key::from_exploded(*s, {to_bytes("key1")});
     auto& column = *s->get_column_definition("s1");
     map_type_impl::mutation mmut1{{}, {{int32_type->decompose(101), make_atomic_cell({})}}};
@@ -189,7 +189,7 @@ SEASTAR_TEST_CASE(test_list_mutations) {
     auto my_list_type = list_type_impl::get_instance(int32_type, true);
     auto s = make_lw_shared(schema({}, some_keyspace, some_column_family,
         {{"p1", utf8_type}}, {{"c1", int32_type}}, {}, {{"s1", my_list_type}}, utf8_type));
-    memtable mt(s);
+    memtable mt(s, make_control_group());
     auto key = partition_key::from_exploded(*s, {to_bytes("key1")});
     auto& column = *s->get_column_definition("s1");
     auto make_key = [] { return timeuuid_type->decompose(utils::UUID_gen::get_time_UUID()); };

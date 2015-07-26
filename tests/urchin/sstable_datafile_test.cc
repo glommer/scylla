@@ -110,7 +110,7 @@ SEASTAR_TEST_CASE(datafile_generation_01) {
         auto s = make_lw_shared(schema({}, some_keyspace, some_column_family,
             {{"p1", utf8_type}}, {{"c1", utf8_type}}, {{"r1", int32_type}, {"r2", int32_type}}, {}, utf8_type));
 
-        auto mt = make_lw_shared<memtable>(s);
+        auto mt = make_lw_shared<memtable>(s, make_control_group());
 
         const column_definition& r1_col = *s->get_column_definition("r1");
 
@@ -176,7 +176,7 @@ SEASTAR_TEST_CASE(datafile_generation_02) {
         auto s = make_lw_shared(schema({}, some_keyspace, some_column_family,
             {{"p1", utf8_type}, {"p2", utf8_type}}, {{"c1", utf8_type}}, {{"r1", int32_type}}, {}, utf8_type));
 
-        auto mt = make_lw_shared<memtable>(s);
+        auto mt = make_lw_shared<memtable>(s, make_control_group());
 
         const column_definition& r1_col = *s->get_column_definition("r1");
 
@@ -244,7 +244,7 @@ SEASTAR_TEST_CASE(datafile_generation_03) {
         auto s = make_lw_shared(schema({}, some_keyspace, some_column_family,
             {{"p1", utf8_type}}, {{"c1", utf8_type}, {"c2", utf8_type}}, {{"r1", int32_type}}, {}, utf8_type));
 
-        auto mt = make_lw_shared<memtable>(s);
+        auto mt = make_lw_shared<memtable>(s, make_control_group());
 
         const column_definition& r1_col = *s->get_column_definition("r1");
 
@@ -313,7 +313,7 @@ SEASTAR_TEST_CASE(datafile_generation_04) {
         auto s = make_lw_shared(schema({}, some_keyspace, some_column_family,
             {{"p1", utf8_type}}, {{"c1", utf8_type}}, {{"r1", int32_type}}, {{"s1", int32_type}}, utf8_type));
 
-        auto mt = make_lw_shared<memtable>(s);
+        auto mt = make_lw_shared<memtable>(s, make_control_group());
 
         const column_definition& r1_col = *s->get_column_definition("r1");
         const column_definition& s1_col = *s->get_column_definition("s1");
@@ -385,7 +385,7 @@ SEASTAR_TEST_CASE(datafile_generation_05) {
         auto s = make_lw_shared(schema({}, some_keyspace, some_column_family,
             {{"p1", utf8_type}}, {{"c1", utf8_type}}, {{"r1", int32_type}}, {}, utf8_type));
 
-        auto mt = make_lw_shared<memtable>(s);
+        auto mt = make_lw_shared<memtable>(s, make_control_group());
 
         const column_definition& r1_col = *s->get_column_definition("r1");
 
@@ -458,7 +458,7 @@ SEASTAR_TEST_CASE(datafile_generation_06) {
         auto s = make_lw_shared(schema({}, some_keyspace, some_column_family,
             {{"p1", utf8_type}}, {{"c1", utf8_type}}, {{"r1", int32_type}}, {}, utf8_type));
 
-        auto mt = make_lw_shared<memtable>(s);
+        auto mt = make_lw_shared<memtable>(s, make_control_group());
 
         const column_definition& r1_col = *s->get_column_definition("r1");
 
@@ -527,7 +527,7 @@ SEASTAR_TEST_CASE(datafile_generation_07) {
         auto s = make_lw_shared(schema({}, some_keyspace, some_column_family,
             {{"p1", utf8_type}}, {{"c1", utf8_type}}, {{"r1", int32_type}}, {}, utf8_type));
 
-        auto mt = make_lw_shared<memtable>(s);
+        auto mt = make_lw_shared<memtable>(s, make_control_group());
 
         const column_definition& r1_col = *s->get_column_definition("r1");
 
@@ -587,7 +587,7 @@ SEASTAR_TEST_CASE(datafile_generation_08) {
         auto s = make_lw_shared(schema({}, some_keyspace, some_column_family,
             {{"p1", int32_type}}, {{"c1", utf8_type}}, {{"r1", int32_type}}, {}, utf8_type));
 
-        auto mt = make_lw_shared<memtable>(s);
+        auto mt = make_lw_shared<memtable>(s, make_control_group());
 
         const column_definition& r1_col = *s->get_column_definition("r1");
 
@@ -654,7 +654,7 @@ SEASTAR_TEST_CASE(datafile_generation_09) {
         auto s = make_lw_shared(schema({}, some_keyspace, some_column_family,
             {{"p1", utf8_type}}, {{"c1", utf8_type}}, {{"r1", int32_type}}, {}, utf8_type));
 
-        auto mt = make_lw_shared<memtable>(s);
+        auto mt = make_lw_shared<memtable>(s, make_control_group());
 
         const column_definition& r1_col = *s->get_column_definition("r1");
 
@@ -700,7 +700,7 @@ SEASTAR_TEST_CASE(datafile_generation_10) {
         auto s = make_lw_shared(schema({}, some_keyspace, some_column_family,
             {{"p1", utf8_type}}, {{"c1", utf8_type}}, {{"r1", int32_type}}, {}, utf8_type));
 
-        auto mt = make_lw_shared<memtable>(s);
+        auto mt = make_lw_shared<memtable>(s, make_control_group());
 
         const column_definition& r1_col = *s->get_column_definition("r1");
 
@@ -774,7 +774,7 @@ SEASTAR_TEST_CASE(datafile_generation_11) {
     return test_setup::do_with_test_directory([] {
         auto s = complex_schema();
 
-        auto mt = make_lw_shared<memtable>(s);
+        auto mt = make_lw_shared<memtable>(s, make_control_group());
 
         const column_definition& set_col = *s->get_column_definition("reg_set");
         const column_definition& static_set_col = *s->get_column_definition("static_collection");
@@ -867,7 +867,7 @@ SEASTAR_TEST_CASE(datafile_generation_12) {
     return test_setup::do_with_test_directory([] {
         auto s = complex_schema();
 
-        auto mt = make_lw_shared<memtable>(s);
+        auto mt = make_lw_shared<memtable>(s, make_control_group());
 
         auto key = partition_key::from_exploded(*s, {to_bytes("key1")});
         auto cp = exploded_clustering_prefix({to_bytes("c1") });
@@ -902,7 +902,7 @@ static future<> sstable_compression_test(compressor c, unsigned generation) {
         builder.set_compressor_params(c);
         auto s = builder.build();
 
-        auto mtp = make_lw_shared<memtable>(s);
+        auto mtp = make_lw_shared<memtable>(s, make_control_group());
 
         auto key = partition_key::from_exploded(*s, {to_bytes("key1")});
         auto cp = exploded_clustering_prefix({to_bytes("c1") });
@@ -946,7 +946,7 @@ SEASTAR_TEST_CASE(datafile_generation_16) {
     return test_setup::do_with_test_directory([] {
         auto s = uncompressed_schema();
 
-        auto mtp = make_lw_shared<memtable>(s);
+        auto mtp = make_lw_shared<memtable>(s, make_control_group());
         // Create a number of keys that is a multiple of the sampling level
         for (int i = 0; i < 0x80; ++i) {
             sstring k = "key" + to_sstring(i);
@@ -1133,7 +1133,7 @@ static future<> compact_sstables(std::vector<unsigned long> generations_to_compa
             });
         }
         return do_for_each(*generations, [generations, sstables, s] (unsigned long generation) {
-            auto mt = make_lw_shared<memtable>(s);
+            auto mt = make_lw_shared<memtable>(s, make_control_group());
 
             const column_definition& r1_col = *s->get_column_definition("r1");
 
@@ -1250,7 +1250,7 @@ SEASTAR_TEST_CASE(datafile_generation_37) {
     return test_setup::do_with_test_directory([] {
         auto s = compact_simple_dense_schema();
 
-        auto mtp = make_lw_shared<memtable>(s);
+        auto mtp = make_lw_shared<memtable>(s, make_control_group());
 
         auto key = partition_key::from_exploded(*s, {to_bytes("key1")});
         mutation m(key, s);
@@ -1285,7 +1285,7 @@ SEASTAR_TEST_CASE(datafile_generation_38) {
     return test_setup::do_with_test_directory([] {
         auto s = compact_dense_schema();
 
-        auto mtp = make_lw_shared<memtable>(s);
+        auto mtp = make_lw_shared<memtable>(s, make_control_group());
 
         auto key = partition_key::from_exploded(*s, {to_bytes("key1")});
         mutation m(key, s);
@@ -1320,7 +1320,7 @@ SEASTAR_TEST_CASE(datafile_generation_39) {
     return test_setup::do_with_test_directory([] {
         auto s = compact_sparse_schema();
 
-        auto mtp = make_lw_shared<memtable>(s);
+        auto mtp = make_lw_shared<memtable>(s, make_control_group());
 
         auto key = partition_key::from_exploded(*s, {to_bytes("key1")});
         mutation m(key, s);
@@ -1371,7 +1371,7 @@ SEASTAR_TEST_CASE(datafile_generation_40) {
             return builder.build(schema_builder::compact_storage::yes);
         }();
 
-        auto mt = make_lw_shared<memtable>(s);
+        auto mt = make_lw_shared<memtable>(s, make_control_group());
         auto key = partition_key::from_exploded(*s, {to_bytes("key1")});
         mutation m(key, s);
 
