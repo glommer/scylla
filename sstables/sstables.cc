@@ -1407,7 +1407,13 @@ const sstring sstable::filename(sstring dir, sstring ks, sstring cf, version_typ
     auto& c= _component_map.at(component);
     auto g =  to_sstring(generation);
 
-    return dir + "/" + v + "-" + g + "-" + f + "-" + c;
+    if (version == version_types::ka) {
+        return dir + "/" + ks + "-" + cf + "-" + v + "-" + g + "-" +c;
+    } else if (version == version_types::la) {
+        return dir + "/" + v + "-" + g + "-" + f + "-" + c;
+    } else {
+        throw malformed_sstable_exception("invalid version");
+    }
 }
 
 sstable::version_types sstable::version_from_sstring(sstring &s) {
