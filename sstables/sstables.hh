@@ -113,7 +113,7 @@ public:
         Filter,
         Statistics,
     };
-    enum class version_types { la };
+    enum class version_types { ka, la };
     enum class format_types { big };
 public:
     // FIXME: We should pass a schema here, and then it would make more sense
