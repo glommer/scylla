@@ -148,6 +148,7 @@ urchin_tests = [
     'tests/bytes_ostream_test',
     'tests/UUID_test',
     'tests/murmur_hash_test',
+    'tests/logalloc_test',
 ]
 
 apps = [
