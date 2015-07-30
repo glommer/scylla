@@ -116,14 +116,34 @@ public:
     enum class version_types { la };
     enum class format_types { big };
 public:
-    sstable(sstring dir, unsigned long generation, version_types v, format_types f, gc_clock::time_point now = gc_clock::now())
-        : _dir(dir)
+    // FIXME: We should pass a schema here, and then it would make more sense
+    // to just store it, and then lift the need to pass it to most internal
+    // functions.
+    //
+    // However, this would complicate a lot of callers, who were designed with
+    // a format that as midway between ka and la in mind, and won't necessarily
+    // have a schema around
+    sstable(sstring ks, sstring cf, sstring dir, unsigned long generation, version_types v, format_types f, gc_clock::time_point now = gc_clock::now())
+        : _ks(std::move(ks))
+        , _cf(std::move(cf))
+        , _dir(std::move(dir))
         , _generation(generation)
         , _version(v)
         , _format(f)
         , _filter_tracker(make_lw_shared<distributed<filter_tracker>>())
         , _now(now)
     { }
+    sstable(schema_ptr schema, sstring dir, unsigned long generation, version_types v, format_types f, gc_clock::time_point now = gc_clock::now())
+        : _ks(schema->ks_name())
+        , _cf(schema->cf_name())
+        , _dir(std::move(dir))
+        , _generation(generation)
+        , _version(v)
+        , _format(f)
+        , _filter_tracker(make_lw_shared<distributed<filter_tracker>>())
+        , _now(now)
+    { }
+
     sstable& operator=(const sstable&) = delete;
     sstable(const sstable&) = delete;
     sstable(sstable&&) = default;
@@ -260,6 +280,8 @@ private:
     uint64_t _data_file_size;
     uint64_t _bytes_on_disk = 0;
 
+    sstring _ks;
+    sstring _cf;
     sstring _dir;
     unsigned long _generation = 0;
     version_types _version;

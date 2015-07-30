@@ -333,7 +333,7 @@ future<> column_family::probe_file(sstring sstdir, sstring fname) {
 
     assert(_sstables->count(generation) == 0);
 
-    auto sst = std::make_unique<sstables::sstable>(sstdir, generation, version, format);
+    auto sst = std::make_unique<sstables::sstable>(_schema, sstdir, generation, version, format);
     auto fut = sst->load();
     return std::move(fut).then([this, generation, sst = std::move(sst)] () mutable {
         add_sstable(std::move(*sst));
@@ -388,7 +388,7 @@ column_family::seal_active_memtable() {
     }
 
     return seastar::with_gate(_in_flight_seals, [gen, old, this] {
-        sstables::sstable newtab = sstables::sstable(_config.datadir, gen,
+        sstables::sstable newtab = sstables::sstable(_schema, _config.datadir, gen,
             sstables::sstable::version_types::la,
             sstables::sstable::format_types::big);
 
@@ -458,7 +458,7 @@ column_family::compact_sstables(std::vector<sstables::shared_sstable> sstables) 
             // FIXME: this generation calculation should be in a function.
             auto gen = _sstable_generation++ * smp::count + engine().cpu_id();
             // FIXME: use "tmp" marker in names of incomplete sstable
-            auto sst = make_lw_shared<sstables::sstable>(_config.datadir, gen,
+            auto sst = make_lw_shared<sstables::sstable>(_schema, _config.datadir, gen,
                     sstables::sstable::version_types::la,
                     sstables::sstable::format_types::big);
             new_tables->emplace_back(gen, sst);
