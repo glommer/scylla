@@ -5,13 +5,19 @@
 #include "memtable.hh"
 #include "frozen_mutation.hh"
 
+namespace stdx = std::experimental;
+
 memtable::memtable(schema_ptr schema)
         : _schema(std::move(schema))
         , partitions(partition_entry::compare(_schema)) {
 }
 
 memtable::~memtable() {
-    partitions.clear_and_dispose(std::default_delete<partition_entry>());
+    logalloc::with_region(_region, [this] {
+        partitions.clear_and_dispose([this] (partition_entry* ptr) {
+            _region.destroy(ptr);
+        });
+    });
 }
 
 memtable::const_mutation_partition_ptr
@@ -36,15 +42,17 @@ memtable::find_or_create_partition(const dht::decorated_key& key) {
     // call lower_bound so we have a hint for the insert, just in case.
     auto i = partitions.lower_bound(key, partition_entry::compare(_schema));
     if (i == partitions.end() || !key.equal(*_schema, i->key())) {
-        auto entry = std::make_unique<partition_entry>(std::move(key), mutation_partition(_schema));
-        i = partitions.insert(i, *entry.release());
+        logalloc::with_region(_region, [this, &i] {
+            partition_entry* entry = _region.construct<partition_entry>(dht::decorated_key(key), mutation_partition(_schema));
+            i = partitions.insert(i, *entry);
+        });
     }
     return i->partition();
 }
 
 boost::iterator_range<memtable::partitions_type::const_iterator>
 memtable::slice(const query::partition_range& range) const {
-    if (range.is_singular() && range.start()->value().has_key()) {
+    if (is_single_partition(range)) {
         const query::ring_position& pos = range.start()->value();
         auto i = partitions.find(pos, partition_entry::compare(_schema));
         if (i != partitions.end()) {
@@ -71,22 +79,70 @@ memtable::slice(const query::partition_range& range) const {
     }
 }
 
+class scanning_reader {
+    lw_shared_ptr<const memtable> _memtable;
+    const query::partition_range& _range;
+    stdx::optional<dht::decorated_key> _last;
+private:
+    memtable::partitions_type::const_iterator current() {
+        // We must be prepared that iterators may get invalidated across deferring points,
+        // due to LSA compactions.
+        // FIXME: Avoid lookup if the iterators didn't get invalidated. We could consult
+        // compaction counter of _memtable->_region.
+        auto cmp = partition_entry::compare(_memtable->_schema);
+        if (_last) {
+            return _memtable->partitions.upper_bound(*_last, cmp);
+        } else {
+            auto i = _range.start()
+                 ? (_range.start()->is_inclusive()
+                    ? _memtable->partitions.lower_bound(_range.start()->value(), cmp)
+                    : _memtable->partitions.upper_bound(_range.start()->value(), cmp))
+                 : _memtable->partitions.cbegin();
+            return i;
+        }
+    }
+    memtable::partitions_type::const_iterator end() {
+        // FIXME: Same comment as for current()
+        auto cmp = partition_entry::compare(_memtable->_schema);
+        return _range.end()
+               ? (_range.end()->is_inclusive()
+                  ? _memtable->partitions.upper_bound(_range.end()->value(), cmp)
+                  : _memtable->partitions.lower_bound(_range.end()->value(), cmp))
+               : _memtable->partitions.cend();
+    }
+public:
+    scanning_reader(lw_shared_ptr<const memtable> m, const query::partition_range& range)
+        : _memtable(std::move(m))
+        , _range(range)
+    { }
+
+    future<mutation_opt> operator()() {
+        auto i = current();
+        if (i == end()) {
+            return make_ready_future<mutation_opt>(stdx::nullopt);
+        }
+        _last = i->key();
+        return make_ready_future<mutation_opt>(mutation(_memtable->_schema, i->key(), i->partition()));
+    }
+};
+
 mutation_reader
 memtable::make_reader(const query::partition_range& range) const {
     if (is_wrap_around(range, *_schema)) {
         fail(unimplemented::cause::WRAP_AROUND);
     }
 
-    auto r = slice(range);
-    return [begin = r.begin(), end = r.end(), self = shared_from_this()] () mutable {
-        if (begin != end) {
-            auto m = mutation(self->_schema, begin->key(), begin->partition());
-            ++begin;
-            return make_ready_future<mutation_opt>(std::experimental::make_optional(std::move(m)));
+    if (is_single_partition(range)) {
+        const query::ring_position& pos = range.start()->value();
+        auto i = partitions.find(pos, partition_entry::compare(_schema));
+        if (i != partitions.end()) {
+            return make_reader_returning(mutation(_schema, i->key(), i->partition()));
         } else {
-            return make_ready_future<mutation_opt>();
+            return make_empty_reader();
         }
-    };
+    } else {
+        return scanning_reader(shared_from_this(), range);
+    }
 }
 
 row&
