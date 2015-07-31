@@ -181,3 +181,7 @@ mutation_source memtable::as_data_source() {
 size_t memtable::partition_count() const {
     return partitions.size();
 }
+
+logalloc::occupancy_stats memtable::occupancy() const {
+    return _allocator.occupancy();
+}
