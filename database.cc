@@ -401,7 +401,7 @@ column_family::seal_active_memtable() {
 
     return seastar::with_gate(_in_flight_seals, [gen, old, this] {
         sstables::sstable newtab = sstables::sstable(_schema, _config.datadir, gen,
-            sstables::sstable::version_types::la,
+            sstables::sstable::version_types::ka,
             sstables::sstable::format_types::big);
 
         return do_with(std::move(newtab), [old, this] (sstables::sstable& newtab) {
@@ -471,7 +471,7 @@ column_family::compact_sstables(std::vector<sstables::shared_sstable> sstables) 
             auto gen = _sstable_generation++ * smp::count + engine().cpu_id();
             // FIXME: use "tmp" marker in names of incomplete sstable
             auto sst = make_lw_shared<sstables::sstable>(_schema, _config.datadir, gen,
-                    sstables::sstable::version_types::la,
+                    sstables::sstable::version_types::ka,
                     sstables::sstable::format_types::big);
             new_tables->emplace_back(gen, sst);
             return sst;
