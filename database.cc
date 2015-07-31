@@ -298,36 +298,48 @@ future<> column_family::probe_file(sstring sstdir, sstring fname) {
     using namespace sstables;
 
     auto comps = parse_fname(fname);
-    if (comps.size() != 5) {
-        dblog.error("Ignoring malformed file {}", fname);
-        return make_ready_future<>();
-    }
+    int idx = 0;
 
-    // Every table will have a TOC. Using a specific file as a criteria, as
-    // opposed to, say verifying _sstables.count() to be zero is more robust
-    // against parallel loading of the directory contents.
-    if (comps[3] != "TOC") {
-        return make_ready_future<>();
+    if (comps[idx] == _schema->ks_name()) {
+        idx++;
+    }
+    if (comps[idx] == _schema->cf_name()) {
+        idx++;
     }
 
     sstable::version_types version;
     sstable::format_types  format;
 
     try {
-        version = sstable::version_from_sstring(comps[0]);
+        version = sstable::version_from_sstring(comps[idx]);
     } catch (std::out_of_range) {
-        dblog.error("Uknown version found: {}", comps[0]);
+        version = sstable::version_from_sstring(comps[idx]);
+        dblog.error("Uknown version found: {}", comps[idx]);
         return make_ready_future<>();
     }
+    idx++;
 
-    auto generation = boost::lexical_cast<unsigned long>(comps[1]);
+    auto generation = boost::lexical_cast<unsigned long>(comps[idx]);
+    idx++;
     // Make sure new sstables don't overwrite this one.
     _sstable_generation = std::max<uint64_t>(_sstable_generation, generation /  smp::count + 1);
 
-    try {
-        format = sstable::format_from_sstring(comps[2]);
-    } catch (std::out_of_range) {
-        dblog.error("Uknown format found: {}", comps[2]);
+    if (version == sstable::version_types::la) {
+        try {
+            format = sstable::format_from_sstring(comps[idx]);
+        } catch (std::out_of_range) {
+            dblog.error("Uknown format found: {}", comps[idx]);
+            return make_ready_future<>();
+        }
+        idx++;
+    } else {
+        format = sstable::default_format();
+    }
+
+    // Every table will have a TOC. Using a specific file as a criteria, as
+    // opposed to, say verifying _sstables.count() to be zero is more robust
+    // against parallel loading of the directory contents.
+    if (comps[idx] != "TOC") {
         return make_ready_future<>();
     }
 
