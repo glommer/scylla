@@ -92,6 +92,7 @@ int main(int ac, char** av) {
             ctx.api_dir = opts["api-dir"].as<sstring>();
             sstring listen_address = cfg->listen_address();
             sstring rpc_address = cfg->rpc_address();
+            utils::fb_utilities::get_rpc_address() = rpc_address;
             sstring api_address = opts.count("api-address") ? opts["api-address"].as<sstring>() : rpc_address;
             auto seed_provider= cfg->seed_provider();
             using namespace locator;

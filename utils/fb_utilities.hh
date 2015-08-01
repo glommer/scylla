@@ -57,6 +57,12 @@ public:
 #endif
        return broadcast_inet_address.value();
    }
+
+   // TODO: Remove this when database_descriptor is implemented
+   static inet_address& get_rpc_address() {
+       static inet_address rpc_inet_address = inet_address("127.0.0.1");
+       return rpc_inet_address;
+   }
 };
 }
 
