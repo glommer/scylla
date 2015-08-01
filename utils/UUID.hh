@@ -55,7 +55,7 @@ public:
     // This matches Java's UUID.toString() actual implementation. Note that
     // that method's documentation suggest something completely different!
     sstring to_sstring() const {
-        return sprint("%08x-%04x-%04x-%04x-%012x",
+        return sprint("%08x%04x%04x%04x%012x",
                 ((uint64_t)most_sig_bits >> 32),
                 ((uint64_t)most_sig_bits >> 16 & 0xffff),
                 ((uint64_t)most_sig_bits & 0xffff),
