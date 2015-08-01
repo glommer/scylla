@@ -442,6 +442,9 @@ public:
     size_t static_columns_count() const {
         return column_offset(column_kind::regular_column) - column_offset(column_kind::static_column);
     }
+    size_t compact_columns_count() const {
+        return _raw._columns.size() - column_offset(column_kind::compact_column);
+    }
     size_t regular_columns_count() const {
         return _raw._columns.size() - column_offset(column_kind::regular_column);
     }
@@ -465,6 +468,11 @@ public:
         return boost::make_iterator_range(_raw._columns.begin() + column_offset(column_kind::regular_column)
                 , _raw._columns.end());
     }
+
+    const column_definition& compact_column() const {
+        return *(_raw._columns.begin() + column_offset(column_kind::compact_column));
+    }
+
     // Returns a range of column definitions
     const columns_type& all_columns_in_select_order() const {
         return _raw._columns;
