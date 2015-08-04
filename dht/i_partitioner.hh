@@ -30,6 +30,7 @@
 #include <memory>
 #include <random>
 #include <utility>
+#include <unordered_set>
 
 namespace sstables {
 
@@ -96,6 +97,7 @@ inline bool operator>(const token& t1, const token& t2) { return std::rel_ops::o
 inline bool operator<=(const token& t1, const token& t2) { return std::rel_ops::operator<=(t1, t2); }
 inline bool operator>=(const token& t1, const token& t2) { return std::rel_ops::operator>=(t1, t2); }
 std::ostream& operator<<(std::ostream& out, const token& t);
+std::ostream& operator<<(std::ostream& os, const std::unordered_set<dht::token>& tokens);
 
 template <typename T>
 inline auto get_random_number() {

@@ -161,6 +161,14 @@ std::ostream& operator<<(std::ostream& out, const token& t) {
     return out;
 }
 
+std::ostream& operator<<(std::ostream& os, const std::unordered_set<dht::token>& tokens) {
+    os << "{ ";
+    for (auto& t : tokens) {
+        os << t << " ";
+    }
+    return os << "}";
+}
+
 std::ostream& operator<<(std::ostream& out, const decorated_key& dk) {
     return out << "{key: " << dk._key << ", token:" << dk._token << "}";
 }
