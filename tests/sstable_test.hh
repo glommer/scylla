@@ -90,7 +90,7 @@ inline schema_ptr composite_schema() {
         // comment
         "Table with a composite key as pkey"
        )));
-       return builder.build();
+       return builder.build(schema_builder::compact_storage::no);
     }();
     return s;
 }
@@ -114,7 +114,7 @@ inline schema_ptr set_schema() {
         // comment
         "Table with a set as pkeys"
        )));
-       return builder.build();
+       return builder.build(schema_builder::compact_storage::no);
     }();
     return s;
 }
@@ -138,7 +138,7 @@ inline schema_ptr map_schema() {
         // comment
         "Table with a map as pkeys"
        )));
-       return builder.build();
+       return builder.build(schema_builder::compact_storage::no);
     }();
     return s;
 }
@@ -162,7 +162,7 @@ inline schema_ptr list_schema() {
         // comment
         "Table with a list as pkeys"
        )));
-       return builder.build();
+       return builder.build(schema_builder::compact_storage::no);
     }();
     return s;
 }
@@ -183,7 +183,7 @@ inline schema_ptr uncompressed_schema() {
         // comment
         "Uncompressed data"
        )));
-       return builder.build();
+       return builder.build(schema_builder::compact_storage::no);
     }();
     return uncompressed;
 }
@@ -216,7 +216,7 @@ inline schema_ptr complex_schema() {
         // comment
         "Table with a complex schema, including collections and static keys"
        )));
-       return builder.build();
+       return builder.build(schema_builder::compact_storage::no);
     }();
     return s;
 }
@@ -244,7 +244,7 @@ inline schema_ptr columns_schema() {
         // comment
         "column definitions"
        )));
-       return builder.build();
+       return builder.build(schema_builder::compact_storage::no);
     }();
     return columns;
 }
