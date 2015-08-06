@@ -881,12 +881,14 @@ future<> sstable::load() {
 }
 
 future<> sstable::store() {
-    // TODO: write other components as well.
+    _components.erase(component_type::Index);
+    _components.erase(component_type::Data);
     return seastar::async([this] {
         write_statistics();
         write_compression();
         write_filter();
         write_summary();
+        write_toc();
     });
 }
 
