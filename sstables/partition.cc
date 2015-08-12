@@ -315,11 +315,11 @@ public:
             mut->set_cell(clustering_prefix, *(col.cdef), atomic_cell_or_collection(std::move(ac)));
         }
     }
-    virtual proceed consume_row_end() override {
+    virtual continuous_data_consumer::proceed consume_row_end() override {
         if (mut) {
             _pending_collection.flush(*_schema, *mut);
         }
-        return proceed::no;
+        return continuous_data_consumer::proceed::no;
     }
 
     virtual void consume_range_tombstone(

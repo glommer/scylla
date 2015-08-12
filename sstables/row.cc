@@ -3,6 +3,7 @@
  */
 
 #include "sstables.hh"
+#include "consumer.hh"
 
 template<typename T>
 static inline T consume_be(temporary_buffer<char>& p) {
@@ -131,7 +132,7 @@ public:
         } else {
             // We can process the entire buffer (if the consumer wants to).
             auto orig_data_size = data.size();
-            if (process(data) == row_consumer::proceed::yes) {
+            if (process(data) == continuous_data_consumer::proceed::yes) {
                 assert(data.size() == 0);
                 if (_remain >= 0) {
                     _remain -= orig_data_size;
@@ -211,7 +212,7 @@ public:
     // row) to stop the processing, in which case we trim the buffer to
     // leave only the unprocessed part. The caller must handle calling
     // process() again, and/or refilling the buffer, as needed.
-    row_consumer::proceed process(temporary_buffer<char>& data) {
+    continuous_data_consumer::proceed process(temporary_buffer<char>& data) {
 #if 0
         // Testing hack: call process() for tiny chunks separately, to verify
         // that primitive types crossing input buffer are handled correctly.
@@ -220,13 +221,13 @@ public:
             for (unsigned i = 0; i < data.size(); i += tiny_chunk) {
                 auto chunk_size = std::min(tiny_chunk, data.size() - i);
                 auto chunk = data.share(i, chunk_size);
-                if (process(chunk) == row_consumer::proceed::no) {
+                if (process(chunk) == continuous_data_consumer::proceed::no) {
                     data.trim_front(i + chunk_size - chunk.size());
-                    return row_consumer::proceed::no;
+                    return continuous_data_consumer::proceed::no;
                 }
             }
             data.trim(0);
-            return row_consumer::proceed::yes;
+            return continuous_data_consumer::proceed::yes;
         }
 #endif
         while (data || non_consuming(_state, _prestate)) {
@@ -340,8 +341,8 @@ public:
                         // end of row marker
                         _state = state::ROW_START;
                         if (_consumer.consume_row_end() ==
-                                row_consumer::proceed::no) {
-                            return row_consumer::proceed::no;
+                                continuous_data_consumer::proceed::no) {
+                            return continuous_data_consumer::proceed::no;
                         }
                     } else {
                         _state = state::ATOM_NAME_BYTES;
@@ -355,8 +356,8 @@ public:
                     // end of row marker
                     _state = state::ROW_START;
                     if (_consumer.consume_row_end() ==
-                            row_consumer::proceed::no) {
-                        return row_consumer::proceed::no;
+                            continuous_data_consumer::proceed::no) {
+                        return continuous_data_consumer::proceed::no;
                     }
                 } else {
                     _state = state::ATOM_NAME_BYTES;
@@ -511,7 +512,7 @@ public:
                 throw malformed_sstable_exception("unknown state");
             }
         }
-        return row_consumer::proceed::yes;
+        return continuous_data_consumer::proceed::yes;
     }
 };
 

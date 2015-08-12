@@ -366,9 +366,9 @@ public:
             sstables::deletion_time deltime) override {
         count_range_tombstone++;
     }
-    virtual proceed consume_row_end() override {
+    virtual continuous_data_consumer::proceed consume_row_end() override {
         count_row_end++;
-        return proceed::yes;
+        return continuous_data_consumer::proceed::yes;
     }
 };
 
@@ -455,9 +455,9 @@ public:
     virtual void consume_deleted_cell(bytes_view col_name, sstables::deletion_time deltime) override {
         count_deleted_cell++;
     }
-    virtual proceed consume_row_end() override {
+    virtual continuous_data_consumer::proceed consume_row_end() override {
         count_row_end++;
-        return proceed::yes;
+        return continuous_data_consumer::proceed::yes;
     }
     virtual void consume_range_tombstone(
             bytes_view start_col, bytes_view end_col,
@@ -503,12 +503,12 @@ SEASTAR_TEST_CASE(compressed_rows_read_all) {
 }
 
 // test reading all the rows one by one, using the feature of the
-// consume_row_end returning proceed::no message
+// consume_row_end returning continuous_data_consumer::proceed::no message
 class pausable_count_row_consumer : public count_row_consumer {
 public:
-    virtual proceed consume_row_end() override {
+    virtual continuous_data_consumer::proceed consume_row_end() override {
         count_row_consumer::consume_row_end();
-        return proceed::no;
+        return continuous_data_consumer::proceed::no;
     }
 };
 

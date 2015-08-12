@@ -8,6 +8,7 @@
 #include "bytes.hh"
 #include "key.hh"
 #include "core/temporary_buffer.hh"
+#include "consumer.hh"
 
 // sstables::data_consume_row feeds the contents of a single row into a
 // row_consumer object:
@@ -28,8 +29,6 @@
 // is called.]
 class row_consumer {
 public:
-    enum class proceed { yes, no };
-
     // Consume the row's key and deletion_time. The latter determines if the
     // row is a tombstone, and if so, when it has been deleted.
     // Note that the key is in serialized form, and should be deserialized
@@ -60,7 +59,7 @@ public:
     // Called at the end of the row, after all cells.
     // Returns a flag saying whether the sstable consumer should stop now, or
     // proceed consuming more data.
-    virtual proceed consume_row_end() = 0;
+    virtual continuous_data_consumer::proceed consume_row_end() = 0;
 
     virtual ~row_consumer() { }
 };
