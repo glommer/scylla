@@ -578,7 +578,7 @@ void stream_session::add_transfer_files(std::vector<stream_detail> stream_detail
         UUID cf_id = detail.cf_id;
         auto it = _transfers.find(cf_id);
         if (it == _transfers.end()) {
-            it = _transfers.emplace(cf_id, stream_transfer_task(shared_from_this(), cf_id)).first;
+            it = _transfers.emplace(cf_id, stream_transfer_task(shared_from_this(), UUID(cf_id))).first;
         }
         it->second.add_transfer_file(std::move(detail));
     }
