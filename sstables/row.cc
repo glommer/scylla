@@ -63,6 +63,11 @@ private:
     uint16_t _u16;
     uint32_t _u32;
     uint64_t _u64;
+
+    uint16_t u16() { return _u16; }
+    uint32_t u32() { return _u32; }
+    uint64_t u64() { return _u64; }
+
     union {
         char bytes[sizeof(uint64_t)];
         uint64_t uint64;
@@ -289,7 +294,7 @@ public:
                 break;
             case state::ROW_KEY_BYTES:
                 // After previously reading 16-bit length, read key's bytes.
-                read_bytes(data, _u16, _key);
+                read_bytes(data, u16(), _key);
                 _state = state::DELETION_TIME;
                 break;
             case state::DELETION_TIME: {
@@ -302,8 +307,8 @@ public:
                         // If we can read the entire deletion time at once, we can
                         // skip the DELETION_TIME_2 and DELETION_TIME_3 states.
                         deletion_time del;
-                        del.local_deletion_time = _u32;
-                        del.marked_for_delete_at = _u64;
+                        del.local_deletion_time = u32();
+                        del.marked_for_delete_at = u64();
                         _consumer.consume_row_start(to_bytes_view(_key), del);
                         // after calling the consume function, we can release the
                         // buffers we held for it.
@@ -319,8 +324,8 @@ public:
                 break;
             case state::DELETION_TIME_3: {
                 deletion_time del;
-                del.local_deletion_time = _u32;
-                del.marked_for_delete_at = _u64;
+                del.local_deletion_time = u32();
+                del.marked_for_delete_at = u64();
                 _consumer.consume_row_start(to_bytes_view(_key), del);
                 // after calling the consume function, we can release the
                 // buffers we held for it.
@@ -330,7 +335,7 @@ public:
             }
             case state::ATOM_START:
                 if (read_16(data) == read_status::ready) {
-                    if (_u16 == 0) {
+                    if (u16() == 0) {
                         // end of row marker
                         _state = state::ROW_START;
                         if (_consumer.consume_row_end() ==
@@ -345,7 +350,7 @@ public:
                 }
                 break;
             case state::ATOM_START_2:
-                if (_u16 == 0) {
+                if (u16() == 0) {
                     // end of row marker
                     _state = state::ROW_START;
                     if (_consumer.consume_row_end() ==
@@ -357,7 +362,7 @@ public:
                 }
                 break;
             case state::ATOM_NAME_BYTES:
-                read_bytes(data, _u16, _key);
+                read_bytes(data, u16(), _key);
                 _state = state::ATOM_MASK;
                 break;
             case state::ATOM_MASK: {
@@ -392,23 +397,23 @@ public:
                 auto first_status = read_32(data);
                 _state = state::EXPIRING_CELL_2;
                 if (first_status == read_status::ready) {
-                    _ttl = _u32;
+                    _ttl = u32();
                     auto second_status = read_32(data);
                     _state = state::EXPIRING_CELL_3;
                     if (second_status == read_status::ready) {
-                        _expiration = _u32;
+                        _expiration = u32();
                         _state = state::CELL;
                     }
                 }
                 break;
             }
             case state::EXPIRING_CELL_2:
-                _ttl = _u32;
+                _ttl = u32();
                 read_32(data);
                 _state = state::EXPIRING_CELL_3;
                 break;
             case state::EXPIRING_CELL_3:
-                _expiration = _u32;
+                _expiration = u32();
                 _state = state::CELL;
                 break;
             case state::CELL: {
@@ -426,7 +431,7 @@ public:
                 _state = state::CELL_VALUE_BYTES;
                 break;
             case state::CELL_VALUE_BYTES:
-                if (read_bytes(data, _u32, _val) == read_status::ready) {
+                if (read_bytes(data, u32(), _val) == read_status::ready) {
                     // If the whole string is in our buffer, great, we don't
                     // need to copy, and can skip the CELL_VALUE_BYTES_2 state.
                     //
@@ -437,11 +442,11 @@ public:
                         }
                         deletion_time del;
                         del.local_deletion_time = consume_be<uint32_t>(_val);
-                        del.marked_for_delete_at = _u64;
+                        del.marked_for_delete_at = u64();
                         _consumer.consume_deleted_cell(to_bytes_view(_key), del);
                     } else {
                         _consumer.consume_cell(to_bytes_view(_key),
-                                to_bytes_view(_val), _u64, _ttl, _expiration);
+                                to_bytes_view(_val), u64(), _ttl, _expiration);
                     }
                     // after calling the consume function, we can release the
                     // buffers we held for it.
@@ -459,11 +464,11 @@ public:
                     }
                     deletion_time del;
                     del.local_deletion_time = consume_be<uint32_t>(_val);
-                    del.marked_for_delete_at = _u64;
+                    del.marked_for_delete_at = u64();
                     _consumer.consume_deleted_cell(to_bytes_view(_key), del);
                 } else {
                     _consumer.consume_cell(to_bytes_view(_key),
-                            to_bytes_view(_val), _u64, _ttl, _expiration);
+                            to_bytes_view(_val), u64(), _ttl, _expiration);
                 }
                 // after calling the consume function, we can release the
                 // buffers we held for it.
@@ -477,7 +482,7 @@ public:
                 break;
             case state::RANGE_TOMBSTONE_2:
                 // read the end column into _val.
-                read_bytes(data, _u16, _val);
+                read_bytes(data, u16(), _val);
                 _state = state::RANGE_TOMBSTONE_3;
                 break;
             case state::RANGE_TOMBSTONE_3:
@@ -491,8 +496,8 @@ public:
             case state::RANGE_TOMBSTONE_5:
             {
                 deletion_time del;
-                del.local_deletion_time = _u32;
-                del.marked_for_delete_at = _u64;
+                del.local_deletion_time = u32();
+                del.marked_for_delete_at = u64();
                 _consumer.consume_range_tombstone(to_bytes_view(_key),
                         to_bytes_view(_val), del);
                 _key.release();
