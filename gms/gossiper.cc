@@ -211,7 +211,13 @@ void gossiper::init_messaging_service_handler() {
             gossiper.set_last_processed_message_at();
             // TODO: Implement processing of incoming SHUTDOWN message
             get_local_failure_detector().force_conviction(from);
-        }).discard_result();
+        }).then_wrapped([] (auto&& f) {
+            try {
+                f.get();
+            } catch (...) {
+                logger.error("Fail to handle GOSSIP_SHUTDOWN");
+            }
+        });
         return messaging_service::no_wait();
     });
     ms().register_gossip_digest_syn([] (gossip_digest_syn syn_msg) {
@@ -228,7 +234,13 @@ void gossiper::init_messaging_service_handler() {
             /* Notify the Failure Detector */
             gossiper.notify_failure_detector(remote_ep_state_map);
             return gossiper.apply_state_locally(remote_ep_state_map);
-        }).discard_result();
+        }).then_wrapped([] (auto&& f) {
+            try {
+                f.get();
+            } catch (...) {
+                logger.error("Fail to handle GOSSIP_DIGEST_ACK");
+            }
+        });
         return messaging_service::no_wait();
     });
 }
