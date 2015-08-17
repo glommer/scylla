@@ -13,6 +13,8 @@ namespace logalloc {
 
 struct occupancy_stats;
 
+using eviction_fn = std::function<void()>;
+
 // Controller for all LSA regions. There's one per shard.
 class tracker {
 public:
@@ -33,7 +35,7 @@ public:
     //
     // Invalidates references to objects in all compactible and evictable regions.
     //
-    uint64_t reclaim(uint64_t bytes);
+    size_t reclaim(size_t bytes);
 
     // Compacts as much as possible. Very expensive, mainly for testing.
     // Invalidates references to objects in all compactible and evictable regions.
@@ -147,6 +149,11 @@ public:
     // compactible, it won't be considered by tracker::reclaim(). By default region is
     // compactible after construction.
     void set_compactible(bool);
+
+    // Makes this region an evictable region. Supplied function will be called
+    // when data from this region needs to be evicted in order to reclaim space.
+    // The function should free some space from this region.
+    void make_evictable(eviction_fn);
 };
 
 }

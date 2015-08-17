@@ -15,6 +15,7 @@
 #include "utils/managed_bytes.hh"
 #include "log.hh"
 
+[[gnu::unused]]
 static auto x = [] {
     logging::logger_registry().set_all_loggers_level(logging::log_level::debug);
     return 0;
@@ -223,6 +224,41 @@ SEASTAR_TEST_CASE(test_blob) {
             reg.full_compaction();
 
             BOOST_REQUIRE(bytes_view(b) == src);
+        });
+    });
+}
+
+SEASTAR_TEST_CASE(test_merging) {
+    return seastar::async([] {
+        region reg1;
+        region reg2;
+
+        reg1.merge(reg2);
+
+        managed_ref<int> r1;
+
+        with_allocator(reg1.allocator(), [&] {
+            r1 = make_managed<int>();
+        });
+
+        reg2.merge(reg1);
+
+        with_allocator(reg2.allocator(), [&] {
+            r1 = {};
+        });
+
+        std::vector<managed_ref<int>> refs;
+
+        with_allocator(reg1.allocator(), [&] {
+            for (int i = 0; i < 10000; ++i) {
+                refs.emplace_back(make_managed<int>());
+            }
+        });
+
+        reg2.merge(reg1);
+
+        with_allocator(reg2.allocator(), [&] {
+            refs.clear();
         });
     });
 }

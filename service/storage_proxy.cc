@@ -38,6 +38,7 @@
 #include "core/future-util.hh"
 #include "db/read_repair_decision.hh"
 #include "db/config.hh"
+#include "db/batchlog_manager.hh"
 #include "exceptions/exceptions.hh"
 #include <boost/range/algorithm_ext/push_back.hpp>
 #include <boost/range/adaptor/transformed.hpp>
@@ -61,18 +62,6 @@ distributed<service::storage_proxy> _the_storage_proxy;
 
 using namespace exceptions;
 
-struct mutation_write_timeout_error : public cassandra_exception {
-    size_t to_block_for;
-    size_t received;
-    mutation_write_timeout_error(size_t tbf, size_t acks) :
-        cassandra_exception(exception_code::WRITE_TIMEOUT, sprint("Mutation write timeout: waited for %lu got %lu acks", tbf, acks)) , to_block_for(tbf), received(acks) {}
-};
-
-struct overloaded_exception : public cassandra_exception {
-    overloaded_exception(size_t c) :
-        cassandra_exception(exception_code::OVERLOADED, sprint("Too many in flight hints: %lu", c)) {}
-};
-
 static inline bool is_me(gms::inet_address from) {
     return from == utils::fb_utilities::get_broadcast_address();
 }
@@ -94,9 +83,14 @@ protected:
     semaphore _ready; // available when cl is achieved
     db::consistency_level _cl;
     keyspace& _ks;
+    db::write_type _type;
     lw_shared_ptr<const frozen_mutation> _mutation;
     std::unordered_set<gms::inet_address> _targets; // who we sent this mutation to
     size_t _pending_endpoints; // how many endpoints in bootstrap state there is
+    // added dead_endpoints as a memeber here as well. This to be able to carry the info across
+    // calls in helper methods in a convinient way. Since we hope this will be empty most of the time
+    // it should not be a huge burden. (flw)
+    std::vector<gms::inet_address> _dead_endpoints;
     size_t _cl_acks = 0;
     virtual size_t total_block_for() {
         // original comment from cassandra:
@@ -108,8 +102,15 @@ protected:
         signal();
     }
 public:
-    abstract_write_response_handler(keyspace& ks, db::consistency_level cl, lw_shared_ptr<const frozen_mutation> mutation, std::unordered_set<gms::inet_address> targets, size_t pending_endpoints) :
-        _ready(0), _cl(cl), _ks(ks), _mutation(std::move(mutation)), _targets(targets), _pending_endpoints(pending_endpoints) {}
+    abstract_write_response_handler(keyspace& ks, db::consistency_level cl, db::write_type type,
+            lw_shared_ptr<const frozen_mutation> mutation,
+            std::unordered_set<gms::inet_address> targets,
+            size_t pending_endpoints = 0,
+            std::vector<gms::inet_address> dead_endpoints = {})
+            : _ready(0), _cl(cl), _ks(ks), _type(type), _mutation(std::move(mutation)), _targets(
+                    std::move(targets)), _pending_endpoints(pending_endpoints), _dead_endpoints(
+                    std::move(dead_endpoints)) {
+    }
     virtual ~abstract_write_response_handler() {};
     void signal(size_t nr = 1) {
         _cl_acks += nr;
@@ -126,8 +127,11 @@ public:
     future<> wait() {
         return _ready.wait(total_block_for());
     }
-    const std::unordered_set<gms::inet_address>& get_targets() {
+    const std::unordered_set<gms::inet_address>& get_targets() const {
         return _targets;
+    }
+    const std::vector<gms::inet_address>& get_dead_endpoints() const {
+        return _dead_endpoints;
     }
     lw_shared_ptr<const frozen_mutation> get_mutation() {
         return _mutation;
@@ -142,14 +146,12 @@ class datacenter_write_response_handler : public abstract_write_response_handler
         }
     }
 public:
-    datacenter_write_response_handler(keyspace& ks, db::consistency_level cl, lw_shared_ptr<const frozen_mutation> mutation, std::unordered_set<gms::inet_address> targets, size_t pending_endpoints) :
-        abstract_write_response_handler(ks, cl, std::move(mutation), targets, pending_endpoints) {}
+    using abstract_write_response_handler::abstract_write_response_handler;
 };
 
 class write_response_handler : public abstract_write_response_handler {
 public:
-    write_response_handler(keyspace& ks, db::consistency_level cl, lw_shared_ptr<const frozen_mutation> mutation, std::unordered_set<gms::inet_address> targets, size_t pending_endpoints) :
-        abstract_write_response_handler(ks, cl, std::move(mutation), targets, pending_endpoints) {}
+    using abstract_write_response_handler::abstract_write_response_handler;
 };
 
 class datacenter_sync_write_response_handler : public abstract_write_response_handler {
@@ -165,8 +167,8 @@ class datacenter_sync_write_response_handler : public abstract_write_response_ha
         }
     }
 public:
-    datacenter_sync_write_response_handler(keyspace& ks, db::consistency_level cl, lw_shared_ptr<const frozen_mutation> mutation, std::unordered_set<gms::inet_address> targets, size_t pending_endpoints) :
-        abstract_write_response_handler(ks, cl, std::move(mutation), targets, pending_endpoints) {
+    datacenter_sync_write_response_handler(keyspace& ks, db::consistency_level cl, db::write_type type, lw_shared_ptr<const frozen_mutation> mutation, std::unordered_set<gms::inet_address> targets, size_t pending_endpoints, std::vector<gms::inet_address> dead_endpoints) :
+        abstract_write_response_handler(ks, cl, type, std::move(mutation), targets, pending_endpoints, dead_endpoints) {
         auto& snitch_ptr = locator::i_endpoint_snitch::get_local_snitch_ptr();
 
         for (auto& target : targets) {
@@ -197,7 +199,7 @@ storage_proxy::response_id_type storage_proxy::register_response_handler(std::un
 
         if (left_for_cl > 0) {
             // timeout happened before cl was achieved, throw exception
-            e.handler->_ready.broken(mutation_write_timeout_error(block_for, e.handler->_cl_acks));
+            e.handler->_ready.broken(mutation_write_timeout_exception(e.handler->_cl, e.handler->_cl_acks, block_for, e.handler->_type));
         } else {
             remove_response_handler(id);
         }
@@ -231,7 +233,7 @@ abstract_write_response_handler& storage_proxy::get_write_response_handler(stora
         return *_response_handlers.find(id)->second.handler;
 }
 
-storage_proxy::response_id_type storage_proxy::create_write_response_handler(keyspace& ks, db::consistency_level cl, frozen_mutation&& mutation, std::unordered_set<gms::inet_address> targets, std::vector<gms::inet_address>& pending_endpoints)
+storage_proxy::response_id_type storage_proxy::create_write_response_handler(keyspace& ks, db::consistency_level cl, db::write_type type, frozen_mutation&& mutation, std::unordered_set<gms::inet_address> targets, std::vector<gms::inet_address>& pending_endpoints, std::vector<gms::inet_address> dead_endpoints)
 {
     std::unique_ptr<abstract_write_response_handler> h;
     auto& rs = ks.get_replication_strategy();
@@ -242,12 +244,11 @@ storage_proxy::response_id_type storage_proxy::create_write_response_handler(key
     // for now make is simple
     if (db::is_datacenter_local(cl)) {
         pending_count = std::count_if(pending_endpoints.begin(), pending_endpoints.end(), db::is_local);
-        h = std::make_unique<datacenter_write_response_handler>(ks, cl, std::move(m), std::move(targets), pending_count);
-    } else if (cl == db::consistency_level::EACH_QUORUM &&
-               rs.get_type() == locator::replication_strategy_type::network_topology){
-        h = std::make_unique<datacenter_sync_write_response_handler>(ks, cl, std::move(m), std::move(targets), pending_count);
+        h = std::make_unique<datacenter_write_response_handler>(ks, cl, type, std::move(m), std::move(targets), pending_count, std::move(dead_endpoints));
+    } else if (cl == db::consistency_level::EACH_QUORUM && rs.get_type() == locator::replication_strategy_type::network_topology){
+        h = std::make_unique<datacenter_sync_write_response_handler>(ks, cl, type, std::move(m), std::move(targets), pending_count, std::move(dead_endpoints));
     } else {
-        h = std::make_unique<write_response_handler>(ks, cl, std::move(m), std::move(targets), pending_count);
+        h = std::make_unique<write_response_handler>(ks, cl, type, std::move(m), std::move(targets), pending_count, std::move(dead_endpoints));
     }
     return register_response_handler(std::move(h));
 }
@@ -260,62 +261,8 @@ storage_proxy::storage_proxy(distributed<database>& db) : _db(db) {
 storage_proxy::rh_entry::rh_entry(std::unique_ptr<abstract_write_response_handler>&& h, std::function<void()>&& cb) : handler(std::move(h)), expire_timer(std::move(cb)) {}
 
 #if 0
-    public static final String MBEAN_NAME = "org.apache.cassandra.db:type=StorageProxy";
-    private static final Logger logger = LoggerFactory.getLogger(StorageProxy.class);
-    static final boolean OPTIMIZE_LOCAL_REQUESTS = true; // set to false to test messagingservice path on single node
-
-    public static final String UNREACHABLE = "UNREACHABLE";
-
-    private static final WritePerformer standardWritePerformer;
-    private static final WritePerformer counterWritePerformer;
-    private static final WritePerformer counterWriteOnCoordinatorPerformer;
-
-    public static final StorageProxy instance = new StorageProxy();
-
-    private static volatile int maxHintsInProgress = 128 * FBUtilities.getAvailableProcessors();
-    private static final CacheLoader<InetAddress, AtomicInteger> hintsInProgress = new CacheLoader<InetAddress, AtomicInteger>()
-    {
-        public AtomicInteger load(InetAddress inetAddress)
-        {
-            return new AtomicInteger(0);
-        }
-    };
-    private static final ClientRequestMetrics readMetrics = new ClientRequestMetrics("Read");
-    private static final ClientRequestMetrics rangeMetrics = new ClientRequestMetrics("RangeSlice");
-    private static final ClientRequestMetrics writeMetrics = new ClientRequestMetrics("Write");
-    private static final CASClientRequestMetrics casWriteMetrics = new CASClientRequestMetrics("CASWrite");
-    private static final CASClientRequestMetrics casReadMetrics = new CASClientRequestMetrics("CASRead");
-
-    private static final double CONCURRENT_SUBREQUESTS_MARGIN = 0.10;
-
-    private StorageProxy() {}
-
     static
     {
-        MBeanServer mbs = ManagementFactory.getPlatformMBeanServer();
-        try
-        {
-            mbs.registerMBean(instance, new ObjectName(MBEAN_NAME));
-        }
-        catch (Exception e)
-        {
-            throw new RuntimeException(e);
-        }
-
-        standardWritePerformer = new WritePerformer()
-        {
-            public void apply(IMutation mutation,
-                              Iterable<InetAddress> targets,
-                              AbstractWriteResponseHandler responseHandler,
-                              String localDataCenter,
-                              ConsistencyLevel consistency_level)
-            throws OverloadedException
-            {
-                assert mutation instanceof Mutation;
-                sendToHintedEndpoints((Mutation) mutation, targets, responseHandler, localDataCenter);
-            }
-        };
-
         /*
          * We execute counter writes in 2 places: either directly in the coordinator node if it is a replica, or
          * in CounterMutationVerbHandler on a replica othewise. The write must be executed on the COUNTER_MUTATION stage
@@ -721,6 +668,56 @@ storage_proxy::mutate_locally(std::vector<mutation> mutations) {
 }
 
 /**
+ * Helper for create_write_response_handler, shared across mutate/mutate_atomically.
+ * Both methods do roughly the same thing, with the latter intermixing batch log ops
+ * in the logic.
+ * Since ordering is (maybe?) significant, we need to carry some info across from here
+ * to the hint method below (dead nodes).
+ */
+storage_proxy::response_id_type
+storage_proxy::create_write_response_handler(const mutation& m, db::consistency_level cl, db::write_type type) {
+    keyspace& ks = _db.local().find_keyspace(m.schema()->ks_name());
+    auto& rs = ks.get_replication_strategy();
+    std::vector<gms::inet_address> natural_endpoints = rs.get_natural_endpoints(m.token());
+    std::vector<gms::inet_address> pending_endpoints = get_local_storage_service().get_token_metadata().pending_endpoints_for(m.token(), ks);
+
+    auto all = boost::range::join(natural_endpoints, pending_endpoints);
+
+    if (std::find_if(all.begin(), all.end(), std::bind1st(std::mem_fn(&storage_proxy::cannot_hint), this)) != all.end()) {
+        // avoid OOMing due to excess hints.  we need to do this check even for "live" nodes, since we can
+        // still generate hints for those if it's overloaded or simply dead but not yet known-to-be-dead.
+        // The idea is that if we have over maxHintsInProgress hints in flight, this is probably due to
+        // a small number of nodes causing problems, so we should avoid shutting down writes completely to
+        // healthy nodes.  Any node with no hintsInProgress is considered healthy.
+        throw overloaded_exception(_total_hints_in_progress);
+    }
+
+    // filter live endpoints from dead ones
+    std::unordered_set<gms::inet_address> live_endpoints;
+    std::vector<gms::inet_address> dead_endpoints;
+    live_endpoints.reserve(all.size());
+    dead_endpoints.reserve(all.size());
+    std::partition_copy(all.begin(), all.end(), std::inserter(live_endpoints, live_endpoints.begin()), std::back_inserter(dead_endpoints),
+            std::bind1st(std::mem_fn(&gms::failure_detector::is_alive), &gms::get_local_failure_detector()));
+
+    db::assure_sufficient_live_nodes(cl, ks, live_endpoints);
+
+    return create_write_response_handler(ks, cl, type, freeze(m), std::move(live_endpoints), pending_endpoints, dead_endpoints);
+}
+
+void
+storage_proxy::hint_to_dead_endpoints(response_id_type id, db::consistency_level cl) {
+    auto& h = get_write_response_handler(id);
+
+    size_t hints = hint_to_dead_endpoints(h.get_mutation(), h.get_dead_endpoints());
+
+    if (cl == db::consistency_level::ANY) {
+        // for cl==ANY hints are counted towards consistency
+        h.signal(hints);
+    }
+}
+
+/**
  * Use this method to have these Mutations applied
  * across all replicas. This method will take care
  * of the possibility of a replica being down and hint
@@ -735,47 +732,18 @@ storage_proxy::mutate(std::vector<mutation> mutations, db::consistency_level cl)
     auto local_addr = utils::fb_utilities::get_broadcast_address();
     auto& snitch_ptr = locator::i_endpoint_snitch::get_local_snitch_ptr();
     sstring local_dc = snitch_ptr->get_datacenter(local_addr);
+    auto type = mutations.size() == 1 ? db::write_type::SIMPLE : db::write_type::UNLOGGED_BATCH;
     utils::latency_counter lc;
     lc.start();
+
     for (auto& m : mutations) {
         try {
-            keyspace& ks = _db.local().find_keyspace(m.schema()->ks_name());
-            auto& rs = ks.get_replication_strategy();
-            std::vector<gms::inet_address> natural_endpoints = rs.get_natural_endpoints(m.token());
-            std::vector<gms::inet_address> pending_endpoints = get_local_storage_service().get_token_metadata().pending_endpoints_for(m.token(), ks);
-
-            auto all = boost::range::join(natural_endpoints, pending_endpoints);
-
-            if (std::find_if(all.begin(), all.end(), std::bind1st(std::mem_fn(&storage_proxy::cannot_hint), this)) != all.end()) {
-                // avoid OOMing due to excess hints.  we need to do this check even for "live" nodes, since we can
-                // still generate hints for those if it's overloaded or simply dead but not yet known-to-be-dead.
-                // The idea is that if we have over maxHintsInProgress hints in flight, this is probably due to
-                // a small number of nodes causing problems, so we should avoid shutting down writes completely to
-                // healthy nodes.  Any node with no hintsInProgress is considered healthy.
-                throw overloaded_exception(_total_hints_in_progress);
-            }
-
-            // filter live endpoints from dead ones
-            std::unordered_set<gms::inet_address> live_endpoints;
-            std::vector<gms::inet_address> dead_endpoints;
-            live_endpoints.reserve(all.size());
-            dead_endpoints.reserve(all.size());
-            std::partition_copy(all.begin(), all.end(), std::inserter(live_endpoints, live_endpoints.begin()), std::back_inserter(dead_endpoints),
-                    std::bind1st(std::mem_fn(&gms::failure_detector::is_alive), &gms::get_local_failure_detector()));
-
-            db::assure_sufficient_live_nodes(cl, ks, live_endpoints);
-
-            storage_proxy::response_id_type response_id = create_write_response_handler(ks, cl, freeze(m), std::move(live_endpoints), pending_endpoints);
+            storage_proxy::response_id_type response_id = create_write_response_handler(m, cl, type);
             // it is better to send first and hint afterwards to reduce latency
             // but request may complete before hint_to_dead_endpoints() is called and
             // response_id handler will be removed, so we will have to do hint with separate
             // frozen_mutation copy, or manage handler live time differently.
-            size_t hints = hint_to_dead_endpoints(get_write_response_handler(response_id).get_mutation(), dead_endpoints);
-
-            if (cl == db::consistency_level::ANY) {
-                // for cl==ANY hints are counted towards consistency
-                get_write_response_handler(response_id).signal(hints);
-            }
+            hint_to_dead_endpoints(response_id, cl);
 
             // call before send_to_live_endpoints() for the same reason as above
             auto f = response_wait(response_id);
@@ -785,9 +753,9 @@ storage_proxy::mutate(std::vector<mutation> mutations, db::consistency_level cl)
                     f.get();
                     have_cl->signal();
                     return;
-                } catch(mutation_write_timeout_error& ex) {
+                } catch(mutation_write_timeout_exception& ex) {
                     // timeout
-                    logger.trace("Write timeout; received {} of {} required replies", ex.received, ex.to_block_for);
+                    logger.trace("Write timeout; received {} of {} required replies", ex.received, ex.block_for);
                     _stats.write_timeouts++;
                     have_cl->broken(ex);
                 } catch(...) {
@@ -843,216 +811,126 @@ storage_proxy::mutate_with_triggers(std::vector<mutation> mutations, db::consist
  */
 future<>
 storage_proxy::mutate_atomically(std::vector<mutation> mutations, db::consistency_level cl) {
-    fail(unimplemented::cause::LWT);
-#if 0
-        Tracing.trace("Determining replicas for atomic batch");
-        long startTime = System.nanoTime();
 
-        List<WriteResponseHandlerWrapper> wrappers = new ArrayList<WriteResponseHandlerWrapper>(mutations.size());
-        String localDataCenter = DatabaseDescriptor.getEndpointSnitch().getDatacenter(FBUtilities.getBroadcastAddress());
+    utils::latency_counter lc;
+    lc.start();
 
-        try
-        {
-            // add a handler for each mutation - includes checking availability, but doesn't initiate any writes, yet
-            for (Mutation mutation : mutations)
-            {
-                WriteResponseHandlerWrapper wrapper = wrapResponseHandler(mutation, consistency_level, WriteType.BATCH);
-                // exit early if we can't fulfill the CL at this time.
-                wrapper.handler.assureSufficientLiveNodes();
-                wrappers.add(wrapper);
+    class context {
+        storage_proxy & _p;
+        std::vector<mutation> _mutations;
+        db::consistency_level _cl;
+
+        semaphore _have_cl;
+        const gms::inet_address _local_addr;
+        const sstring _local_dc;
+
+        const utils::UUID _batch_uuid;
+        const std::unordered_set<gms::inet_address> _batchlog_endpoints;
+
+    public:
+        context(storage_proxy & p, std::vector<mutation>&& mutations,
+                db::consistency_level cl)
+                : _p(p), _mutations(std::move(mutations)), _cl(cl), _have_cl(0), _local_addr(
+                        utils::fb_utilities::get_broadcast_address()), _local_dc(
+                        locator::i_endpoint_snitch::get_local_snitch_ptr()->get_datacenter(
+                                _local_addr)), _batch_uuid(
+                        utils::UUID_gen::get_time_UUID()), _batchlog_endpoints(
+                        [this]() -> std::unordered_set<gms::inet_address> {
+                            auto topology = service::get_storage_service().local().get_token_metadata().get_topology();
+                            auto local_endpoints = topology.get_datacenter_racks().at(_local_dc); // note: origin copies, so do that here too...
+                            auto local_rack = locator::i_endpoint_snitch::get_local_snitch_ptr()->get_rack(_local_addr);
+                            auto chosen_endpoints = db::get_batchlog_manager().local().endpoint_filter(local_rack, local_endpoints);
+
+                            if (chosen_endpoints.empty()) {
+                                if (_cl == db::consistency_level::ANY) {
+                                    return {_local_addr};
+                                }
+                                throw exceptions::unavailable_exception(db::consistency_level::ONE, 1, 0);
+                            }
+                            return chosen_endpoints;
+                        }()) {
+        }
+        future<> sync_write_to_batchlog() {
+            auto m = db::get_batchlog_manager().local().get_batch_log_mutation_for(_mutations, _batch_uuid, net::messaging_service::current_version);
+            auto h = std::make_unique<write_response_handler>(_p._db.local().find_keyspace(db::system_keyspace::NAME), db::consistency_level::ONE, db::write_type::BATCH_LOG, make_lw_shared<frozen_mutation>(freeze(m)), _batchlog_endpoints);
+            response_id_type response_id = _p.register_response_handler(std::move(h));
+
+            auto f = _p.response_wait(response_id);
+            _p.send_to_live_endpoints(response_id, _local_dc);
+            return f.handle_exception([this, response_id](auto ex) {
+                _p.remove_response_handler(response_id); // cancel expire_timer, so no hint will happen
+                //return make_exception_future(ex);
+                std::rethrow_exception(ex);
+            });
+        };
+        void async_remove_from_batchlog() {
+            // delete batch
+            auto schema = _p._db.local().find_schema(db::system_keyspace::NAME, db::system_keyspace::BATCHLOG);
+            auto key = partition_key::from_exploded(*schema, {uuid_type->decompose(_batch_uuid)});
+            auto now = service::client_state(service::client_state::internal_tag()).get_timestamp();
+            mutation m(key, schema);
+            m.partition().apply_delete(*schema, {}, tombstone(now, gc_clock::now()));
+
+            auto h = std::make_unique<write_response_handler>(_p._db.local().find_keyspace(db::system_keyspace::NAME), db::consistency_level::ONE, db::write_type::BATCH_LOG, make_lw_shared<frozen_mutation>(freeze(m)), _batchlog_endpoints);
+            auto response_id = _p.register_response_handler(std::move(h));
+
+            auto f = _p.response_wait(response_id);
+            _p.send_to_live_endpoints(response_id, _local_dc);
+            f.handle_exception([&p = _p, response_id](std::exception_ptr ex) {
+                p.remove_response_handler(response_id); // cancel expire_timer, so no hint will happen
+                std::rethrow_exception(ex);
+            });
+        };
+
+        future<> run() {
+            std::vector<response_id_type> ids;
+
+            ids.reserve(_mutations.size());
+            for (auto& m : _mutations) {
+                ids.emplace_back(_p.create_write_response_handler(m, _cl, db::write_type::BATCH));
             }
 
-            // write to the batchlog
-            Collection<InetAddress> batchlogEndpoints = getBatchlogEndpoints(localDataCenter, consistency_level);
-            UUID batchUUID = UUIDGen.getTimeUUID();
-            syncWriteToBatchlog(mutations, batchlogEndpoints, batchUUID);
+            return sync_write_to_batchlog().then([this, ids = std::move(ids)] {
+                return parallel_for_each(ids.begin(), ids.end(), [this](auto response_id) {
+                    // it is better to send first and hint afterwards to reduce latency
+                    // but request may complete before hint_to_dead_endpoints() is called and
+                    // response_id handler will be removed, so we will have to do hint with separate
+                    // frozen_mutation copy, or manage handler live time differently.
+                    _p.hint_to_dead_endpoints(response_id, _cl);
+                    // call before send_to_live_endpoints() for the same reason as above
+                    auto f = _p.response_wait(response_id);
+                    _p.send_to_live_endpoints(response_id, _local_dc);
+                    return f.handle_exception([this, response_id](std::exception_ptr p) {
+                        _p.remove_response_handler(response_id); // cancel expire_timer, so no hint will happen
+                        try {
+                            std::rethrow_exception(p);
+                        } catch (mutation_write_timeout_exception& ex) {
+                            logger.trace("Write timeout; received {} of {} required replies", ex.received, ex.block_for);
+                            throw;
+                        }
+                    });
+                });
+            }).finally(std::bind(&context::async_remove_from_batchlog, this));
+        }
+    };
+    try {
+        auto ctxt = make_lw_shared<context>(*this, std::move(mutations), cl);
 
-            // now actually perform the writes and wait for them to complete
-            syncWriteBatchedMutations(wrappers, localDataCenter);
-
-            // remove the batchlog entries asynchronously
-            asyncRemoveFromBatchlog(batchlogEndpoints, batchUUID);
-        }
-        catch (UnavailableException e)
-        {
-            writeMetrics.unavailables.mark();
-            ClientRequestMetrics.writeUnavailables.inc();
-            Tracing.trace("Unavailable");
-            throw e;
-        }
-        catch (WriteTimeoutException e)
-        {
-            writeMetrics.timeouts.mark();
-            ClientRequestMetrics.writeTimeouts.inc();
-            Tracing.trace("Write timeout; received {} of {} required replies", e.received, e.blockFor);
-            throw e;
-        }
-        finally
-        {
-            writeMetrics.addNano(System.nanoTime() - startTime);
-        }
-#endif
+        return ctxt->run().finally([this, lc, ctxt]() mutable {
+            _stats.write.mark(lc.stop().latency_in_nano());
+        });
+    } catch (no_such_keyspace& ex) {
+        return make_exception_future<>(std::current_exception());
+    } catch (exceptions::unavailable_exception& ex) {
+        _stats.write_unavailables++;
+        logger.trace("Unavailable");
+        return make_exception_future<>(std::current_exception());
+    } catch (overloaded_exception& ex) {
+        _stats.write_unavailables++;
+        logger.trace("Overloaded");
+        return make_exception_future<>(std::current_exception());
+    }
 }
-
-#if 0
-    private static void syncWriteToBatchlog(Collection<Mutation> mutations, Collection<InetAddress> endpoints, UUID uuid)
-    throws WriteTimeoutException
-    {
-        AbstractWriteResponseHandler handler = new WriteResponseHandler(endpoints,
-                                                                        Collections.<InetAddress>emptyList(),
-                                                                        ConsistencyLevel.ONE,
-                                                                        Keyspace.open(SystemKeyspace.NAME),
-                                                                        null,
-                                                                        WriteType.BATCH_LOG);
-
-        MessageOut<Mutation> message = BatchlogManager.getBatchlogMutationFor(mutations, uuid, MessagingService.current_version)
-                                                      .createMessage();
-        for (InetAddress target : endpoints)
-        {
-            int targetVersion = MessagingService.instance().getVersion(target);
-            if (target.equals(FBUtilities.getBroadcastAddress()) && OPTIMIZE_LOCAL_REQUESTS)
-            {
-                insertLocal(message.payload, handler);
-            }
-            else if (targetVersion == MessagingService.current_version)
-            {
-                MessagingService.instance().sendRR(message, target, handler, false);
-            }
-            else
-            {
-                MessagingService.instance().sendRR(BatchlogManager.getBatchlogMutationFor(mutations, uuid, targetVersion)
-                                                                  .createMessage(),
-                                                   target,
-                                                   handler,
-                                                   false);
-            }
-        }
-
-        handler.get();
-    }
-
-    private static void asyncRemoveFromBatchlog(Collection<InetAddress> endpoints, UUID uuid)
-    {
-        AbstractWriteResponseHandler handler = new WriteResponseHandler(endpoints,
-                                                                        Collections.<InetAddress>emptyList(),
-                                                                        ConsistencyLevel.ANY,
-                                                                        Keyspace.open(SystemKeyspace.NAME),
-                                                                        null,
-                                                                        WriteType.SIMPLE);
-        Mutation mutation = new Mutation(SystemKeyspace.NAME, UUIDType.instance.decompose(uuid));
-        mutation.delete(SystemKeyspace.BATCHLOG, FBUtilities.timestampMicros());
-        MessageOut<Mutation> message = mutation.createMessage();
-        for (InetAddress target : endpoints)
-        {
-            if (target.equals(FBUtilities.getBroadcastAddress()) && OPTIMIZE_LOCAL_REQUESTS)
-                insertLocal(message.payload, handler);
-            else
-                MessagingService.instance().sendRR(message, target, handler, false);
-        }
-    }
-
-    private static void syncWriteBatchedMutations(List<WriteResponseHandlerWrapper> wrappers, String localDataCenter)
-    throws WriteTimeoutException, OverloadedException
-    {
-        for (WriteResponseHandlerWrapper wrapper : wrappers)
-        {
-            Iterable<InetAddress> endpoints = Iterables.concat(wrapper.handler.naturalEndpoints, wrapper.handler.pendingEndpoints);
-            sendToHintedEndpoints(wrapper.mutation, endpoints, wrapper.handler, localDataCenter);
-        }
-
-        for (WriteResponseHandlerWrapper wrapper : wrappers)
-            wrapper.handler.get();
-    }
-
-    /**
-     * Perform the write of a mutation given a WritePerformer.
-     * Gather the list of write endpoints, apply locally and/or forward the mutation to
-     * said write endpoint (deletaged to the actual WritePerformer) and wait for the
-     * responses based on consistency level.
-     *
-     * @param mutation the mutation to be applied
-     * @param consistency_level the consistency level for the write operation
-     * @param performer the WritePerformer in charge of appliying the mutation
-     * given the list of write endpoints (either standardWritePerformer for
-     * standard writes or counterWritePerformer for counter writes).
-     * @param callback an optional callback to be run if and when the write is
-     * successful.
-     */
-    public static AbstractWriteResponseHandler performWrite(IMutation mutation,
-                                                            ConsistencyLevel consistency_level,
-                                                            String localDataCenter,
-                                                            WritePerformer performer,
-                                                            Runnable callback,
-                                                            WriteType writeType)
-    throws UnavailableException, OverloadedException
-    {
-        String keyspaceName = mutation.getKeyspaceName();
-        AbstractReplicationStrategy rs = Keyspace.open(keyspaceName).getReplicationStrategy();
-
-        Token tk = StorageService.getPartitioner().getToken(mutation.key());
-        List<InetAddress> naturalEndpoints = StorageService.instance.getNaturalEndpoints(keyspaceName, tk);
-        Collection<InetAddress> pendingEndpoints = StorageService.instance.getTokenMetadata().pendingEndpointsFor(tk, keyspaceName);
-
-        AbstractWriteResponseHandler responseHandler = rs.getWriteResponseHandler(naturalEndpoints, pendingEndpoints, consistency_level, callback, writeType);
-
-        // exit early if we can't fulfill the CL at this time
-        responseHandler.assureSufficientLiveNodes();
-
-        performer.apply(mutation, Iterables.concat(naturalEndpoints, pendingEndpoints), responseHandler, localDataCenter, consistency_level);
-        return responseHandler;
-    }
-
-    // same as above except does not initiate writes (but does perform availability checks).
-    private static WriteResponseHandlerWrapper wrapResponseHandler(Mutation mutation, ConsistencyLevel consistency_level, WriteType writeType)
-    {
-        AbstractReplicationStrategy rs = Keyspace.open(mutation.getKeyspaceName()).getReplicationStrategy();
-        String keyspaceName = mutation.getKeyspaceName();
-        Token tk = StorageService.getPartitioner().getToken(mutation.key());
-        List<InetAddress> naturalEndpoints = StorageService.instance.getNaturalEndpoints(keyspaceName, tk);
-        Collection<InetAddress> pendingEndpoints = StorageService.instance.getTokenMetadata().pendingEndpointsFor(tk, keyspaceName);
-        AbstractWriteResponseHandler responseHandler = rs.getWriteResponseHandler(naturalEndpoints, pendingEndpoints, consistency_level, null, writeType);
-        return new WriteResponseHandlerWrapper(responseHandler, mutation);
-    }
-
-    // used by atomic_batch_mutate to decouple availability check from the write itself, caches consistency level and endpoints.
-    private static class WriteResponseHandlerWrapper
-    {
-        final AbstractWriteResponseHandler handler;
-        final Mutation mutation;
-
-        WriteResponseHandlerWrapper(AbstractWriteResponseHandler handler, Mutation mutation)
-        {
-            this.handler = handler;
-            this.mutation = mutation;
-        }
-    }
-
-    /*
-     * Replicas are picked manually:
-     * - replicas should be alive according to the failure detector
-     * - replicas should be in the local datacenter
-     * - choose min(2, number of qualifying candiates above)
-     * - allow the local node to be the only replica only if it's a single-node DC
-     */
-    private static Collection<InetAddress> getBatchlogEndpoints(String localDataCenter, ConsistencyLevel consistencyLevel)
-    throws UnavailableException
-    {
-        TokenMetadata.Topology topology = StorageService.instance.getTokenMetadata().cachedOnlyTokenMap().getTopology();
-        Multimap<String, InetAddress> localEndpoints = HashMultimap.create(topology.getDatacenterRacks().get(localDataCenter));
-        String localRack = DatabaseDescriptor.getEndpointSnitch().getRack(FBUtilities.getBroadcastAddress());
-
-        Collection<InetAddress> chosenEndpoints = new BatchlogManager.EndpointFilter(localRack, localEndpoints).filter();
-        if (chosenEndpoints.isEmpty())
-        {
-            if (consistencyLevel == ConsistencyLevel.ANY)
-                return Collections.singleton(FBUtilities.getBroadcastAddress());
-
-            throw new UnavailableException(ConsistencyLevel.ONE, 1, 0);
-        }
-
-        return chosenEndpoints;
-    }
-#endif
 
 bool storage_proxy::cannot_hint(gms::inet_address target) {
     return _total_hints_in_progress > _max_hints_in_progress
@@ -1186,58 +1064,6 @@ bool storage_proxy::submit_hint(lw_shared_ptr<const frozen_mutation> m, gms::ine
         assert hostId != null : "Missing host ID for " + target.getHostAddress();
         HintedHandOffManager.instance.hintFor(mutation, now, ttl, hostId).apply();
         StorageMetrics.totalHints.inc();
-    }
-
-    private static void sendMessagesToNonlocalDC(MessageOut<? extends IMutation> message, Collection<InetAddress> targets, AbstractWriteResponseHandler handler)
-    {
-        Iterator<InetAddress> iter = targets.iterator();
-        InetAddress target = iter.next();
-
-        // Add the other destinations of the same message as a FORWARD_HEADER entry
-        DataOutputBuffer out = new DataOutputBuffer();
-        try
-        {
-            out.writeInt(targets.size() - 1);
-            while (iter.hasNext())
-            {
-                InetAddress destination = iter.next();
-                CompactEndpointSerializationHelper.serialize(destination, out);
-                int id = MessagingService.instance().addCallback(handler,
-                                                                 message,
-                                                                 destination,
-                                                                 message.getTimeout(),
-                                                                 handler.consistencyLevel,
-                                                                 true);
-                out.writeInt(id);
-                logger.trace("Adding FWD message to {}@{}", id, destination);
-            }
-            message = message.withParameter(Mutation.FORWARD_TO, out.getData());
-            // send the combined message + forward headers
-            int id = MessagingService.instance().sendRR(message, target, handler, true);
-            logger.trace("Sending message to {}@{}", id, target);
-        }
-        catch (IOException e)
-        {
-            // DataOutputBuffer is in-memory, doesn't throw IOException
-            throw new AssertionError(e);
-        }
-    }
-
-    private static void insertLocal(final Mutation mutation, final AbstractWriteResponseHandler responseHandler)
-    {
-
-        StageManager.getStage(Stage.MUTATION).maybeExecuteImmediately(new LocalMutationRunnable()
-        {
-            public void runMayThrow()
-            {
-                IMutation processed = SinkManager.processWriteRequest(mutation);
-                if (processed != null)
-                {
-                    ((Mutation) processed).apply();
-                    responseHandler.response(null);
-                }
-            }
-        });
     }
 
     /**
@@ -1395,7 +1221,7 @@ public:
     {
         _timeout.set_callback([this] {
             _timedout = true;
-            _done_promise.set_exception(read_timeout_exception(_cl, response_count(), _targets_count, false /* FIXME */));
+            _done_promise.set_exception(read_timeout_exception(_cl, response_count(), _targets_count, _responses != 0));
             on_timeout();
         });
         _timeout.arm(timeout);
@@ -1417,7 +1243,7 @@ class digest_read_resolver : public abstract_read_resolver {
     std::vector<query::result_digest> _digest_results;
 
     virtual void on_timeout() override {
-        _cl_promise.set_exception(read_timeout_exception(_cl, _cl_responses, _block_for, false /* FIXME */));
+        _cl_promise.set_exception(read_timeout_exception(_cl, _cl_responses, _block_for, _data_results.size() != 0));
         // we will not need them any more
         _data_results.clear();
         _digest_results.clear();
@@ -1485,6 +1311,7 @@ class data_read_resolver : public abstract_read_resolver {
         version(gms::inet_address from_, partition par_) : from(std::move(from_)), par(std::move(par_)) {}
     };
 
+    uint32_t _max_live_count = 0;
     std::vector<reply> _data_results;
 private:
     virtual void on_timeout() override {
@@ -1501,11 +1328,15 @@ public:
     }
     void add_mutate_data(gms::inet_address from, foreign_ptr<lw_shared_ptr<reconcilable_result>> result) {
         if (!_timedout) {
+            _max_live_count = std::max(result->row_count(), _max_live_count);
             _data_results.emplace_back(std::move(from), std::move(result));
             if (_data_results.size() == _targets_count) {
                 _done_promise.set_value();
             }
         }
+    }
+    uint32_t max_live_count() const {
+        return _max_live_count;
     }
     reconcilable_result resolve(schema_ptr schema) {
         assert(_data_results.size());
@@ -1576,6 +1407,7 @@ protected:
     using data_resolver_ptr = ::shared_ptr<data_read_resolver>;
 
     lw_shared_ptr<query::read_command> _cmd;
+    lw_shared_ptr<query::read_command> _retry_cmd;
     query::partition_range _partition_range;
     db::consistency_level _cl;
     size_t _block_for;
@@ -1589,12 +1421,12 @@ public:
     virtual ~abstract_read_executor() {};
 
 protected:
-    future<foreign_ptr<lw_shared_ptr<reconcilable_result>>> make_mutation_data_request(gms::inet_address ep) {
+    future<foreign_ptr<lw_shared_ptr<reconcilable_result>>> make_mutation_data_request(lw_shared_ptr<query::read_command> cmd, gms::inet_address ep) {
         if (is_me(ep)) {
-            return get_local_storage_proxy().query_mutations_locally(_cmd, _partition_range);
+            return get_local_storage_proxy().query_mutations_locally(cmd, _partition_range);
         } else {
             auto& ms = net::get_local_messaging_service();
-            return ms.send_read_mutation_data(net::messaging_service::shard_id{ep, 0}, *_cmd, _partition_range).then([this](reconcilable_result&& result) {
+            return ms.send_read_mutation_data(net::messaging_service::shard_id{ep, 0}, *cmd, _partition_range).then([this](reconcilable_result&& result) {
                     return make_foreign(::make_lw_shared<reconcilable_result>(std::move(result)));
             });
         }
@@ -1617,9 +1449,9 @@ protected:
             return ms.send_read_digest(net::messaging_service::shard_id{ep, 0}, *_cmd, _partition_range);
         }
     }
-    future<> make_mutation_data_requests(data_resolver_ptr resolver, targets_iterator begin, targets_iterator end) {
-        return parallel_for_each(begin, end, [this, resolver = std::move(resolver)] (gms::inet_address ep) {
-            return make_mutation_data_request(ep).then_wrapped([resolver, ep] (future<foreign_ptr<lw_shared_ptr<reconcilable_result>>> f) {
+    future<> make_mutation_data_requests(lw_shared_ptr<query::read_command> cmd, data_resolver_ptr resolver, targets_iterator begin, targets_iterator end) {
+        return parallel_for_each(begin, end, [this, &cmd, resolver = std::move(resolver)] (gms::inet_address ep) {
+            return make_mutation_data_request(cmd, ep).then_wrapped([resolver, ep] (future<foreign_ptr<lw_shared_ptr<reconcilable_result>>> f) {
                 try {
                     resolver->add_mutate_data(ep, f.get0());
                 } catch(...) {
@@ -1654,24 +1486,45 @@ protected:
         return when_all(make_data_requests(resolver, _targets.begin(), _targets.begin() + 1),
                         _targets.size() > 1 ? make_digest_requests(resolver, _targets.begin() + 1, _targets.end()) : make_ready_future()).discard_result();
     }
-    void reconciliate(db::consistency_level cl, std::chrono::high_resolution_clock::time_point timeout) {
+    uint32_t original_row_limit() const {
+        return _cmd->row_limit;
+    }
+    void reconciliate(db::consistency_level cl, std::chrono::high_resolution_clock::time_point timeout, lw_shared_ptr<query::read_command> cmd) {
         data_resolver_ptr data_resolver = ::make_shared<data_read_resolver>(cl, _targets.size(), timeout);
         auto exec = shared_from_this();
 
-        make_mutation_data_requests(data_resolver, _targets.begin(), _targets.end()).finally([exec]{});
+        make_mutation_data_requests(cmd, data_resolver, _targets.begin(), _targets.end()).finally([exec]{});
 
-        data_resolver->done().then_wrapped([exec, data_resolver] (future<> f) {
+        data_resolver->done().then_wrapped([this, exec, data_resolver, cmd = std::move(cmd), cl, timeout] (future<> f) {
             try {
                 f.get();
-                schema_ptr s = get_local_storage_proxy()._db.local().find_schema(exec->_cmd->cf_id);
+                schema_ptr s = get_local_storage_proxy()._db.local().find_schema(_cmd->cf_id);
                 auto rr = data_resolver->resolve(s); // reconciliation happens here
-                auto result = ::make_foreign(::make_lw_shared(to_data_query_result(std::move(rr), std::move(s), exec->_cmd->slice)));
-                exec->_result_promise.set_value(std::move(result));
+
+                // We generate a retry if at least one node reply with count live columns but after merge we have less
+                // than the total number of column we are interested in (which may be < count on a retry).
+                // So in particular, if no host returned count live columns, we know it's not a short read.
+                if (data_resolver->max_live_count() < cmd->row_limit || rr.row_count() >= original_row_limit()) {
+                    auto result = ::make_foreign(::make_lw_shared(to_data_query_result(std::move(rr), std::move(s), _cmd->slice)));
+                    _result_promise.set_value(std::move(result));
+                } else {
+                    _retry_cmd = make_lw_shared<query::read_command>(*cmd);
+                    // We asked t (= _cmd->row_limit) live columns and got l (=rr.row_count) ones.
+                    // From that, we can estimate that on this row, for x requested
+                    // columns, only l/t end up live after reconciliation. So for next
+                    // round we want to ask x column so that x * (l/t) == t, i.e. x = t^2/l.
+                    _retry_cmd->row_limit = rr.row_count() == 0 ? cmd->row_limit + 1 : ((cmd->row_limit * cmd->row_limit) / rr.row_count()) + 1;
+                    reconciliate(cl, timeout, _retry_cmd);
+                }
             } catch(read_timeout_exception& ex) {
-                exec->_result_promise.set_exception(ex);
+                _result_promise.set_exception(ex);
             }
         });
     }
+    void reconciliate(db::consistency_level cl, std::chrono::high_resolution_clock::time_point timeout) {
+        reconciliate(cl, timeout, _cmd);
+    }
+
 public:
     virtual future<foreign_ptr<lw_shared_ptr<query::result>>> execute(std::chrono::high_resolution_clock::time_point timeout) {
         digest_resolver_ptr digest_resolver = ::make_shared<digest_read_resolver>(_cl, _block_for, _targets.size(), timeout);
@@ -1961,7 +1814,7 @@ storage_proxy::query(schema_ptr s,
         auto query_id = next_id++;
 
         logger.trace("query {}.{} cmd={}, ranges={}, id={}", s->ks_name(), s->cf_name(), *cmd, ::join(", ", partition_ranges), query_id);
-        return do_query(s, cmd, std::move(partition_ranges), cl).then([query_id, cmd, s] (auto&& res) {
+        return do_query(s, cmd, std::move(partition_ranges), cl).then([query_id, cmd, s] (foreign_ptr<lw_shared_ptr<query::result>>&& res) {
             logger.trace("query_result id={}, {}", query_id, res->pretty_print(s, cmd->slice));
             return std::move(res);
         });
@@ -1983,11 +1836,15 @@ storage_proxy::do_query(schema_ptr s,
     if (partition_ranges.empty()) {
         return make_empty();
     }
-
+    utils::latency_counter lc;
+    lc.start();
     if (partition_ranges[0].is_singular() && partition_ranges[0].start()->value().has_key()) { // do not support mixed partitions (yet?)
         try {
-            return query_singular(cmd, std::move(partition_ranges), cl);
+            return query_singular(cmd, std::move(partition_ranges), cl).finally([lc, this] () mutable {
+                    _stats.read.mark(lc.stop().latency_in_nano());
+            });
         } catch (const no_such_column_family&) {
+            _stats.read.mark(lc.stop().latency_in_nano());
             return make_empty();
         }
     }
@@ -1995,39 +1852,15 @@ storage_proxy::do_query(schema_ptr s,
     if (partition_ranges.size() != 1) {
         // FIXME: implement
         throw std::runtime_error("more than one non singular range not supported yet");
+        _stats.read.mark(lc.stop().latency_in_nano());
     }
 
-    return query_partition_key_range(cmd, std::move(partition_ranges[0]), cl);
+    return query_partition_key_range(cmd, std::move(partition_ranges[0]), cl).finally([lc, this] () mutable {
+        _stats.read.mark(lc.stop().latency_in_nano());
+    });
 }
 
 #if 0
-    public static List<Row> read(List<ReadCommand> commands, ConsistencyLevel consistencyLevel)
-    throws UnavailableException, IsBootstrappingException, ReadTimeoutException, InvalidRequestException
-    {
-        // When using serial CL, the ClientState should be provided
-        assert !consistencyLevel.isSerialConsistency();
-        return read(commands, consistencyLevel, null);
-    }
-
-    /**
-     * Performs the actual reading of a row out of the StorageService, fetching
-     * a specific set of column names from a given column family.
-     */
-    public static List<Row> read(List<ReadCommand> commands, ConsistencyLevel consistencyLevel, ClientState state)
-    throws UnavailableException, IsBootstrappingException, ReadTimeoutException, InvalidRequestException
-    {
-        if (StorageService.instance.isBootstrapMode() && !systemKeyspaceQuery(commands))
-        {
-            readMetrics.unavailables.mark();
-            ClientRequestMetrics.readUnavailables.inc();
-            throw new IsBootstrappingException();
-        }
-
-        return consistencyLevel.isSerialConsistency()
-             ? readWithPaxos(commands, consistencyLevel, state)
-             : readRegular(commands, consistencyLevel);
-    }
-
     private static List<Row> readWithPaxos(List<ReadCommand> commands, ConsistencyLevel consistencyLevel, ClientState state)
     throws InvalidRequestException, UnavailableException, ReadTimeoutException
     {
@@ -2090,263 +1923,6 @@ storage_proxy::do_query(schema_ptr s,
         }
 
         return rows;
-    }
-
-    private static List<Row> readRegular(List<ReadCommand> commands, ConsistencyLevel consistencyLevel)
-    throws UnavailableException, ReadTimeoutException
-    {
-        long start = System.nanoTime();
-        List<Row> rows = null;
-
-        try
-        {
-            rows = fetchRows(commands, consistencyLevel);
-        }
-        catch (UnavailableException e)
-        {
-            readMetrics.unavailables.mark();
-            ClientRequestMetrics.readUnavailables.inc();
-            throw e;
-        }
-        catch (ReadTimeoutException e)
-        {
-            readMetrics.timeouts.mark();
-            ClientRequestMetrics.readTimeouts.inc();
-            throw e;
-        }
-        finally
-        {
-            long latency = System.nanoTime() - start;
-            readMetrics.addNano(latency);
-            // TODO avoid giving every command the same latency number.  Can fix this in CASSADRA-5329
-            for (ReadCommand command : commands)
-                Keyspace.open(command.ksName).getColumnFamilyStore(command.cfName).metric.coordinatorReadLatency.update(latency, TimeUnit.NANOSECONDS);
-        }
-
-        return rows;
-    }
-
-    /**
-     * This function executes local and remote reads, and blocks for the results:
-     *
-     * 1. Get the replica locations, sorted by response time according to the snitch
-     * 2. Send a data request to the closest replica, and digest requests to either
-     *    a) all the replicas, if read repair is enabled
-     *    b) the closest R-1 replicas, where R is the number required to satisfy the ConsistencyLevel
-     * 3. Wait for a response from R replicas
-     * 4. If the digests (if any) match the data return the data
-     * 5. else carry out read repair by getting data from all the nodes.
-     */
-    private static List<Row> fetchRows(List<ReadCommand> initialCommands, ConsistencyLevel consistencyLevel)
-    throws UnavailableException, ReadTimeoutException
-    {
-        List<Row> rows = new ArrayList<>(initialCommands.size());
-        // (avoid allocating a new list in the common case of nothing-to-retry)
-        List<ReadCommand> commandsToRetry = Collections.emptyList();
-
-        do
-        {
-            List<ReadCommand> commands = commandsToRetry.isEmpty() ? initialCommands : commandsToRetry;
-            AbstractReadExecutor[] readExecutors = new AbstractReadExecutor[commands.size()];
-
-            if (!commandsToRetry.isEmpty())
-                Tracing.trace("Retrying {} commands", commandsToRetry.size());
-
-            // send out read requests
-            for (int i = 0; i < commands.size(); i++)
-            {
-                ReadCommand command = commands.get(i);
-                assert !command.isDigestQuery();
-
-                AbstractReadExecutor exec = AbstractReadExecutor.getReadExecutor(command, consistencyLevel);
-                exec.executeAsync();
-                readExecutors[i] = exec;
-            }
-
-            for (AbstractReadExecutor exec : readExecutors)
-                exec.maybeTryAdditionalReplicas();
-
-            // read results and make a second pass for any digest mismatches
-            List<ReadCommand> repairCommands = null;
-            List<ReadCallback<ReadResponse, Row>> repairResponseHandlers = null;
-            for (AbstractReadExecutor exec: readExecutors)
-            {
-                try
-                {
-                    Row row = exec.get();
-                    if (row != null)
-                    {
-                        exec.command.maybeTrim(row);
-                        rows.add(row);
-                    }
-
-                    if (logger.isDebugEnabled())
-                        logger.debug("Read: {} ms.", TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - exec.handler.start));
-                }
-                catch (ReadTimeoutException ex)
-                {
-                    int blockFor = consistencyLevel.blockFor(Keyspace.open(exec.command.getKeyspace()));
-                    int responseCount = exec.handler.getReceivedCount();
-                    String gotData = responseCount > 0
-                                   ? exec.resolver.isDataPresent() ? " (including data)" : " (only digests)"
-                                   : "";
-
-                    if (Tracing.isTracing())
-                    {
-                        Tracing.trace("Timed out; received {} of {} responses{}",
-                                      new Object[]{ responseCount, blockFor, gotData });
-                    }
-                    else if (logger.isDebugEnabled())
-                    {
-                        logger.debug("Read timeout; received {} of {} responses{}", responseCount, blockFor, gotData);
-                    }
-                    throw ex;
-                }
-                catch (DigestMismatchException ex)
-                {
-                    Tracing.trace("Digest mismatch: {}", ex);
-
-                    ReadRepairMetrics.repairedBlocking.mark();
-
-                    // Do a full data read to resolve the correct response (and repair node that need be)
-                    RowDataResolver resolver = new RowDataResolver(exec.command.ksName, exec.command.key, exec.command.filter(), exec.command.timestamp, exec.handler.endpoints.size());
-                    ReadCallback<ReadResponse, Row> repairHandler = new ReadCallback<>(resolver,
-                                                                                       ConsistencyLevel.ALL,
-                                                                                       exec.getContactedReplicas().size(),
-                                                                                       exec.command,
-                                                                                       Keyspace.open(exec.command.getKeyspace()),
-                                                                                       exec.handler.endpoints);
-
-                    if (repairCommands == null)
-                    {
-                        repairCommands = new ArrayList<>();
-                        repairResponseHandlers = new ArrayList<>();
-                    }
-                    repairCommands.add(exec.command);
-                    repairResponseHandlers.add(repairHandler);
-
-                    MessageOut<ReadCommand> message = exec.command.createMessage();
-                    for (InetAddress endpoint : exec.getContactedReplicas())
-                    {
-                        Tracing.trace("Enqueuing full data read to {}", endpoint);
-                        MessagingService.instance().sendRR(message, endpoint, repairHandler);
-                    }
-                }
-            }
-
-            commandsToRetry.clear();
-
-            // read the results for the digest mismatch retries
-            if (repairResponseHandlers != null)
-            {
-                for (int i = 0; i < repairCommands.size(); i++)
-                {
-                    ReadCommand command = repairCommands.get(i);
-                    ReadCallback<ReadResponse, Row> handler = repairResponseHandlers.get(i);
-
-                    Row row;
-                    try
-                    {
-                        row = handler.get();
-                    }
-                    catch (DigestMismatchException e)
-                    {
-                        throw new AssertionError(e); // full data requested from each node here, no digests should be sent
-                    }
-                    catch (ReadTimeoutException e)
-                    {
-                        if (Tracing.isTracing())
-                            Tracing.trace("Timed out waiting on digest mismatch repair requests");
-                        else
-                            logger.debug("Timed out waiting on digest mismatch repair requests");
-                        // the caught exception here will have CL.ALL from the repair command,
-                        // not whatever CL the initial command was at (CASSANDRA-7947)
-                        int blockFor = consistencyLevel.blockFor(Keyspace.open(command.getKeyspace()));
-                        throw new ReadTimeoutException(consistencyLevel, blockFor-1, blockFor, true);
-                    }
-
-                    RowDataResolver resolver = (RowDataResolver)handler.resolver;
-                    try
-                    {
-                        // wait for the repair writes to be acknowledged, to minimize impact on any replica that's
-                        // behind on writes in case the out-of-sync row is read multiple times in quick succession
-                        FBUtilities.waitOnFutures(resolver.repairResults, DatabaseDescriptor.getWriteRpcTimeout());
-                    }
-                    catch (TimeoutException e)
-                    {
-                        if (Tracing.isTracing())
-                            Tracing.trace("Timed out waiting on digest mismatch repair acknowledgements");
-                        else
-                            logger.debug("Timed out waiting on digest mismatch repair acknowledgements");
-                        int blockFor = consistencyLevel.blockFor(Keyspace.open(command.getKeyspace()));
-                        throw new ReadTimeoutException(consistencyLevel, blockFor-1, blockFor, true);
-                    }
-
-                    // retry any potential short reads
-                    ReadCommand retryCommand = command.maybeGenerateRetryCommand(resolver, row);
-                    if (retryCommand != null)
-                    {
-                        Tracing.trace("Issuing retry for read command");
-                        if (commandsToRetry == Collections.EMPTY_LIST)
-                            commandsToRetry = new ArrayList<>();
-                        commandsToRetry.add(retryCommand);
-                        continue;
-                    }
-
-                    if (row != null)
-                    {
-                        command.maybeTrim(row);
-                        rows.add(row);
-                    }
-                }
-            }
-        } while (!commandsToRetry.isEmpty());
-
-        return rows;
-    }
-
-    static class LocalReadRunnable extends DroppableRunnable
-    {
-        private final ReadCommand command;
-        private final ReadCallback<ReadResponse, Row> handler;
-        private final long start = System.nanoTime();
-
-        LocalReadRunnable(ReadCommand command, ReadCallback<ReadResponse, Row> handler)
-        {
-            super(MessagingService.Verb.READ);
-            this.command = command;
-            this.handler = handler;
-        }
-
-        protected void runMayThrow()
-        {
-            Keyspace keyspace = Keyspace.open(command.ksName);
-            Row r = command.getRow(keyspace);
-            ReadResponse result = ReadVerbHandler.getResponse(command, r);
-            MessagingService.instance().addLatency(FBUtilities.getBroadcastAddress(), TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start));
-            handler.response(result);
-        }
-    }
-
-    static class LocalRangeSliceRunnable extends DroppableRunnable
-    {
-        private final AbstractRangeCommand command;
-        private final ReadCallback<RangeSliceReply, Iterable<Row>> handler;
-        private final long start = System.nanoTime();
-
-        LocalRangeSliceRunnable(AbstractRangeCommand command, ReadCallback<RangeSliceReply, Iterable<Row>> handler)
-        {
-            super(MessagingService.Verb.RANGE_SLICE);
-            this.command = command;
-            this.handler = handler;
-        }
-
-        protected void runMayThrow()
-        {
-            RangeSliceReply result = new RangeSliceReply(command.executeLocally());
-            MessagingService.instance().addLatency(FBUtilities.getBroadcastAddress(), TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start));
-            handler.response(result);
-        }
     }
 #endif
 
@@ -2435,85 +2011,6 @@ float storage_proxy::estimate_result_rows_per_range(lw_shared_ptr<query::read_co
         else
             return rows.size() > command.limit() ? rows.subList(0, command.limit()) : rows;
     }
-
-    public Map<String, List<String>> getSchemaVersions()
-    {
-        return describeSchemaVersions();
-    }
-
-    /**
-     * initiate a request/response session with each live node to check whether or not everybody is using the same
-     * migration id. This is useful for determining if a schema change has propagated through the cluster. Disagreement
-     * is assumed if any node fails to respond.
-     */
-    public static Map<String, List<String>> describeSchemaVersions()
-    {
-        final String myVersion = Schema.instance.getVersion().toString();
-        final Map<InetAddress, UUID> versions = new ConcurrentHashMap<InetAddress, UUID>();
-        final Set<InetAddress> liveHosts = Gossiper.instance.getLiveMembers();
-        final CountDownLatch latch = new CountDownLatch(liveHosts.size());
-
-        IAsyncCallback<UUID> cb = new IAsyncCallback<UUID>()
-        {
-            public void response(MessageIn<UUID> message)
-            {
-                // record the response from the remote node.
-                versions.put(message.from, message.payload);
-                latch.countDown();
-            }
-
-            public boolean isLatencyForSnitch()
-            {
-                return false;
-            }
-        };
-        // an empty message acts as a request to the SchemaCheckVerbHandler.
-        MessageOut message = new MessageOut(MessagingService.Verb.SCHEMA_CHECK);
-        for (InetAddress endpoint : liveHosts)
-            MessagingService.instance().sendRR(message, endpoint, cb);
-
-        try
-        {
-            // wait for as long as possible. timeout-1s if possible.
-            latch.await(DatabaseDescriptor.getRpcTimeout(), TimeUnit.MILLISECONDS);
-        }
-        catch (InterruptedException ex)
-        {
-            throw new AssertionError("This latch shouldn't have been interrupted.");
-        }
-
-        // maps versions to hosts that are on that version.
-        Map<String, List<String>> results = new HashMap<String, List<String>>();
-        Iterable<InetAddress> allHosts = Iterables.concat(Gossiper.instance.getLiveMembers(), Gossiper.instance.getUnreachableMembers());
-        for (InetAddress host : allHosts)
-        {
-            UUID version = versions.get(host);
-            String stringVersion = version == null ? UNREACHABLE : version.toString();
-            List<String> hosts = results.get(stringVersion);
-            if (hosts == null)
-            {
-                hosts = new ArrayList<String>();
-                results.put(stringVersion, hosts);
-            }
-            hosts.add(host.getHostAddress());
-        }
-
-        // we're done: the results map is ready to return to the client.  the rest is just debug logging:
-        if (results.get(UNREACHABLE) != null)
-            logger.debug("Hosts not in agreement. Didn't get a response from everybody: {}", StringUtils.join(results.get(UNREACHABLE), ","));
-        for (Map.Entry<String, List<String>> entry : results.entrySet())
-        {
-            // check for version disagreement. log the hosts that don't agree.
-            if (entry.getKey().equals(UNREACHABLE) || entry.getKey().equals(myVersion))
-                continue;
-            for (String host : entry.getValue())
-                logger.debug("{} disagrees ({})", host, entry.getKey());
-        }
-        if (results.size() == 1)
-            logger.debug("Schemas are in agreement.");
-
-        return results;
-    }
 #endif
 
 /**
@@ -2576,113 +2073,6 @@ storage_proxy::get_restricted_ranges(keyspace& ks, const schema& s, query::parti
 
     return ranges;
 }
-
-#if 0
-    public long getReadOperations()
-    {
-        return readMetrics.latency.count();
-    }
-
-    public long getTotalReadLatencyMicros()
-    {
-        return readMetrics.totalLatency.count();
-    }
-
-    public double getRecentReadLatencyMicros()
-    {
-        return readMetrics.getRecentLatency();
-    }
-
-    public long[] getTotalReadLatencyHistogramMicros()
-    {
-        return readMetrics.totalLatencyHistogram.getBuckets(false);
-    }
-
-    public long[] getRecentReadLatencyHistogramMicros()
-    {
-        return readMetrics.recentLatencyHistogram.getBuckets(true);
-    }
-
-    public long getRangeOperations()
-    {
-        return rangeMetrics.latency.count();
-    }
-
-    public long getTotalRangeLatencyMicros()
-    {
-        return rangeMetrics.totalLatency.count();
-    }
-
-    public double getRecentRangeLatencyMicros()
-    {
-        return rangeMetrics.getRecentLatency();
-    }
-
-    public long[] getTotalRangeLatencyHistogramMicros()
-    {
-        return rangeMetrics.totalLatencyHistogram.getBuckets(false);
-    }
-
-    public long[] getRecentRangeLatencyHistogramMicros()
-    {
-        return rangeMetrics.recentLatencyHistogram.getBuckets(true);
-    }
-
-    public long getWriteOperations()
-    {
-        return writeMetrics.latency.count();
-    }
-
-    public long getTotalWriteLatencyMicros()
-    {
-        return writeMetrics.totalLatency.count();
-    }
-
-    public double getRecentWriteLatencyMicros()
-    {
-        return writeMetrics.getRecentLatency();
-    }
-
-    public long[] getTotalWriteLatencyHistogramMicros()
-    {
-        return writeMetrics.totalLatencyHistogram.getBuckets(false);
-    }
-
-    public long[] getRecentWriteLatencyHistogramMicros()
-    {
-        return writeMetrics.recentLatencyHistogram.getBuckets(true);
-    }
-
-    public boolean getHintedHandoffEnabled()
-    {
-        return DatabaseDescriptor.hintedHandoffEnabled();
-    }
-
-    public Set<String> getHintedHandoffEnabledByDC()
-    {
-        return DatabaseDescriptor.hintedHandoffEnabledByDC();
-    }
-
-    public void setHintedHandoffEnabled(boolean b)
-    {
-        DatabaseDescriptor.setHintedHandoffEnabled(b);
-    }
-
-    public void setHintedHandoffEnabledByDCList(String dcNames)
-    {
-        DatabaseDescriptor.setHintedHandoffEnabled(dcNames);
-    }
-
-    public int getMaxHintWindow()
-    {
-        return DatabaseDescriptor.getMaxHintWindow();
-    }
-
-    public void setMaxHintWindow(int ms)
-    {
-        DatabaseDescriptor.setMaxHintWindow(ms);
-    }
-#endif
 
 bool storage_proxy::should_hint(gms::inet_address ep) {
     if (is_me(ep)) { // do not hint to local address
@@ -3033,12 +2423,12 @@ class mutation_result_merger {
         }
     };
 
-    uint32_t _limit;
+    lw_shared_ptr<query::read_command> _cmd;
     schema_ptr _schema;
     std::vector<partition_run> _runs;
 public:
-    mutation_result_merger(uint32_t limit, schema_ptr schema)
-        : _limit(limit)
+    mutation_result_merger(lw_shared_ptr<query::read_command> cmd, schema_ptr schema)
+        : _cmd(std::move(cmd))
         , _schema(std::move(schema))
     { }
 
@@ -3068,9 +2458,20 @@ public:
             boost::range::pop_heap(_runs, cmp);
             partition_run& next = _runs.back();
             const partition& p = next.current();
-            partitions.push_back(p);
-            row_count += p._row_count;
-            if (row_count >= _limit) {
+            unsigned limit_left = _cmd->row_limit - row_count;
+            if (p._row_count > limit_left) {
+                // no space for all rows in the mutation
+                // unfreeze -> trim -> freeze
+                mutation m = p.mut().unfreeze(_schema);
+                static const std::vector<query::clustering_range> all(1, query::clustering_range::make_open_ended_both_sides());
+                auto rc = m.partition().compact_for_query(*_schema, _cmd->timestamp, all, limit_left);
+                partitions.push_back(partition(rc, freeze(m)));
+                row_count += rc;
+            } else {
+                partitions.push_back(p);
+                row_count += p._row_count;
+            }
+            if (row_count >= _cmd->row_limit) {
                 break;
             }
             next.advance();
@@ -3096,7 +2497,7 @@ storage_proxy::query_mutations_locally(lw_shared_ptr<query::read_command> cmd, c
         });
     } else {
         auto schema = _db.local().find_schema(cmd->cf_id);
-        return _db.map_reduce(mutation_result_merger{cmd->row_limit, schema}, [cmd, &pr] (database& db) {
+        return _db.map_reduce(mutation_result_merger{cmd, schema}, [cmd, &pr] (database& db) {
             return db.query_mutations(*cmd, pr).then([] (reconcilable_result&& result) {
                 return make_foreign(make_lw_shared(std::move(result)));
             });
@@ -3115,7 +2516,7 @@ class shard_reader {
     distributed<database>& _db;
     unsigned _shard;
     utils::UUID _cf_id;
-    const query::partition_range& _range;
+    const query::partition_range _range;
     schema_ptr _local_schema;
     struct remote_state {
         mutation_reader reader;
@@ -3167,6 +2568,16 @@ public:
 
 mutation_reader
 storage_proxy::make_local_reader(utils::UUID cf_id, const query::partition_range& range) {
+    // Split ranges which wrap around, because the individual readers created
+    // by shard_reader do not support them:
+    auto schema = _db.local().find_column_family(cf_id).schema();
+    if (range.is_wrap_around(dht::ring_position_comparator(*schema))) {
+        auto unwrapped = range.unwrap();
+        return make_joining_reader({
+            make_local_reader(cf_id, unwrapped.second),
+            make_local_reader(cf_id, unwrapped.first)});
+    }
+
     unsigned first_shard = range.start() ? dht::shard_of(range.start()->value().token()) : 0;
     unsigned last_shard = range.end() ? dht::shard_of(range.end()->value().token()) : smp::count - 1;
     std::vector<mutation_reader> readers;

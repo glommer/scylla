@@ -183,13 +183,13 @@ public:
             , "die", "stop_paranoid", "stop", "best_effort", "ignore"   \
     )   \
     val(endpoint_snitch, sstring, "org.apache.cassandra.locator.SimpleSnitch", Used,  \
-            "Set to a class that implements the IEndpointSnitch. Cassandra uses snitches for locating nodes and routing requests.\n"    \
-            "\tSimpleSnitch                 Use for single-data center deployments or single-zone in public clouds. Does not recognize data center or rack information. It treats strategy order as proximity, which can improve cache locality when disabling read repair.\n"    \
-            "\tGossipingPropertyFileSnitch  Recommended for production. The rack and data center for the local node are defined in the cassandra-rackdc.properties file and propagated to other nodes via gossip. To allow migration from the PropertyFileSnitch, it uses the cassandra-topology.properties file if it is present.\n"    \
-            "\tPropertyFileSnitch           Determines proximity by rack and data center, which are explicitly configured in the cassandra-topology.properties file.\n"    \
-            "\tEc2Snitch                    For EC2 deployments in a single region. Loads region and availability zone information from the EC2 API. The region is treated as the data center and the availability zone as the rack. Uses only private IPs. Subsequently it does not work across multiple regions.\n"    \
-            "\tEc2MultiRegionSnitch         Uses public IPs as the broadcast_address to allow cross-region connectivity. This means you must also set seed addresses to the public IP and open the storage_port or ssl_storage_port on the public IP firewall. For intra-region traffic, Cassandra switches to the private IP after establishing a connection.\n"    \
-            "\tRackInferringSnitch          Proximity is determined by rack and data center, which are assumed to correspond to the 3rd and 2nd octet of each node's IP address, respectively. This snitch is best used as an example for writing a custom snitch class (unless this happens to match your deployment conventions).\n" \
+            "Set to a class that implements the IEndpointSnitch. Cassandra uses snitches for locating nodes and routing requests.\n\n"    \
+            "\tSimpleSnitch: Use for single-data center deployments or single-zone in public clouds. Does not recognize data center or rack information. It treats strategy order as proximity, which can improve cache locality when disabling read repair.\n\n"    \
+            "\tGossipingPropertyFileSnitch: Recommended for production. The rack and data center for the local node are defined in the cassandra-rackdc.properties file and propagated to other nodes via gossip. To allow migration from the PropertyFileSnitch, it uses the cassandra-topology.properties file if it is present.\n\n"    \
+            /*"\tPropertyFileSnitch: Determines proximity by rack and data center, which are explicitly configured in the cassandra-topology.properties file.\n\n"    */\
+            /*"\tEc2Snitch: For EC2 deployments in a single region. Loads region and availability zone information from the EC2 API. The region is treated as the data center and the availability zone as the rack. Uses only private IPs. Subsequently it does not work across multiple regions.\n\n"    */\
+            /*"\tEc2MultiRegionSnitch: Uses public IPs as the broadcast_address to allow cross-region connectivity. This means you must also set seed addresses to the public IP and open the storage_port or ssl_storage_port on the public IP firewall. For intra-region traffic, Cassandra switches to the private IP after establishing a connection.\n\n"    */\
+            "\tRackInferringSnitch: Proximity is determined by rack and data center, which are assumed to correspond to the 3rd and 2nd octet of each node's IP address, respectively. This snitch is best used as an example for writing a custom snitch class (unless this happens to match your deployment conventions).\n" \
             "\n"    \
             "Related information: Snitches\n"    \
     )                                                   \
@@ -364,7 +364,7 @@ public:
             "If you not using vnodes or have num_tokens set it to 1 or unspecified (#num_tokens), you should always specify this parameter when setting up a production cluster for the first time and when adding capacity. For more information, see this parameter in the Cassandra 1.1 Node and Cluster Configuration documentation.\n" \
             "This parameter can be used with num_tokens (vnodes ) in special cases such as Restoring from a snapshot." \
     )   \
-    val(num_tokens, uint32_t, 1, Unused,                \
+    val(num_tokens, uint32_t, 1, Used,                \
             "Defines the number of tokens randomly assigned to this node on the ring when using virtual nodes (vnodes). The more tokens, relative to other nodes, the larger the proportion of data that the node stores. Generally all nodes should have the same number of tokens assuming equal hardware capability. The recommended value is 256. If unspecified (#num_tokens), Cassandra uses 1 (equivalent to #num_tokens : 1) for legacy compatibility and uses the initial_token setting.\n"    \
             "If not using vnodes, comment #num_tokens : 256 or set num_tokens : 1 and use initial_token. If you already have an existing cluster with one token per node and wish to migrate to vnodes, see Enabling virtual nodes on an existing production cluster.\n"    \
             "Note: If using DataStax Enterprise, the default setting of this property depends on the type of node and type of install."  \

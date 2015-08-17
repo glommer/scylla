@@ -122,6 +122,7 @@ urchin_tests = [
     'tests/perf/perf_hash',
     'tests/perf/perf_cql_parser',
     'tests/perf/perf_simple_query',
+    'tests/perf/perf_sstable_index',
     'tests/cql_query_test',
     'tests/storage_proxy_test',
     'tests/mutation_reader_test',
@@ -142,6 +143,7 @@ urchin_tests = [
     'tests/compound_test',
     'tests/config_test',
     'tests/gossiping_property_file_snitch_test',
+    'tests/snitch_reset_test',
     'tests/network_topology_strategy_test',
     'tests/query_processor_test',
     'tests/batchlog_manager_test',
@@ -150,6 +152,7 @@ urchin_tests = [
     'tests/murmur_hash_test',
     'tests/allocation_strategy_test',
     'tests/logalloc_test',
+    'tests/crc_test',
 ]
 
 apps = [
@@ -215,6 +218,8 @@ urchin_core = (['database.cc',
                  'sstables/filter.cc',
                  'sstables/compaction.cc',
                  'log.cc',
+                 'transport/event.cc',
+                 'transport/event_notifier.cc',
                  'transport/server.cc',
                  'cql3/abstract_marker.cc',
                  'cql3/attributes.cc',
@@ -286,6 +291,7 @@ urchin_core = (['database.cc',
                  'utils/bloom_filter.cc',
                  'utils/bloom_calculations.cc',
                  'utils/rate_limiter.cc',
+                 'utils/compaction_manager.cc',
                  'gms/version_generator.cc',
                  'gms/versioned_value.cc',
                  'gms/gossiper.cc',
@@ -344,6 +350,7 @@ urchin_core = (['database.cc',
 
 api = ['api/api.cc',
        'api/api-doc/storage_service.json',
+       'api/api-doc/lsa.json',
        'api/storage_service.cc',
        'api/api-doc/commitlog.json',
        'api/commitlog.cc',
@@ -368,6 +375,7 @@ api = ['api/api.cc',
        'api/api-doc/hinted_handoff.json',
        'api/hinted_handoff.cc',
        'api/api-doc/utils.json',
+       'api/lsa.cc',
        ]
 
 urchin_tests_dependencies = urchin_core + [
@@ -388,7 +396,7 @@ deps = {
 
 for t in urchin_tests:
     deps[t] = urchin_tests_dependencies + [t + '.cc']
-    if 'types_test' not in t and 'keys_test' not in t and 'partitioner_test' not in t and 'map_difference_test' not in t and 'frozen_mutation_test' not in t and 'perf_mutation' not in t and 'cartesian_product_test' not in t and 'perf_hash' not in t and 'perf_cql_parser' not in t and 'message' not in t and 'perf_simple_query' not in t and 'serialization' not in t and t != 'tests/gossip' and 'compound_test' not in t and 'range_test' not in t:
+    if 'types_test' not in t and 'keys_test' not in t and 'partitioner_test' not in t and 'map_difference_test' not in t and 'frozen_mutation_test' not in t and 'perf_mutation' not in t and 'cartesian_product_test' not in t and 'perf_hash' not in t and 'perf_cql_parser' not in t and 'message' not in t and 'perf_simple_query' not in t and 'serialization' not in t and t != 'tests/gossip' and 'compound_test' not in t and 'range_test' not in t and 'crc_test' not in t and 'perf_sstable_index' not in t:
         deps[t] += urchin_tests_seastar_deps
 
 deps['tests/sstable_test'] += ['tests/sstable_datafile_test.cc']
@@ -396,7 +404,7 @@ deps['tests/sstable_test'] += ['tests/sstable_datafile_test.cc']
 deps['tests/bytes_ostream_test'] = ['tests/bytes_ostream_test.cc']
 deps['tests/UUID_test'] = ['utils/UUID_gen.cc', 'tests/UUID_test.cc']
 deps['tests/murmur_hash_test'] = ['bytes.cc', 'utils/murmur_hash.cc', 'tests/murmur_hash_test.cc']
-deps['tests/allocation_strategy_test'] = ['tests/allocation_strategy_test.cc']
+deps['tests/allocation_strategy_test'] = ['tests/allocation_strategy_test.cc', 'utils/logalloc.cc', 'log.cc']
 
 warnings = [
     '-Wno-mismatched-tags',  # clang-only
@@ -467,6 +475,7 @@ for mode in build_modes:
 seastar_deps = 'practically_anything_can_change_so_lets_run_it_every_time_and_restat.'
 
 args.user_cflags += " " + pkg_config("--cflags", "jsoncpp")
+args.user_cflags = '-march=nehalem ' + args.user_cflags
 libs = "-lyaml-cpp -llz4 -lz -lsnappy " + pkg_config("--libs", "jsoncpp") + ' -lboost_filesystem'
 user_cflags = args.user_cflags
 

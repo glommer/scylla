@@ -46,7 +46,9 @@
 #include "mutation_reader.hh"
 #include "row_cache.hh"
 #include "compaction_strategy.hh"
+#include "utils/compaction_manager.hh"
 #include "utils/exponential_backoff_retry.hh"
+#include "utils/histogram.hh"
 
 class frozen_mutation;
 class reconcilable_result;
@@ -58,7 +60,7 @@ class storage_proxy;
 namespace sstables {
 
 class sstable;
-
+class entry_descriptor;
 }
 
 namespace db {
@@ -93,8 +95,13 @@ public:
         int64_t memtable_switch_count = 0;
         /** Estimated number of tasks pending for this column family */
         int64_t pending_flushes = 0;
-        int64_t reads = 0;
-        int64_t writes = 0;
+        int64_t live_disk_space_used = 0;
+        int64_t total_disk_space_used = 0;
+        int64_t live_sstable_count = 0;
+        /** Estimated number of compactions pending for this column family */
+        int64_t pending_compactions = 0;
+        utils::ihistogram reads{256, 100};
+        utils::ihistogram writes{256, 100};
     };
 
 private:
@@ -111,13 +118,12 @@ private:
     // Provided by the database that owns this commitlog
     db::commitlog* _commitlog;
     sstables::compaction_strategy _compaction_strategy;
-    future<> _compaction_done = make_ready_future<>();
-    semaphore _compaction_sem;
-    exponential_backoff_retry _compaction_retry = exponential_backoff_retry(std::chrono::seconds(5), std::chrono::seconds(300));
+    compaction_manager& _compaction_manager;
 private:
+    void update_stats_for_new_sstable(uint64_t new_sstable_data_size);
     void add_sstable(sstables::sstable&& sstable);
     void add_memtable();
-    future<> update_cache(memtable&);
+    future<> update_cache(memtable&, lw_shared_ptr<sstable_list> old_sstables);
     struct merge_comparator;
 private:
     // Creates a mutation reader which covers sstables.
@@ -126,6 +132,7 @@ private:
     mutation_reader make_sstable_reader(const query::partition_range& range) const;
 
     mutation_source sstables_as_mutation_source();
+    negative_mutation_reader make_negative_mutation_reader(lw_shared_ptr<sstable_list> old_sstables);
 public:
     // Creates a mutation reader which covers all data sources for this column family.
     // Caller needs to ensure that column_family remains live (FIXME: relax this).
@@ -143,8 +150,8 @@ public:
     using const_row_ptr = std::unique_ptr<const row>;
     memtable& active_memtable() { return *_memtables->back(); }
 public:
-    column_family(schema_ptr schema, config cfg, db::commitlog& cl);
-    column_family(schema_ptr schema, config cfg, no_commitlog);
+    column_family(schema_ptr schema, config cfg, db::commitlog& cl, compaction_manager&);
+    column_family(schema_ptr schema, config cfg, no_commitlog, compaction_manager&);
     column_family(column_family&&) = delete; // 'this' is being captured during construction
     ~column_family();
     schema_ptr schema() const { return _schema; }
@@ -203,7 +210,7 @@ private:
     // Func signature: bool (const decorated_key& dk, const mutation_partition& mp)
     template <typename Func>
     future<bool> for_all_partitions(Func&& func) const;
-    future<> probe_file(sstring sstdir, sstring fname);
+    future<sstables::entry_descriptor> probe_file(sstring sstdir, sstring fname);
     void seal_on_overflow();
     void check_valid_rp(const db::replay_position&) const;
 public:
@@ -351,6 +358,8 @@ class database {
     std::unique_ptr<db::commitlog> _commitlog;
     std::unique_ptr<db::config> _cfg;
     utils::UUID _version;
+    // compaction_manager object is referenced by all column families of a database.
+    compaction_manager _compaction_manager;
 
     future<> init_commitlog();
     future<> apply_in_memory(const frozen_mutation&, const db::replay_position&);
@@ -379,6 +388,10 @@ public:
 
     db::commitlog* commitlog() const {
         return _commitlog.get();
+    }
+
+    const compaction_manager& get_compaction_manager() const {
+        return _compaction_manager;
     }
 
     future<> init_system_keyspace();
@@ -449,9 +462,11 @@ class secondary_index_manager {};
 inline
 void
 column_family::apply(const mutation& m, const db::replay_position& rp) {
+    utils::latency_counter lc;
+    _stats.writes.set_latency(lc);
     active_memtable().apply(m, rp);
-    _stats.writes++;
     seal_on_overflow();
+    _stats.writes.mark(lc);
 }
 
 inline
@@ -475,10 +490,12 @@ column_family::check_valid_rp(const db::replay_position& rp) const {
 inline
 void
 column_family::apply(const frozen_mutation& m, const db::replay_position& rp) {
+    utils::latency_counter lc;
+    _stats.writes.set_latency(lc);
     check_valid_rp(rp);
     active_memtable().apply(m, rp);
-    _stats.writes++;
     seal_on_overflow();
+    _stats.writes.mark(lc);
 }
 
 future<> update_schema_version_and_announce(service::storage_proxy& proxy);

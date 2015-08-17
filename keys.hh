@@ -509,8 +509,13 @@ public:
     }
 
     static clustering_key from_clustering_prefix(const schema& s, const exploded_clustering_prefix& prefix) {
-        assert(prefix.is_full(s));
-        return from_exploded(s, prefix.components());
+        if (prefix.is_full(s)) {
+            return from_exploded(s, prefix.components());
+        }
+        assert(s.is_dense());
+        auto components = prefix.components();
+        components.resize(s.clustering_key_size());
+        return from_exploded(s, std::move(components));
     }
 
     friend std::ostream& operator<<(std::ostream& out, const clustering_key& ck);

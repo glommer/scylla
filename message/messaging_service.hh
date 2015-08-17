@@ -93,6 +93,7 @@ enum class messaging_verb : int32_t {
     // Used by streaming
     STREAM_INIT_MESSAGE,
     PREPARE_MESSAGE,
+    PREPARE_DONE_MESSAGE,
     STREAM_MUTATION,
     STREAM_MUTATION_DONE,
     INCOMING_FILE_MESSAGE,
@@ -231,7 +232,7 @@ struct serializer {
         out.write(v.begin(), v.size());
     }
     template <typename Input>
-    void read(Input& in, rpc::type<sstring>) const {
+    sstring read(Input& in, rpc::type<sstring>) const {
         auto sz = read(in, rpc::type<uint32_t>());
         sstring v(sstring::initialized_later(), sz);
         in.read(v.begin(), sz);
@@ -435,6 +436,10 @@ public:
         inet_address from, inet_address connecting, unsigned src_cpu_id, unsigned dst_cpu_id)>&& func);
     future<streaming::messages::prepare_message> send_prepare_message(shard_id id, streaming::messages::prepare_message msg, UUID plan_id,
         inet_address from, inet_address connecting, unsigned src_cpu_id, unsigned dst_cpu_id);
+
+    // Wrapper for PREPARE_DONE_MESSAGE verb
+    void register_prepare_done_message(std::function<future<> (UUID plan_id, inet_address from, inet_address connecting, unsigned dst_cpu_id)>&& func);
+    future<> send_prepare_done_message(shard_id id, UUID plan_id, inet_address from, inet_address connecting, unsigned dst_cpu_id);
 
     // Wrapper for STREAM_MUTATION verb
     void register_stream_mutation(std::function<future<> (UUID plan_id, frozen_mutation fm, unsigned dst_cpu_id)>&& func);

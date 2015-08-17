@@ -3,6 +3,7 @@
 #include "sstables/sstables.hh"
 #include "schema.hh"
 #include "schema_builder.hh"
+#include "core/thread.hh"
 
 static auto la = sstables::sstable::version_types::la;
 static auto big = sstables::sstable::format_types::big;
@@ -60,10 +61,22 @@ public:
     int binary_search(const T& entries, const key& sk) {
         return _sst->binary_search(entries, sk);
     }
+
+    future<> store() {
+        _sst->_components.erase(sstable::component_type::Index);
+        _sst->_components.erase(sstable::component_type::Data);
+        return seastar::async([sst = _sst] {
+            sst->write_statistics();
+            sst->write_compression();
+            sst->write_filter();
+            sst->write_summary();
+            sst->write_toc();
+        });
+    }
 };
 
 inline future<sstable_ptr> reusable_sst(sstring dir, unsigned long generation) {
-    auto sst = make_lw_shared<sstable>(dir, generation, la, big);
+    auto sst = make_lw_shared<sstable>("ks", "cf", dir, generation, la, big);
     auto fut = sst->load();
     return std::move(fut).then([sst = std::move(sst)] {
         return make_ready_future<sstable_ptr>(std::move(sst));
@@ -90,7 +103,7 @@ inline schema_ptr composite_schema() {
         // comment
         "Table with a composite key as pkey"
        )));
-       return builder.build();
+       return builder.build(schema_builder::compact_storage::no);
     }();
     return s;
 }
@@ -114,7 +127,7 @@ inline schema_ptr set_schema() {
         // comment
         "Table with a set as pkeys"
        )));
-       return builder.build();
+       return builder.build(schema_builder::compact_storage::no);
     }();
     return s;
 }
@@ -138,7 +151,7 @@ inline schema_ptr map_schema() {
         // comment
         "Table with a map as pkeys"
        )));
-       return builder.build();
+       return builder.build(schema_builder::compact_storage::no);
     }();
     return s;
 }
@@ -162,7 +175,7 @@ inline schema_ptr list_schema() {
         // comment
         "Table with a list as pkeys"
        )));
-       return builder.build();
+       return builder.build(schema_builder::compact_storage::no);
     }();
     return s;
 }
@@ -183,7 +196,7 @@ inline schema_ptr uncompressed_schema() {
         // comment
         "Uncompressed data"
        )));
-       return builder.build();
+       return builder.build(schema_builder::compact_storage::no);
     }();
     return uncompressed;
 }
@@ -216,7 +229,7 @@ inline schema_ptr complex_schema() {
         // comment
         "Table with a complex schema, including collections and static keys"
        )));
-       return builder.build();
+       return builder.build(schema_builder::compact_storage::no);
     }();
     return s;
 }
@@ -244,7 +257,7 @@ inline schema_ptr columns_schema() {
         // comment
         "column definitions"
        )));
-       return builder.build();
+       return builder.build(schema_builder::compact_storage::no);
     }();
     return columns;
 }
@@ -398,4 +411,74 @@ inline void match_collection_element(const std::pair<bytes, atomic_cell>& elemen
         BOOST_REQUIRE(element.second.value() == *expected_serialized_value);
     }
 }
+
+class test_setup {
+    file _f;
+    std::function<future<> (directory_entry de)> _walker;
+    sstring _path;
+    subscription<directory_entry> _listing;
+
+    static sstring& path() {
+        static sstring _p = "tests/sstables/tests-temporary";
+        return _p;
+    };
+
+public:
+    test_setup(file f, sstring path)
+            : _f(std::move(f))
+            , _path(path)
+            , _listing(_f.list_directory([this] (directory_entry de) { return _remove(de); })) {
+    }
+    ~test_setup() {
+        _f.close().finally([save = _f] {});
+    }
+protected:
+    future<> _create_directory(sstring name) {
+        return engine().make_directory(name);
+    }
+
+    future<> _remove(directory_entry de) {
+        sstring t = _path + "/" + de.name;
+        return engine().file_type(t).then([t] (std::experimental::optional<directory_entry_type> det) {
+            auto f = make_ready_future<>();
+
+            if (!det) {
+                throw std::runtime_error("Can't determine file type\n");
+            } else if (det == directory_entry_type::directory) {
+                f = empty_test_dir(t);
+            }
+            return f.then([t] {
+                return engine().remove_file(t);
+            });
+        });
+    }
+    future<> done() { return _listing.done(); }
+
+    static future<> empty_test_dir(sstring p = path()) {
+        return engine().open_directory(p).then([p] (file f) {
+            auto l = make_lw_shared<test_setup>(std::move(f), p);
+            return l->done().then([l] { });
+        });
+    }
+public:
+    static future<> create_empty_test_dir(sstring p = path()) {
+        return engine().make_directory(p).then_wrapped([p] (future<> f) {
+            try {
+                f.get();
+            // it's fine if the directory exists, just shut down the exceptional future message
+            } catch (std::exception& e) {}
+            return empty_test_dir(p);
+        });
+    }
+
+    static future<> do_with_test_directory(std::function<future<> ()>&& fut, sstring p = path()) {
+        return test_setup::create_empty_test_dir(p).then([fut = std::move(fut), p] () mutable {
+            return fut();
+        }).finally([p] {
+            return test_setup::empty_test_dir(p).then([p] {
+                return engine().remove_file(p);
+            });
+        });
+    }
+};
 }

@@ -16,15 +16,15 @@ cache_tracker& global_cache_tracker() {
     return instance;
 }
 
-cache_tracker::cache_tracker()
-    : _reclaimer([this] {
-        logger.warn("Clearing cache from reclaimer hook");
-        // FIXME: perform incremental eviction. We should first switch to a
-        // compacting memory allocator to avoid problems with memory
-        // fragmentation.
-        clear();
-    }) {
+cache_tracker::cache_tracker() {
     setup_collectd();
+
+    _region.make_evictable([this] {
+        with_allocator(_region.allocator(), [this] {
+            assert(!_lru.empty());
+            _lru.pop_back_and_dispose(current_deleter<cache_entry>());
+        });
+    });
 }
 
 cache_tracker::~cache_tracker() {
@@ -36,8 +36,8 @@ cache_tracker::setup_collectd() {
     _collectd_registrations = std::make_unique<scollectd::registrations>(scollectd::registrations({
         scollectd::add_polled_metric(scollectd::type_instance_id("cache"
                 , scollectd::per_cpu_plugin_instance
-                , "queue_length", "total_rows")
-                , scollectd::make_typed(scollectd::data_type::GAUGE, _lru_len)
+                , "bytes", "used")
+                , scollectd::make_typed(scollectd::data_type::GAUGE, [this] { return _region.occupancy().used_space(); })
         ),
         scollectd::add_polled_metric(scollectd::type_instance_id("cache"
                 , scollectd::per_cpu_plugin_instance
@@ -53,7 +53,6 @@ cache_tracker::setup_collectd() {
 }
 
 void cache_tracker::clear() {
-    _lru_len = 0;
     with_allocator(_region.allocator(), [this] {
         _lru.clear_and_dispose(current_deleter<cache_entry>());
     });
@@ -67,7 +66,6 @@ void cache_tracker::touch(cache_entry& e) {
 
 void cache_tracker::insert(cache_entry& entry) {
     ++_misses;
-    ++_lru_len;
     _lru.push_front(entry);
 }
 
@@ -147,9 +145,9 @@ void row_cache::populate(const mutation& m) {
     });
 }
 
-future<> row_cache::update(memtable& m) {
+future<> row_cache::update(memtable& m, negative_mutation_reader underlying_negative) {
     _tracker.region().merge(m._region); // Now all data in memtable belongs to cache
-    with_allocator(_tracker.allocator(), [this, &m] {
+    with_allocator(_tracker.allocator(), [this, &m, underlying_negative = std::move(underlying_negative)] {
         auto i = m.partitions.begin();
         const schema& s = *m.schema();
         while (i != m.partitions.end()) {
@@ -157,14 +155,16 @@ future<> row_cache::update(memtable& m) {
             // FIXME: Optimize knowing we lookup in-order.
             auto cache_i = _partitions.lower_bound(mem_e.key(), cache_entry::compare(_schema));
             // If cache doesn't contain the entry we cannot insert it because the mutation may be incomplete.
-            // FIXME: if the bloom filters say the data isn't in any sstable yet (other than the
-            //        one we are caching now), we can.
-            //        Alternatively, keep a bitmap indicating which sstables we do cover, so we don't have to
+            // FIXME: keep a bitmap indicating which sstables we do cover, so we don't have to
             //        search it.
             if (cache_i != _partitions.end() && cache_i->key().equal(s, mem_e.key())) {
                 cache_entry& entry = *cache_i;
                 _tracker.touch(entry);
                 entry.partition().apply(s, std::move(mem_e.partition()));
+            } else if (underlying_negative(mem_e.key().key()) == negative_mutation_reader_result::definitely_doesnt_exists) {
+                cache_entry* entry = current_allocator().construct<cache_entry>(mem_e.key(), mem_e.partition());
+                _tracker.insert(*entry);
+                _partitions.insert(cache_i, *entry);
             }
             i = m.partitions.erase(i);
             current_allocator().destroy(&mem_e);

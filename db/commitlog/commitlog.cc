@@ -22,11 +22,11 @@
  */
 
 #include <stdexcept>
-#include <boost/crc.hpp>  // for boost::crc_32_type
 #include <string>
 #include <sys/stat.h>
 #include <malloc.h>
 #include <regex>
+#include <boost/range/adaptor/map.hpp>
 
 #include "core/align.hh"
 #include "core/reactor.hh"
@@ -39,13 +39,29 @@
 #include "commitlog.hh"
 #include "db/config.hh"
 #include "utils/data_input.hh"
+#include "utils/crc.hh"
+#include "log.hh"
 
-class crc32: public boost::crc_32_type {
+static logging::logger logger("commitlog");
+
+class crc32_nbo {
+    crc32 _c;
 public:
-    template<typename T>
+    template <typename T>
     void process(T t) {
-        auto v = net::hton(t);
-        this->process_bytes(&v, sizeof(T));
+        _c.process(net::hton(t));
+    }
+    uint32_t checksum() const {
+        return _c.get();
+    }
+    void process_bytes(const uint8_t* data, size_t size) {
+        return _c.process(data, size);
+    }
+    void process_bytes(const int8_t* data, size_t size) {
+        return _c.process(reinterpret_cast<const uint8_t*>(data), size);
+    }
+    void process_bytes(const char* data, size_t size) {
+        return _c.process(reinterpret_cast<const uint8_t*>(data), size);
     }
 };
 
@@ -151,11 +167,19 @@ public:
     }
 
     future<> process(directory_entry de) {
-        if (de.type && de.type == directory_entry_type::regular) {
-            descriptor d(de.name);
-            _ids = std::max(_ids, d.id);
-        }
-        return make_ready_future<>();
+        auto entry_type = [this](const directory_entry & de) {
+            if (!de.type && !de.name.empty()) {
+                return engine().file_type(cfg.commit_log_location + "/" + de.name);
+            }
+            return make_ready_future<std::experimental::optional<directory_entry_type>>(de.type);
+        };
+        return entry_type(de).then([de, this](auto type) {
+            if (type == directory_entry_type::regular) {
+                descriptor d(de.name);
+                _ids = std::max(_ids, d.id);
+            }
+            return make_ready_future<>();
+        });
     }
 
     future<> init();
@@ -174,9 +198,16 @@ public:
     }
 
     std::vector<sstring> get_active_names() const;
+
+    using buffer_type = temporary_buffer<char>;
+
+    buffer_type acquire_buffer(size_t s);
+    void release_buffer(buffer_type&&);
+
 private:
     uint64_t _ids = 0;
     std::vector<sseg_ptr> _segments;
+    std::vector<buffer_type> _temp_buffers;
     timer<clock_type> _timer;
 };
 
@@ -185,6 +216,7 @@ private:
  * as well as tracking the last mutation position of any "dirty" CFs covered by the segment file. Segment
  * files are initially allocated to a fixed size and can grow to accomidate a larger value if necessary.
  */
+
 class db::commitlog::segment: public enable_lw_shared_from_this<segment> {
     segment_manager* _segment_manager;
 
@@ -196,7 +228,7 @@ class db::commitlog::segment: public enable_lw_shared_from_this<segment> {
     uint64_t _buf_pos = 0;
     bool _closed = false;
 
-    using buffer_type = temporary_buffer<char>;
+    using buffer_type = segment_manager::buffer_type;
     using sseg_ptr = segment_manager::sseg_ptr;
     using clock_type = segment_manager::clock_type;
     using time_point = segment_manager::time_point;
@@ -206,7 +238,13 @@ class db::commitlog::segment: public enable_lw_shared_from_this<segment> {
     std::unordered_map<cf_id_type, position_type> _cf_dirty;
     time_point _sync_time;
 
+    friend std::ostream& operator<<(std::ostream&, const segment&);
 public:
+    struct cf_mark {
+        const segment& s;
+    };
+    friend std::ostream& operator<<(std::ostream&, const cf_mark&);
+
     // The commit log entry overhead in bytes (int: length + int: head checksum + int: tail checksum)
     static constexpr size_t entry_overhead_size = 3 * sizeof(uint32_t);
     static constexpr size_t segment_overhead_size = 2 * sizeof(uint32_t);
@@ -225,6 +263,7 @@ public:
         ++_segment_manager->totals.segments_created;
     }
     ~segment() {
+        logger.debug("Segment {} is no longer active and will be deleted now", *this);
         ++_segment_manager->totals.segments_destroyed;
         ::unlink(
                 (_segment_manager->cfg.commit_log_location + "/" + _desc.filename()).c_str());
@@ -275,7 +314,19 @@ public:
                         return make_ready_future<sseg_ptr>(std::move(me));
                     }
                     _sync_time = clock_type::now();
-                    return _file.flush().then([this, pos, me = std::move(me)]() {
+                    return _file.flush().handle_exception([](auto ex) {
+                                try {
+                                    std::rethrow_exception(ex);
+                                    // TODO: retry/ignore/fail/stop - optional behaviour in origin.
+                                    // we fast-fail the whole commit.
+                                } catch (std::exception& e) {
+                                    logger.error("Failed to flush commits to disk: {}", e.what());
+                                    throw;
+                                } catch (...) {
+                                    logger.error("Failed to flush commits to disk.");
+                                    throw;
+                                }
+                            }).then([this, pos, me = std::move(me)]() {
                                 _flush_pos = std::max(pos, _flush_pos);
                                 ++_segment_manager->totals.flush_count;
                                 return make_ready_future<sseg_ptr>(std::move(me));
@@ -300,10 +351,24 @@ public:
             if (_file_pos == 0) {
                 overhead += descriptor_header_size;
             }
-            auto k = std::max(align_up(s + overhead, alignment), default_size);
-            auto a = ::memalign(alignment, k);
-            _buffer = buffer_type(reinterpret_cast<char *>(a), k,
-                    make_free_deleter(a));
+
+            auto a = align_up(s + overhead, alignment);
+            auto k = std::max(a, default_size);
+
+            for (;;) {
+                try {
+                    _buffer = _segment_manager->acquire_buffer(k);
+                    break;
+                } catch (std::bad_alloc&) {
+                    logger.error("Could not allocate {} k bytes output buffer ({} k required)", k / 1024, a / 1024);
+                    if (k > a) {
+                        k = std::max(a, k / 2);
+                        logger.debug("Trying reduced size: {} k", k / 1024);
+                        continue;
+                    }
+                    throw;
+                }
+            }
             _buf_pos = overhead;
             auto * p = reinterpret_cast<uint32_t *>(_buffer.get_write());
             std::fill(p, p + overhead, 0);
@@ -324,7 +389,7 @@ public:
             // first block. write file header.
             out.write(_desc.ver);
             out.write(_desc.id);
-            crc32 crc;
+            crc32_nbo crc;
             crc.process(_desc.ver);
             crc.process<int32_t>(_desc.id & 0xffffffff);
             crc.process<int32_t>(_desc.id >> 32);
@@ -333,7 +398,7 @@ public:
         }
 
         // write chunk header
-        crc32 crc;
+        crc32_nbo crc;
         crc.process<int32_t>(_desc.id & 0xffffffff);
         crc.process<int32_t>(_desc.id >> 32);
         crc.process(uint32_t(off + header_size));
@@ -342,18 +407,29 @@ public:
         out.write(crc.checksum());
 
         // acquire read lock
-        return _dwrite.read_lock().then(
-                [this, size, off, buf = std::move(buf), me = std::move(me)]() mutable {
-                    auto p = buf.get();
-                    return _file.dma_write(off, p, size).then([this, size, buf = std::move(buf), me = std::move(me)](size_t written) mutable {
-                                assert(written == size); // we are not equipped to deal with partial writes.
-                                _segment_manager->totals.bytes_written += written;
-                                ++_segment_manager->totals.cycle_count;
-                                return make_ready_future<sseg_ptr>(std::move(me));
-                            }).finally([me, this]() {
-                                _dwrite.read_unlock(); // release
-                            });
-                });
+        return _dwrite.read_lock().then([this, size, off, buf = std::move(buf), me = std::move(me)]() mutable {
+            auto p = buf.get();
+            return _file.dma_write(off, p, size).then_wrapped([this, size, me, buf = std::move(buf)](auto&& f) mutable {
+                try {
+                    _segment_manager->release_buffer(std::move(buf));
+                    size_t written = std::get<0>(f.get());
+                    assert(written == size); // we are not equipped to deal with partial writes.
+                    _segment_manager->totals.bytes_written += written;
+                    ++_segment_manager->totals.cycle_count;
+                    return make_ready_future<sseg_ptr>(std::move(me));
+                    // TODO: retry/ignore/fail/stop - optional behaviour in origin.
+                    // we fast-fail the whole commit.
+                } catch (std::exception& e) {
+                    logger.error("Failed to persist commits to disk: {}", e.what());
+                    throw;
+                } catch (...) {
+                    logger.error("Failed to persist commits to disk.");
+                    throw;
+                }
+            });
+        }).finally([me, this]() {
+            _dwrite.read_unlock(); // release
+        });
     }
     /**
      * Add a "mutation" to the segment.
@@ -392,7 +468,7 @@ public:
         auto * e = _buffer.get_write() + pos + s - sizeof(uint32_t);
 
         data_output out(p, e);
-        crc32 crc;
+        crc32_nbo crc;
 
         out.write(uint32_t(s));
         crc.process(uint32_t(s));
@@ -606,15 +682,33 @@ future<db::commitlog::segment_manager::sseg_ptr> db::commitlog::segment_manager:
  */
 void db::commitlog::segment_manager::discard_completed_segments(
         const cf_id_type& id, const replay_position& pos) {
+    logger.debug("discard completed log segments for {}, table {}", pos, id);
     for (auto&s : _segments) {
         s->mark_clean(id, pos);
     }
     discard_unused_segments();
 }
 
+std::ostream& db::operator<<(std::ostream& out, const db::commitlog::segment& s) {
+    return out << "commit log segment (" << s._desc.filename() << ")";
+}
+
+std::ostream& db::operator<<(std::ostream& out, const db::commitlog::segment::cf_mark& m) {
+    return out << (m.s._cf_dirty | boost::adaptors::map_keys);
+}
+
+std::ostream& db::operator<<(std::ostream& out, const db::replay_position& p) {
+    return out << "{" << p.id << ", " << p.pos << "}";
+}
+
 void db::commitlog::segment_manager::discard_unused_segments() {
     auto i = std::remove_if(_segments.begin(), _segments.end(), [=](auto& s) {
-        return s->is_unused();
+        if (s->is_unused()) {
+            logger.debug("{} is unused", *s);
+            return true;
+        }
+        logger.debug("Not safe to delete {}; dirty is {}", s, segment::cf_mark {*s});
+        return false;
     });
     if (i != _segments.end()) {
         _segments.erase(i, _segments.end());
@@ -655,6 +749,39 @@ std::vector<sstring> db::commitlog::segment_manager::get_active_names() const {
     }
     return res;
 }
+
+db::commitlog::segment_manager::buffer_type db::commitlog::segment_manager::acquire_buffer(size_t s) {
+    auto i = _temp_buffers.begin();
+    auto e = _temp_buffers.end();
+
+    while (i != e) {
+        if (i->size() >= s) {
+            auto r = std::move(*i);
+            _temp_buffers.erase(i);
+            return r;
+        }
+        ++i;
+    }
+    auto a = ::memalign(segment::alignment, s);
+    if (a == nullptr) {
+        throw std::bad_alloc();
+    }
+    return buffer_type(reinterpret_cast<char *>(a), s, make_free_deleter(a));
+}
+
+void db::commitlog::segment_manager::release_buffer(buffer_type&& b) {
+    _temp_buffers.emplace_back(std::move(b));
+    std::sort(_temp_buffers.begin(), _temp_buffers.end(), [](const buffer_type& b1, const buffer_type& b2) {
+        return b1.size() < b2.size();
+    });
+
+    constexpr const size_t max_temp_buffers = 4;
+
+    if (_temp_buffers.size() > max_temp_buffers) {
+        _temp_buffers.erase(_temp_buffers.begin() + max_temp_buffers, _temp_buffers.end());
+    }
+}
+
 /**
  * Add mutation.
  */
@@ -733,7 +860,7 @@ subscription<temporary_buffer<char>> db::commitlog::read_log_file(file f, commit
            auto id = in.read<uint64_t>();
            auto checksum = in.read<uint32_t>();
 
-           crc32 crc;
+           crc32_nbo crc;
            crc.process(ver);
            crc.process<int32_t>(id & 0xffffffff);
            crc.process<int32_t>(id >> 32);
@@ -760,7 +887,7 @@ subscription<temporary_buffer<char>> db::commitlog::read_log_file(file f, commit
                    auto next = in.read<uint32_t>();
                    auto checksum = in.read<uint32_t>();
 
-                   crc32 crc;
+                   crc32_nbo crc;
                    crc.process<int32_t>(w->id & 0xffffffff);
                    crc.process<int32_t>(w->id >> 32);
                    crc.process<uint32_t>(w->pos);
@@ -800,7 +927,7 @@ subscription<temporary_buffer<char>> db::commitlog::read_log_file(file f, commit
                                in.skip(data_size);
                                auto checksum = in.read<uint32_t>();
 
-                               crc32 crc;
+                               crc32_nbo crc;
                                crc.process(size);
                                crc.process_bytes(buf.get(), data_size);
 

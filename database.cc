@@ -36,28 +36,41 @@
 
 logging::logger dblog("database");
 
-column_family::column_family(schema_ptr schema, config config, db::commitlog& cl)
+column_family::column_family(schema_ptr schema, config config, db::commitlog& cl, compaction_manager& compaction_manager)
     : _schema(std::move(schema))
     , _config(std::move(config))
     , _memtables(make_lw_shared(memtable_list{}))
     , _sstables(make_lw_shared<sstable_list>())
     , _cache(_schema, sstables_as_mutation_source(), global_cache_tracker())
     , _commitlog(&cl)
+    , _compaction_manager(compaction_manager)
 {
     add_memtable();
 }
 
-column_family::column_family(schema_ptr schema, config config, no_commitlog cl)
+column_family::column_family(schema_ptr schema, config config, no_commitlog cl, compaction_manager& compaction_manager)
     : _schema(std::move(schema))
     , _config(std::move(config))
     , _memtables(make_lw_shared(memtable_list{}))
     , _sstables(make_lw_shared<sstable_list>())
     , _cache(_schema, sstables_as_mutation_source(), global_cache_tracker())
     , _commitlog(nullptr)
+    , _compaction_manager(compaction_manager)
 {
     add_memtable();
 }
 
+negative_mutation_reader
+column_family::make_negative_mutation_reader(lw_shared_ptr<sstable_list> old_sstables) {
+    return [this, old_sstables = std::move(old_sstables)] (const partition_key& key) {
+        for (auto&& s : *old_sstables) {
+            if (s.second->filter_has_key(*_schema, key)) {
+                return negative_mutation_reader_result::maybe_exists;
+            }
+        }
+        return negative_mutation_reader_result::definitely_doesnt_exists;
+    };
+}
 
 mutation_source
 column_family::sstables_as_mutation_source() {
@@ -304,59 +317,46 @@ static std::vector<sstring> parse_fname(sstring filename) {
     return comps;
 }
 
-future<> column_family::probe_file(sstring sstdir, sstring fname) {
+future<sstables::entry_descriptor> column_family::probe_file(sstring sstdir, sstring fname) {
 
     using namespace sstables;
 
-    auto comps = parse_fname(fname);
-    if (comps.size() != 5) {
-        dblog.error("Ignoring malformed file {}", fname);
-        return make_ready_future<>();
-    }
+    entry_descriptor comps = entry_descriptor::make_descriptor(fname);
 
     // Every table will have a TOC. Using a specific file as a criteria, as
     // opposed to, say verifying _sstables.count() to be zero is more robust
     // against parallel loading of the directory contents.
-    if (comps[3] != "TOC") {
-        return make_ready_future<>();
+    if (comps.component != sstable::component_type::TOC) {
+        return make_ready_future<entry_descriptor>(std::move(comps));
     }
 
-    sstable::version_types version;
-    sstable::format_types  format;
-
-    try {
-        version = sstable::version_from_sstring(comps[0]);
-    } catch (std::out_of_range) {
-        dblog.error("Uknown version found: {}", comps[0]);
-        return make_ready_future<>();
-    }
-
-    auto generation = boost::lexical_cast<unsigned long>(comps[1]);
     // Make sure new sstables don't overwrite this one.
-    _sstable_generation = std::max<uint64_t>(_sstable_generation, generation /  smp::count + 1);
+    _sstable_generation = std::max<uint64_t>(_sstable_generation, comps.generation /  smp::count + 1);
+    assert(_sstables->count(comps.generation) == 0);
 
-    try {
-        format = sstable::format_from_sstring(comps[2]);
-    } catch (std::out_of_range) {
-        dblog.error("Uknown format found: {}", comps[2]);
-        return make_ready_future<>();
-    }
-
-    assert(_sstables->count(generation) == 0);
-
-    auto sst = std::make_unique<sstables::sstable>(sstdir, generation, version, format);
+    auto sst = std::make_unique<sstables::sstable>(_schema->ks_name(), _schema->cf_name(), sstdir, comps.generation, comps.version, comps.format);
     auto fut = sst->load();
-    return std::move(fut).then([this, generation, sst = std::move(sst)] () mutable {
+    return std::move(fut).then([this, sst = std::move(sst)] () mutable {
         add_sstable(std::move(*sst));
         return make_ready_future<>();
-    }).then_wrapped([fname] (future<> f) {
+    }).then_wrapped([fname, comps = std::move(comps)] (future<> f) {
         try {
             f.get();
         } catch (malformed_sstable_exception& e) {
-            dblog.error("Skipping malformed sstable {}: {}", fname, e.what());
+            dblog.error("malformed sstable {}: {}. Refusing to boot", fname, e.what());
+            throw;
+        } catch(...) {
+            dblog.error("Unrecognized error while processing {}: Refusing to boot", fname);
+            throw;
         }
-        return make_ready_future<>();
+        return make_ready_future<entry_descriptor>(std::move(comps));
     });
+}
+
+void column_family::update_stats_for_new_sstable(uint64_t new_sstable_data_size) {
+    _stats.live_disk_space_used += new_sstable_data_size;
+    _stats.total_disk_space_used += new_sstable_data_size;
+    _stats.live_sstable_count++;
 }
 
 void column_family::add_sstable(sstables::sstable&& sstable) {
@@ -375,6 +375,7 @@ void column_family::add_sstable(sstables::sstable&& sstable) {
     auto generation = sstable.generation();
     // allow in-progress reads to continue using old list
     _sstables = make_lw_shared<sstable_list>(*_sstables);
+    update_stats_for_new_sstable(sstable.data_size());
     _sstables->emplace(generation, make_lw_shared(std::move(sstable)));
 }
 
@@ -385,9 +386,11 @@ void column_family::add_memtable() {
 }
 
 future<>
-column_family::update_cache(memtable& m) {
+column_family::update_cache(memtable& m, lw_shared_ptr<sstable_list> old_sstables) {
     if (_config.enable_cache) {
-       return _cache.update(m);
+       // be careful to use the old sstable list, since the new one will hit every
+       // mutation in m.
+       return _cache.update(m, make_negative_mutation_reader(std::move(old_sstables)));
     } else {
        return make_ready_future<>();
     }
@@ -417,28 +420,26 @@ column_family::seal_active_memtable() {
     // FIXME: better way of ensuring we don't attemt to
     //        overwrite an existing table.
     auto gen = _sstable_generation++ * smp::count + engine().cpu_id();
-    sstring name = sprint("%s/%s-%s-%d-Data.db",
-            _config.datadir,
-            _schema->ks_name(), _schema->cf_name(),
-            gen);
 
-    return seastar::with_gate(_in_flight_seals, [gen, old, name, this] {
-        sstables::sstable newtab = sstables::sstable(_config.datadir, gen,
-            sstables::sstable::version_types::la,
+    return seastar::with_gate(_in_flight_seals, [gen, old, this] {
+        sstables::sstable newtab = sstables::sstable(_schema->ks_name(), _schema->cf_name(),
+            _config.datadir, gen,
+            sstables::sstable::version_types::ka,
             sstables::sstable::format_types::big);
 
-        dblog.debug("Flushing to {}", name);
-        return do_with(std::move(newtab), [old, name, this] (sstables::sstable& newtab) {
+        dblog.debug("Flushing to {}", newtab.get_filename());
+        return do_with(std::move(newtab), [old, this] (sstables::sstable& newtab) {
             // FIXME: write all components
-            return newtab.write_components(*old).then([name, this, &newtab, old] {
+            return newtab.write_components(*old).then([this, &newtab, old] {
                 return newtab.load();
             }).then([this, old, &newtab] {
                 dblog.debug("Flushing done");
                 // We must add sstable before we call update_cache(), because
                 // memtable's data after moving to cache can be evicted at any time.
+                auto old_sstables = _sstables;
                 add_sstable(std::move(newtab));
-                return update_cache(*old);
-            }).then_wrapped([name, this, old] (future<> ret) {
+                return update_cache(*old, std::move(old_sstables));
+            }).then_wrapped([this, old] (future<> ret) {
                 try {
                     ret.get();
 
@@ -480,10 +481,7 @@ column_family::stop() {
     seal_active_memtable();
 
     return _in_flight_seals.close().then([this] {
-        _compaction_sem.broken();
-        return _compaction_done.then([] {
-            return make_ready_future<>();
-        });
+        return make_ready_future<>();
     });
 }
 
@@ -502,8 +500,8 @@ column_family::compact_sstables(std::vector<sstables::shared_sstable> sstables) 
             // FIXME: this generation calculation should be in a function.
             auto gen = _sstable_generation++ * smp::count + engine().cpu_id();
             // FIXME: use "tmp" marker in names of incomplete sstable
-            auto sst = make_lw_shared<sstables::sstable>(_config.datadir, gen,
-                    sstables::sstable::version_types::la,
+            auto sst = make_lw_shared<sstables::sstable>(_schema->ks_name(), _schema->cf_name(), _config.datadir, gen,
+                    sstables::sstable::version_types::ka,
                     sstables::sstable::format_types::big);
             new_tables->emplace_back(gen, sst);
             return sst;
@@ -517,10 +515,17 @@ column_family::compact_sstables(std::vector<sstables::shared_sstable> sstables) 
         // on-going reads can continue to use the old list.
         auto current_sstables = _sstables;
         _sstables = make_lw_shared<sstable_list>();
+
+        // zeroing live_disk_space_used and live_sstable_count because the
+        // sstable list is re-created below.
+        _stats.live_disk_space_used = 0;
+        _stats.live_sstable_count = 0;
+
         std::unordered_set<sstables::shared_sstable> s(
                 sstables_to_compact->begin(), sstables_to_compact->end());
         for (const auto& oldtab : *current_sstables) {
             if (!s.count(oldtab.second)) {
+                update_stats_for_new_sstable(oldtab.second->data_size());
                 _sstables->emplace(oldtab.first, oldtab.second);
             }
         }
@@ -528,6 +533,7 @@ column_family::compact_sstables(std::vector<sstables::shared_sstable> sstables) 
         for (const auto& newtab : *new_tables) {
             // FIXME: rename the new sstable(s). Verify a rename doesn't cause
             // problems for the sstable object.
+            update_stats_for_new_sstable(newtab.second->data_size());
             _sstables->emplace(newtab.first, newtab.second);
         }
 
@@ -553,75 +559,20 @@ column_family::compact_all_sstables() {
 
 void column_family::start_compaction() {
     set_compaction_strategy(_schema->compaction_strategy());
-
-    // NOTE: Compaction code runs in parallel to the rest of the system, so
-    // when it's time to stop a column family, we need to prevent any new
-    // compaction from starting and wait for a possible ongoing compaction.
-    // That's possible by closing gate, busting semaphore and waiting for
-    // _compaction_done future to resolve.
-    _compaction_done = keep_doing([this] {
-        // Semaphore is used here to allow at most one compaction to happen
-        // at any time yet queueing pending requests.
-        return _compaction_sem.wait().then([this] {
-            return with_gate(_in_flight_seals, [this] {
-                sstables::compaction_strategy strategy = _compaction_strategy;
-                return do_with(std::move(strategy), [this] (sstables::compaction_strategy& cs) {
-                    return cs.compact(*this).then([this] {
-                        // If compaction completed successfully, let's reset sleep time of _compaction_retry.
-                        _compaction_retry.reset();
-                    });
-                });
-            });
-        }).then_wrapped([this] (future<> f) {
-            bool retry = false;
-
-            // NOTE: broken_semaphore and seastar::gate_closed_exception exceptions
-            // are used for regular termination of compaction fiber.
-            try {
-                f.get();
-            } catch (broken_semaphore& e) {
-                dblog.info("compaction for column_family {}/{} not restarted due to shutdown", _schema->ks_name(), _schema->cf_name());
-                throw;
-            } catch (seastar::gate_closed_exception& e) {
-                dblog.info("compaction for column_family {}/{} not restarted due to shutdown", _schema->ks_name(), _schema->cf_name());
-                throw;
-            } catch (std::exception& e) {
-                dblog.error("compaction for column_family {}/{} failed: {}", _schema->ks_name(), _schema->cf_name(), e.what());
-                retry = true;
-            } catch (...) {
-                dblog.error("compaction for column_family {}/{} failed: unknown error", _schema->ks_name(), _schema->cf_name());
-                retry = true;
-            }
-
-            if (retry) {
-                dblog.info("compaction task for column_family {}/{} sleeping for {} seconds",
-                    _schema->ks_name(), _schema->cf_name(), std::chrono::duration_cast<std::chrono::seconds>(_compaction_retry.sleep_time()).count());
-                return _compaction_retry.retry().then([this] {
-                    // after sleeping, signal semaphore for the next compaction attempt.
-                    _compaction_sem.signal();
-                });
-            }
-            return make_ready_future<>();
-        });
-    }).then_wrapped([this] (future<> f) {
-        // here, we ignore both broken_semaphore and seastar::gate_closed_exception that
-        // were used for regular termination of the compaction fiber.
-        try {
-            f.get();
-        } catch (broken_semaphore& e) {
-            // exception logged in keep_doing.
-        } catch (seastar::gate_closed_exception& e) {
-            // exception logged in keep_doing.
-        } catch (...) {
-            // this shouldn't happen, let's log it anyway.
-            dblog.error("compaction for column_family {}/{} failed: unexpected error", _schema->ks_name(), _schema->cf_name());
-        }
-    });
 }
 
 void column_family::trigger_compaction() {
-    // Compaction task is triggered by signaling the semaphore waited on.
-    _compaction_sem.signal();
+    // Submitting compaction job to compaction manager.
+    _stats.pending_compactions++;
+    _compaction_manager.submit([this] () -> future<> {
+        _stats.pending_compactions--;
+        sstables::compaction_strategy strategy = _compaction_strategy;
+        return do_with(std::move(strategy), [this] (sstables::compaction_strategy& cs) {
+            return cs.compact(*this).then([] {
+                return make_ready_future<>();
+            });
+        });
+    });
 }
 
 void column_family::set_compaction_strategy(sstables::compaction_strategy_type strategy) {
@@ -637,10 +588,43 @@ lw_shared_ptr<sstable_list> column_family::get_sstables() {
 }
 
 future<> column_family::populate(sstring sstdir) {
+    // We can catch most errors when we try to load an sstable. But if the TOC
+    // file is the one missing, we won't try to load the sstable at all. This
+    // case is still an invalid case, but it is way easier for us to treat it
+    // by waiting for all files to be loaded, and then checking if we saw a
+    // file during scan_dir, without its corresponding TOC.
+    enum class status {
+        has_some_file,
+        has_toc_file,
+    };
 
-    return lister::scan_dir(sstdir, directory_entry_type::regular, [this, sstdir] (directory_entry de) {
+    auto verifier = make_lw_shared<std::unordered_map<unsigned long, status>>();
+    return lister::scan_dir(sstdir, directory_entry_type::regular, [this, sstdir, verifier] (directory_entry de) {
         // FIXME: The secondary indexes are in this level, but with a directory type, (starting with ".")
-        return probe_file(sstdir, de.name);
+        return probe_file(sstdir, de.name).then([verifier] (auto entry) {
+            if (verifier->count(entry.generation)) {
+                if (verifier->at(entry.generation) == status::has_toc_file) {
+                    if (entry.component == sstables::sstable::component_type::TOC) {
+                        throw sstables::malformed_sstable_exception("Invalid State encountered. TOC file already processed");
+                    }
+                } else if (entry.component == sstables::sstable::component_type::TOC) {
+                    verifier->at(entry.generation) = status::has_toc_file;
+                }
+            } else {
+                if (entry.component == sstables::sstable::component_type::TOC) {
+                    verifier->emplace(entry.generation, status::has_toc_file);
+                } else {
+                    verifier->emplace(entry.generation, status::has_some_file);
+                }
+            }
+        });
+    }).then([verifier, sstdir] {
+        return parallel_for_each(*verifier, [sstdir = std::move(sstdir)] (auto v) {
+            if (v.second != status::has_toc_file) {
+                throw sstables::malformed_sstable_exception(sprint("At directory: %s: no TOC found for SSTable with generation %d!. Refusing to boot", sstdir, v.first));
+            }
+            return make_ready_future<>();
+        });
     });
 }
 
@@ -655,6 +639,8 @@ database::database(const db::config& cfg)
 {
     bool durable = cfg.data_file_directories().size() > 0;
     db::system_keyspace::make(*this, durable);
+    // Start compaction manager with two tasks for handling compaction jobs.
+    _compaction_manager.start(2);
 }
 
 database::~database() {
@@ -841,9 +827,9 @@ void database::add_column_family(schema_ptr schema, column_family::config cfg) {
     auto uuid = schema->id();
     lw_shared_ptr<column_family> cf;
     if (cfg.enable_commitlog && _commitlog) {
-       cf = make_lw_shared<column_family>(schema, std::move(cfg), *_commitlog);
+       cf = make_lw_shared<column_family>(schema, std::move(cfg), *_commitlog, _compaction_manager);
     } else {
-       cf = make_lw_shared<column_family>(schema, std::move(cfg), column_family::no_commitlog());
+       cf = make_lw_shared<column_family>(schema, std::move(cfg), column_family::no_commitlog(), _compaction_manager);
     }
 
     auto ks = _keyspaces.find(schema->ks_name());
@@ -972,7 +958,9 @@ keyspace::make_column_family_config(const schema& s) const {
 
 sstring
 keyspace::column_family_directory(const sstring& name, utils::UUID uuid) const {
-    return sprint("%s/%s-%s", _config.datadir, name, uuid);
+    auto uuid_sstring = uuid.to_sstring();
+    boost::erase_all(uuid_sstring, "-");
+    return sprint("%s/%s-%s", _config.datadir, name, uuid_sstring);
 }
 
 future<>
@@ -1291,8 +1279,10 @@ operator<<(std::ostream& os, const atomic_cell& ac) {
 
 future<>
 database::stop() {
-    return parallel_for_each(_column_families, [this] (auto& val_pair) {
-        return val_pair.second->stop();
+    return _compaction_manager.stop().then([this] {
+        return parallel_for_each(_column_families, [this] (auto& val_pair) {
+            return val_pair.second->stop();
+        });
     });
 }
 

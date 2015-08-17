@@ -50,7 +50,7 @@ using namespace db::system_keyspace;
 namespace db {
 namespace schema_tables {
 
-std::vector<const char*> ALL { KEYSPACES, COLUMNFAMILIES, COLUMNS, TRIGGERS, USERTYPES, FUNCTIONS, AGGREGATES };
+std::vector<const char*> ALL { KEYSPACES, COLUMNFAMILIES, COLUMNS, TRIGGERS, USERTYPES, /* not present in 2.1.8: FUNCTIONS, AGGREGATES */ };
 
 using days = std::chrono::duration<int, std::ratio<24 * 3600>>;
 
@@ -117,6 +117,11 @@ using days = std::chrono::duration<int, std::ratio<24 * 3600>>;
             {"speculative_retry", utf8_type},
             {"subcomparator", utf8_type},
             {"type", utf8_type},
+            // The following 4 columns are only present up until 2.1.8 tables
+            {"key_aliases", utf8_type},
+            {"value_alias", utf8_type},
+            {"column_aliases", utf8_type},
+            {"index_interval", int32_type},
         },
         // static columns
         {},
@@ -126,7 +131,7 @@ using days = std::chrono::duration<int, std::ratio<24 * 3600>>;
         "table definitions"
         )));
         builder.set_gc_grace_seconds(std::chrono::duration_cast<std::chrono::seconds>(days(7)).count());
-        return builder.build();
+        return builder.build(schema_builder::compact_storage::no);
     }();
     return columnfamilies;
 }
@@ -155,7 +160,7 @@ using days = std::chrono::duration<int, std::ratio<24 * 3600>>;
         "column definitions"
         )));
         builder.set_gc_grace_seconds(std::chrono::duration_cast<std::chrono::seconds>(days(7)).count());
-        return builder.build();
+        return builder.build(schema_builder::compact_storage::no);
     }();
     return columns;
 }
@@ -179,7 +184,7 @@ using days = std::chrono::duration<int, std::ratio<24 * 3600>>;
         "trigger definitions"
         )));
         builder.set_gc_grace_seconds(std::chrono::duration_cast<std::chrono::seconds>(days(7)).count());
-        return builder.build();
+        return builder.build(schema_builder::compact_storage::no);
     }();
     return triggers;
 }
@@ -204,7 +209,7 @@ using days = std::chrono::duration<int, std::ratio<24 * 3600>>;
         "user defined type definitions"
         )));
         builder.set_gc_grace_seconds(std::chrono::duration_cast<std::chrono::seconds>(days(7)).count());
-        return builder.build();
+        return builder.build(schema_builder::compact_storage::no);
     }();
     return usertypes;
 }
@@ -233,7 +238,7 @@ using days = std::chrono::duration<int, std::ratio<24 * 3600>>;
         "user defined type definitions"
         )));
         builder.set_gc_grace_seconds(std::chrono::duration_cast<std::chrono::seconds>(days(7)).count());
-        return builder.build();
+        return builder.build(schema_builder::compact_storage::no);
     }();
     return functions;
 }
@@ -262,7 +267,7 @@ using days = std::chrono::duration<int, std::ratio<24 * 3600>>;
         "user defined aggregate definitions"
         )));
         builder.set_gc_grace_seconds(std::chrono::duration_cast<std::chrono::seconds>(days(7)).count());
-        return builder.build();
+        return builder.build(schema_builder::compact_storage::no);
     }();
     return aggregates;
 }
@@ -521,8 +526,10 @@ future<> save_system_keyspace_schema() {
            auto&& old_keyspaces = read_schema_for_keyspaces(proxy, KEYSPACES, keyspaces).get0();
            auto&& old_column_families = read_schema_for_keyspaces(proxy, COLUMNFAMILIES, keyspaces).get0();
            /*auto& old_types = */read_schema_for_keyspaces(proxy, USERTYPES, keyspaces).get0();
+#if 0 // not in 2.1.8
            /*auto& old_functions = */read_schema_for_keyspaces(proxy, FUNCTIONS, keyspaces).get0();
            /*auto& old_aggregates = */read_schema_for_keyspaces(proxy, AGGREGATES, keyspaces).get0();
+#endif
 
            proxy.mutate_locally(std::move(mutations)).get0();
 
@@ -539,8 +546,10 @@ future<> save_system_keyspace_schema() {
            auto&& new_keyspaces = read_schema_for_keyspaces(proxy, KEYSPACES, keyspaces).get0();
            auto&& new_column_families = read_schema_for_keyspaces(proxy, COLUMNFAMILIES, keyspaces).get0();
            /*auto& new_types = */read_schema_for_keyspaces(proxy, USERTYPES, keyspaces).get0();
+#if 0 // not in 2.1.8
            /*auto& new_functions = */read_schema_for_keyspaces(proxy, FUNCTIONS, keyspaces).get0();
            /*auto& new_aggregates = */read_schema_for_keyspaces(proxy, AGGREGATES, keyspaces).get0();
+#endif
 
            std::set<sstring> keyspaces_to_drop = merge_keyspaces(proxy, std::move(old_keyspaces), std::move(new_keyspaces)).get0();
            merge_tables(proxy, std::move(old_column_families), std::move(new_column_families)).get0();
@@ -1052,9 +1061,7 @@ future<> save_system_keyspace_schema() {
         }
 
         m.set_clustered_cell(ckey, "bloom_filter_fp_chance", table->bloom_filter_fp_chance(), timestamp);
-#if 0
-        adder.add("caching", table.getCaching().toString());
-#endif
+        m.set_clustered_cell(ckey, "caching", table->caching_options().to_sstring(), timestamp);
         m.set_clustered_cell(ckey, "comment", table->comment(), timestamp);
 
         m.set_clustered_cell(ckey, "compaction_strategy_class", sstables::compaction_strategy::name(table->compaction_strategy()), timestamp);
@@ -1075,6 +1082,25 @@ future<> save_system_keyspace_schema() {
         m.set_clustered_cell(ckey, "read_repair_chance", table->read_repair_chance(), timestamp);
         m.set_clustered_cell(ckey, "speculative_retry", table->speculative_retry().to_sstring(), timestamp);
 
+
+        auto alias = [] (schema::const_iterator_range_type range) -> sstring {
+            sstring alias("[");
+            for (auto& c: range) {
+                alias += "\"" + c.name_as_text() + "\",";
+            }
+            if (alias.back() == ',') {
+                alias.back() = ']';
+            } else {
+                alias += "]";
+            }
+            return alias;
+        };
+
+        m.set_clustered_cell(ckey, "key_aliases", alias(table->partition_key_columns()), timestamp);
+        m.set_clustered_cell(ckey, "column_aliases", alias(table->clustering_key_columns()), timestamp);
+        if (table->compact_columns_count() == 1) {
+            m.set_clustered_cell(ckey, "value_alias", table->compact_column().name_as_text(), timestamp);
+        } // null if none
 #if 0
         for (Map.Entry<ColumnIdentifier, Long> entry : table.getDroppedColumns().entrySet())
             adder.addMapEntry("dropped_columns", entry.getKey().toString(), entry.getValue());
@@ -1173,7 +1199,7 @@ future<> save_system_keyspace_schema() {
             if (partition.second->empty()) {
                 throw std::runtime_error(sprint("%s:%s not found in the schema definitions keyspace.", keyspace, table));
             }
-            return create_table_from_table_partition(proxy, partition.second);
+            return create_table_from_table_partition(proxy, std::move(partition.second));
         });
     }
 
@@ -1207,9 +1233,11 @@ future<> save_system_keyspace_schema() {
         create_table_from_table_row_and_column_rows(builder, table_row, serialized_columns.second);
     }
 
-    future<schema_ptr> create_table_from_table_partition(service::storage_proxy& proxy, const lw_shared_ptr<query::result_set>& partition)
+    future<schema_ptr> create_table_from_table_partition(service::storage_proxy& proxy, lw_shared_ptr<query::result_set>&& partition)
     {
-        return create_table_from_table_row(proxy, partition->row(0));
+        return do_with(std::move(partition), [&proxy] (auto& partition) {
+            return create_table_from_table_row(proxy, partition->row(0));
+        });
     }
 
     /**
@@ -1323,9 +1351,11 @@ future<> save_system_keyspace_schema() {
         if (table_row.has("memtable_flush_period_in_ms")) {
             builder.set_memtable_flush_period(table_row.get_nonnull<int32_t>("memtable_flush_period_in_ms"));
         }
-#if 0
-        cfm.caching(CachingOptions.fromString(result.getString("caching")));
-#endif
+
+        if (table_row.has("caching")) {
+            builder.set_caching_options(caching_options::from_sstring(table_row.get_nonnull<sstring>("caching")));
+        }
+
         if (table_row.has("default_time_to_live")) {
             builder.set_default_time_to_live(gc_clock::duration(table_row.get_nonnull<gc_clock::rep>("default_time_to_live")));
         }
@@ -1349,6 +1379,8 @@ future<> save_system_keyspace_schema() {
 
         if (table_row.has("min_index_interval")) {
             builder.set_min_index_interval(table_row.get_nonnull<int>("min_index_interval"));
+        } else if (table_row.has("index_interval")) { // compatibility
+            builder.set_min_index_interval(table_row.get_nonnull<int>("index_interval"));
         }
 
         if (table_row.has("max_index_interval")) {
@@ -1396,7 +1428,7 @@ future<> save_system_keyspace_schema() {
         m.set_clustered_cell(ckey, "validator", column.type->name(), timestamp);
         m.set_clustered_cell(ckey, "type", serialize_kind(column.kind), timestamp);
         if (!column.is_on_all_components()) {
-            m.set_clustered_cell(ckey, "component_index", int32_t(column.position()), timestamp);
+            m.set_clustered_cell(ckey, "component_index", int32_t(table->position(column)), timestamp);
         }
 #if 0
         adder.add("index_name", column.getIndexName());
@@ -1750,7 +1782,7 @@ future<> save_system_keyspace_schema() {
 
 std::vector<schema_ptr> all_tables() {
     return {
-        keyspaces(), columnfamilies(), columns(), triggers(), usertypes(), functions(), aggregates()
+        keyspaces(), columnfamilies(), columns(), triggers(), usertypes(), /* Not in 2.1.8 functions(), aggregates() */
     };
 }
 

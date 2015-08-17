@@ -88,6 +88,24 @@ void stream_session::init_messaging_service_handler() {
             }
         });
     });
+    ms().register_prepare_done_message([] (UUID plan_id, inet_address from, inet_address connecting, unsigned dst_cpu_id) {
+        return smp::submit_to(dst_cpu_id, [plan_id, from, connecting] () mutable {
+            sslog.debug("GOT PREPARE_DONE_MESSAGE: plan_id={}, from={}, connecting={}", plan_id, from, connecting);
+            auto f = get_stream_result_future(plan_id);
+            if (f) {
+                auto coordinator = f->get_coordinator();
+                assert(coordinator);
+                auto session = coordinator->get_or_create_next_session(from, from);
+                assert(session);
+                session->follower_start_sent();
+                return make_ready_future<>();
+            } else {
+                auto err = sprint("PREPARE_DONE_MESSAGE: Can not find stream_manager for plan_id=%s", plan_id);
+                sslog.warn(err.c_str());
+                throw std::runtime_error(err);
+            }
+        });
+    });
     ms().register_stream_mutation([] (UUID plan_id, frozen_mutation fm, unsigned dst_cpu_id) {
         return smp::submit_to(dst_cpu_id, [plan_id, fm = std::move(fm)] () mutable {
             if (sslog.is_enabled(logging::log_level::debug)) {
@@ -199,8 +217,10 @@ future<> stream_session::test(distributed<cql3::query_processor>& qp) {
                 auto opts = make_shared<cql3::query_options>(cql3::query_options::DEFAULT);
                 qp.local().process("CREATE KEYSPACE ks WITH REPLICATION = { 'class' : 'SimpleStrategy', 'replication_factor' : 1 };", qs, *opts).get();
                 sslog.debug("CREATE KEYSPACE = KS DONE");
+                sleep(std::chrono::seconds(3)).get();
                 qp.local().process("CREATE TABLE ks.tb ( key text PRIMARY KEY, C0 text, C1 text, C2 text, C3 blob, C4 text);", qs, *opts).get();
                 sslog.debug("CREATE TABLE = TB DONE");
+                sleep(std::chrono::seconds(3)).get();
                 qp.local().process("insert into ks.tb (key,c0) values ('1','1');", qs, *opts).get();
                 sslog.debug("INSERT VALUE DONE: 1");
                 qp.local().process("insert into ks.tb (key,c0) values ('2','2');", qs, *opts).get();
@@ -250,9 +270,16 @@ future<> stream_session::initiate() {
     auto id = shard_id{this->peer, 0};
     this->src_cpu_id = engine().cpu_id();
     sslog.debug("SEND SENDSTREAM_INIT_MESSAGE to {}", id);
-    return ms().send_stream_init_message(std::move(id), std::move(msg), this->src_cpu_id).then([this] (unsigned dst_cpu_id) {
-        sslog.debug("GOT STREAM_INIT_MESSAGE Reply: dst_cpu_id={}", dst_cpu_id);
-        this->dst_cpu_id = dst_cpu_id;
+    return ms().send_stream_init_message(std::move(id), std::move(msg), this->src_cpu_id).then_wrapped([this, id] (auto&& f) {
+        try {
+            unsigned dst_cpu_id = f.get0();
+            sslog.debug("GOT STREAM_INIT_MESSAGE Reply: dst_cpu_id={}", dst_cpu_id);
+            this->dst_cpu_id = dst_cpu_id;
+        } catch (...) {
+            sslog.error("Fail to send STREAM_INIT_MESSAGE to {}: {}", id, std::current_exception());
+            throw;
+        }
+        return make_ready_future<>();
     });
 }
 
@@ -268,12 +295,25 @@ future<> stream_session::on_initialization_complete() {
     auto id = shard_id{this->peer, this->dst_cpu_id};
     auto from = utils::fb_utilities::get_broadcast_address();
     sslog.debug("SEND PREPARE_MESSAGE to {}", id);
-    return ms().send_prepare_message(id, std::move(prepare), plan_id(), from, this->connecting, this->src_cpu_id, this->dst_cpu_id).then([this] (messages::prepare_message msg) {
-        sslog.debug("GOT PREPARE_MESSAGE Reply");
-        for (auto& summary : msg.summaries) {
-            prepare_receiving(summary);
+    return ms().send_prepare_message(id, std::move(prepare), plan_id(), from,
+        this->connecting, this->src_cpu_id, this->dst_cpu_id).then_wrapped([this, id] (auto&& f) {
+        try {
+            auto msg = f.get0();
+            sslog.debug("GOT PREPARE_MESSAGE Reply");
+            for (auto& summary : msg.summaries) {
+                this->prepare_receiving(summary);
+            }
+            this->start_streaming_files();
+        } catch (...) {
+            sslog.error("Fail to send PREPARE_MESSAGE to {}, {}", id, std::current_exception());
+            throw;
         }
-        start_streaming_files();
+        return make_ready_future<>();
+    }).then([this, id, from] {
+        sslog.debug("SEND PREPARE_DONE_MESSAGE to {}", id);
+        return ms().send_prepare_done_message(id, plan_id(), from, this->connecting, this->dst_cpu_id).handle_exception([id] (auto ep) {
+            sslog.error("Fail to send PREPARE_DONE_MESSAGE to {}, {}", id, ep);
+        });
     });
 }
 
@@ -334,12 +374,14 @@ future<messages::prepare_message> stream_session::prepare(std::vector<stream_req
         }
     }
 
+    return make_ready_future<messages::prepare_message>(std::move(prepare));
+}
+
+void stream_session::follower_start_sent() {
     // if there are files to stream
     if (!maybe_completed()) {
-        start_streaming_files();
+        this->start_streaming_files();
     }
-
-    return make_ready_future<messages::prepare_message>(std::move(prepare));
 }
 
 void stream_session::file_sent(const messages::file_message_header& header) {
@@ -420,17 +462,13 @@ session_info stream_session::get_session_info() {
 
 void stream_session::receive_task_completed(UUID cf_id) {
     _receivers.erase(cf_id);
-    sslog.debug("receive_task_completed: cf_id={} done, {} {}", cf_id, _receivers.size(), _transfers.size());
+    sslog.debug("receive  task_completed: cf_id={} done, receivers.size={} transfers.size={}", cf_id, _receivers.size(), _transfers.size());
     maybe_completed();
 }
 
-void stream_session::task_completed(stream_receive_task& completed_task) {
-    _receivers.erase(completed_task.cf_id);
-    maybe_completed();
-}
-
-void stream_session::task_completed(stream_transfer_task& completed_task) {
-    _transfers.erase(completed_task.cf_id);
+void stream_session::transfer_task_completed(UUID cf_id) {
+    _transfers.erase(cf_id);
+    sslog.debug("transfer task_completed: cf_id={} done, receivers.size={} transfers.size={}", cf_id, _receivers.size(), _transfers.size());
     maybe_completed();
 }
 
@@ -444,7 +482,7 @@ future<> stream_session::send_complete_message() {
             sslog.debug("GOT COMPLETE_MESSAGE Reply");
             return make_ready_future<>();
         } catch (...) {
-            sslog.warn("ERROR COMPLETE_MESSAGE Reply");
+            sslog.warn("ERROR COMPLETE_MESSAGE Reply: {}", std::current_exception());
             return make_ready_future<>();
         }
     });
@@ -460,13 +498,13 @@ bool stream_session::maybe_completed() {
                 });
             }
             close_session(stream_session_state::COMPLETE);
-            sslog.debug("session complete");
+            sslog.debug("[Stream #{}] WAIT_COMPLETE -> COMPLETE", plan_id());
         } else {
             // notify peer that this session is completed
             send_complete_message().then([this] {
                 _complete_sent = true;
                 set_state(stream_session_state::WAIT_COMPLETE);
-                sslog.debug("session wait complete");
+                sslog.debug("[Stream #{}] {} -> WAIT_COMPLETE", plan_id(), int(_state));
             });
         }
     }
@@ -495,8 +533,9 @@ void stream_session::start_streaming_files() {
 #endif
     set_state(stream_session_state::STREAMING);
     sslog.debug("{}: {} transfers to send", __func__, _transfers.size());
-    for (auto& x : _transfers) {
-        stream_transfer_task& task = x.second;
+    for (auto it = _transfers.begin(); it != _transfers.end();) {
+        stream_transfer_task& task = it->second;
+        it++;
         task.start();
     }
 }
@@ -515,7 +554,7 @@ std::vector<column_family*> stream_session::get_column_family_stores(const sstri
                 auto& x = db.find_column_family(keyspace, cf_name);
                 stores.push_back(&x);
             } catch (no_such_column_family) {
-                sslog.warn("stream_session: {}.{} does not exist\n", keyspace, cf_name);
+                sslog.warn("stream_session: {}.{} does not exist: {}\n", keyspace, cf_name, std::current_exception());
                 continue;
             }
         }
@@ -531,19 +570,17 @@ void stream_session::add_transfer_ranges(sstring keyspace, std::vector<query::ra
     }
     for (auto& cf : cfs) {
         std::vector<mutation_reader> readers;
-        std::vector<shared_ptr<query::range<ring_position>>> prs;
         auto cf_id = cf->schema()->id();
         for (auto& range : ranges) {
-            auto pr = make_shared<query::range<ring_position>>(query::to_partition_range(range));
-            prs.push_back(pr);
-            auto mr = service::get_storage_proxy().local().make_local_reader(cf_id, *pr);
+            auto pr = query::to_partition_range(range);
+            auto mr = service::get_storage_proxy().local().make_local_reader(cf_id, pr);
             readers.push_back(std::move(mr));
         }
         // Store this mutation_reader so we can send mutaions later
         mutation_reader mr = make_combined_reader(std::move(readers));
         // FIXME: sstable.estimatedKeysForRanges(ranges)
         long estimated_keys = 0;
-        stream_details.emplace_back(std::move(cf_id), std::move(prs), std::move(mr), estimated_keys, repaired_at);
+        stream_details.emplace_back(std::move(cf_id), std::move(mr), estimated_keys, repaired_at);
     }
     if (!stream_details.empty()) {
         add_transfer_files(std::move(stream_details));

@@ -543,17 +543,17 @@ SEASTAR_TEST_CASE(test_partition_range_queries_with_bounds) {
             auto rows = dynamic_pointer_cast<transport::messages::result_message::rows>(msg);
             BOOST_REQUIRE(rows);
             std::vector<bytes> keys;
-            std::vector<bytes> tokens;
+            std::vector<int64_t> tokens;
             for (auto&& row : rows->rs().rows()) {
                 BOOST_REQUIRE(row[0]);
                 BOOST_REQUIRE(row[1]);
                 keys.push_back(*row[0]);
-                tokens.push_back(*row[1]);
+                tokens.push_back(boost::any_cast<int64_t>(long_type->deserialize(*row[1])));
             }
             BOOST_REQUIRE(keys.size() == 5);
 
             return now().then([keys, tokens, &e] {
-                return e.execute_cql(sprint("select k from cf where token(k) > 0x%s;", to_hex(tokens[1]))).then([keys](auto msg) {
+                return e.execute_cql(sprint("select k from cf where token(k) > %d;", tokens[1])).then([keys](auto msg) {
                     assert_that(msg).is_rows().with_rows({
                         {keys[2]},
                         {keys[3]},
@@ -561,7 +561,7 @@ SEASTAR_TEST_CASE(test_partition_range_queries_with_bounds) {
                     });
                 });
             }).then([keys, tokens, &e] {
-                return e.execute_cql(sprint("select k from cf where token(k) >= 0x%s;", to_hex(tokens[1]))).then([keys](auto msg) {
+                return e.execute_cql(sprint("select k from cf where token(k) >= %ld;", tokens[1])).then([keys](auto msg) {
                     assert_that(msg).is_rows().with_rows({
                         {keys[1]},
                         {keys[2]},
@@ -570,15 +570,15 @@ SEASTAR_TEST_CASE(test_partition_range_queries_with_bounds) {
                     });
                 });
             }).then([keys, tokens, &e] {
-                return e.execute_cql(sprint("select k from cf where token(k) > 0x%s and token(k) < 0x%s;",
-                        to_hex(tokens[1]), to_hex(tokens[4]))).then([keys](auto msg) {
+                return e.execute_cql(sprint("select k from cf where token(k) > %ld and token(k) < %ld;",
+                        tokens[1], tokens[4])).then([keys](auto msg) {
                     assert_that(msg).is_rows().with_rows({
                         {keys[2]},
                         {keys[3]},
                     });
                 });
             }).then([keys, tokens, &e] {
-                return e.execute_cql(sprint("select k from cf where token(k) < 0x%s;", to_hex(tokens[3]))).then([keys](auto msg) {
+                return e.execute_cql(sprint("select k from cf where token(k) < %ld;", tokens[3])).then([keys](auto msg) {
                     assert_that(msg).is_rows().with_rows({
                         {keys[0]},
                         {keys[1]},
@@ -586,17 +586,17 @@ SEASTAR_TEST_CASE(test_partition_range_queries_with_bounds) {
                     });
                 });
             }).then([keys, tokens, &e] {
-                return e.execute_cql(sprint("select k from cf where token(k) = 0x%s;", to_hex(tokens[3]))).then([keys](auto msg) {
+                return e.execute_cql(sprint("select k from cf where token(k) = %ld;", tokens[3])).then([keys](auto msg) {
                     assert_that(msg).is_rows().with_rows({
                         {keys[3]}
                     });
                 });
             }).then([keys, tokens, &e] {
-                return e.execute_cql(sprint("select k from cf where token(k) < 0x%s and token(k) > 0x%s;", to_hex(tokens[3]), to_hex(tokens[3]))).then([keys](auto msg) {
+                return e.execute_cql(sprint("select k from cf where token(k) < %ld and token(k) > %ld;", tokens[3], tokens[3])).then([keys](auto msg) {
                     assert_that(msg).is_rows().is_empty();
                 });
             }).then([keys, tokens, &e] {
-                return e.execute_cql(sprint("select k from cf where token(k) >= 0x%s and token(k) <= 0x%s;", to_hex(tokens[4]), to_hex(tokens[2]))).then([keys](auto msg) {
+                return e.execute_cql(sprint("select k from cf where token(k) >= %ld and token(k) <= %ld;", tokens[4], tokens[2])).then([keys](auto msg) {
                     assert_that(msg).is_rows().is_empty();
                 });
             });
@@ -1012,6 +1012,15 @@ SEASTAR_TEST_CASE(test_tuples) {
                 .with_rows({{
                      {tt->decompose(tuple_type_impl::native_type({int32_t(1001), int64_t(2001), sstring("abc1")}))},
                 }});
+            return e.execute_cql("create table cf2 (p1 int PRIMARY KEY, r1 tuple<int, bigint, text>)").discard_result();
+        }).then([&e] {
+            return e.execute_cql("insert into cf2 (p1, r1) values (1, (1, 2, 'abc'));").discard_result();
+        }).then([&e] {
+            return e.execute_cql("select * from cf2 where p1 = 1;");
+        }).then([&e, tt] (auto msg) {
+            assert_that(msg).is_rows().with_rows({
+                { int32_type->decompose(int32_t(1)), tt->decompose(tuple_type_impl::native_type({int32_t(1), int64_t(2), sstring("abc")})) }
+            });
         });
     });
 }
@@ -1591,7 +1600,6 @@ SEASTAR_TEST_CASE(test_multi_column_restrictions) {
             assert_that(msg).is_rows().with_rows({
                 {int32_type->decompose(2)},
                 {int32_type->decompose(5)},
-                {int32_type->decompose(2)},
             });
             return e.execute_cql("select r1 from tmcr where p1 = 0 and (c1, c2) in ((0, 1), (1, 0), (0, 1));");
         }).then([&e] (auto msg) {
@@ -1600,8 +1608,6 @@ SEASTAR_TEST_CASE(test_multi_column_restrictions) {
                 {int32_type->decompose(3)},
                 {int32_type->decompose(4)},
                 {int32_type->decompose(5)},
-                {int32_type->decompose(2)},
-                {int32_type->decompose(3)},
             });
             return e.execute_cql("select r1 from tmcr where p1 = 0 and (c1, c2, c3) >= (1, 0, 1);");
         }).then([&e] (auto msg) {
@@ -1722,3 +1728,139 @@ SEASTAR_TEST_CASE(test_select_distinct) {
     });
 }
 
+SEASTAR_TEST_CASE(test_batch_insert_statement) {
+    return do_with_cql_env([] (auto& e) {
+        return e.execute_cql("create table cf (p1 varchar, c1 int, r1 int, PRIMARY KEY (p1, c1));").discard_result().then([&e] {
+            return e.execute_cql(R"(BEGIN BATCH
+insert into cf (p1, c1, r1) values ('key1', 1, 100);
+insert into cf (p1, c1, r1) values ('key2', 2, 200);
+APPLY BATCH;)"
+            ).discard_result();
+        }).then([&e] {
+            return e.execute_cql(R"(BEGIN BATCH
+update cf set r1 = 66 where p1 = 'key1' and c1 = 1;
+update cf set r1 = 33 where p1 = 'key2' and c1 = 2;
+APPLY BATCH;)"
+            ).discard_result();
+
+        }).then([&e] {
+            return e.require_column_has_value("cf", {sstring("key1")}, {1}, "r1", 66);
+        }).then([&e] {
+            return e.require_column_has_value("cf", {sstring("key2")}, {2}, "r1", 33);
+        });
+    });
+}
+
+SEASTAR_TEST_CASE(test_in_restriction) {
+    return do_with_cql_env([] (auto& e) {
+        return e.execute_cql("create table tir (p1 int, c1 int, r1 int, PRIMARY KEY (p1, c1));").discard_result().then([&e] {
+            e.require_table_exists("ks", "tir");
+            return e.execute_cql("insert into tir (p1, c1, r1) values (0, 0, 0);").discard_result();
+        }).then([&e] {
+            return e.execute_cql("insert into tir (p1, c1, r1) values (1, 0, 1);").discard_result();
+        }).then([&e] {
+            return e.execute_cql("insert into tir (p1, c1, r1) values (1, 1, 2);").discard_result();
+        }).then([&e] {
+            return e.execute_cql("insert into tir (p1, c1, r1) values (1, 2, 3);").discard_result();
+        }).then([&e] {
+            return e.execute_cql("insert into tir (p1, c1, r1) values (2, 3, 4);").discard_result();
+        }).then([&e] {
+            return e.execute_cql("select * from tir where p1 in ();");
+        }).then([&e] (auto msg) {
+            assert_that(msg).is_rows().with_size(0);
+            return e.execute_cql("select r1 from tir where p1 in (2, 0, 2, 1);");
+        }).then([&e] (auto msg) {
+            assert_that(msg).is_rows().with_rows({
+                {int32_type->decompose(4)},
+                {int32_type->decompose(0)},
+                {int32_type->decompose(4)},
+                {int32_type->decompose(1)},
+                {int32_type->decompose(2)},
+                {int32_type->decompose(3)},
+            });
+            return e.execute_cql("select r1 from tir where p1 = 1 and c1 in ();");
+        }).then([&e] (auto msg) {
+            assert_that(msg).is_rows().with_size(0);
+            return e.execute_cql("select r1 from tir where p1 = 1 and c1 in (2, 0, 2, 1);");
+        }).then([&e] (auto msg) {
+            assert_that(msg).is_rows().with_rows({
+                {int32_type->decompose(1)},
+                {int32_type->decompose(2)},
+                {int32_type->decompose(3)},
+            });
+            return e.execute_cql("select r1 from tir where p1 = 1 and c1 in (2, 0, 2, 1) order by c1 desc;");
+        }).then([&e] (auto msg) {
+            assert_that(msg).is_rows().with_rows({
+                {int32_type->decompose(3)},
+                {int32_type->decompose(2)},
+                {int32_type->decompose(1)},
+            });
+        });
+    });
+}
+
+SEASTAR_TEST_CASE(test_compact_storage) {
+    return do_with_cql_env([] (auto& e) {
+        return e.execute_cql("create table tcs (p1 int, c1 int, r1 int, PRIMARY KEY (p1, c1)) with compact storage;").discard_result().then([&e] {
+            return e.require_table_exists("ks", "tcs");
+        }).then([&e] {
+            return e.execute_cql("insert into tcs (p1, c1, r1) values (1, 2, 3);").discard_result();
+        }).then([&e] {
+            return e.require_column_has_value("tcs", {1}, {2}, "r1", 3);
+        }).then([&e] {
+            return e.execute_cql("update tcs set r1 = 4 where p1 = 1 and c1 = 2;").discard_result();
+        }).then([&e] {
+            return e.require_column_has_value("tcs", {1}, {2}, "r1", 4);
+        }).then([&e] {
+            return e.execute_cql("select * from tcs where p1 = 1;");
+        }).then([&e] (auto msg) {
+            assert_that(msg).is_rows().with_rows({
+                { int32_type->decompose(1), int32_type->decompose(2), int32_type->decompose(4) },
+            });
+            return e.execute_cql("create table tcs2 (p1 int, c1 int, PRIMARY KEY (p1, c1)) with compact storage;").discard_result();
+        }).then([&e] {
+            return e.require_table_exists("ks", "tcs2");
+        }).then([&e] {
+            return e.execute_cql("insert into tcs2 (p1, c1) values (1, 2);").discard_result();
+        }).then([&e] {
+            return e.execute_cql("select * from tcs2 where p1 = 1;");
+        }).then([&e] (auto msg) {
+            assert_that(msg).is_rows().with_rows({
+                { int32_type->decompose(1), int32_type->decompose(2) },
+            });
+            return e.execute_cql("create table tcs3 (p1 int, c1 int, c2 int, r1 int, PRIMARY KEY (p1, c1, c2)) with compact storage;").discard_result();
+        }).then([&e] {
+            return e.execute_cql("insert into tcs3 (p1, c1, c2, r1) values (1, 2, 3, 4);").discard_result();
+        }).then([&e] {
+            return e.execute_cql("insert into tcs3 (p1, c1, r1) values (1, 2, 5);").discard_result();
+        }).then([&e] {
+            return e.execute_cql("insert into tcs3 (p1, c1, r1) values (1, 3, 6);").discard_result();
+        }).then([&e] {
+            return e.execute_cql("insert into tcs3 (p1, c1, c2, r1) values (1, 3, 5, 7);").discard_result();
+        }).then([&e] {
+            return e.execute_cql("select * from tcs3 where p1 = 1;");
+        }).then([&e] (auto msg) {
+            assert_that(msg).is_rows().with_rows({
+                { int32_type->decompose(1), int32_type->decompose(2), bytes(), int32_type->decompose(5) },
+                { int32_type->decompose(1), int32_type->decompose(2), int32_type->decompose(3), int32_type->decompose(4) },
+                { int32_type->decompose(1), int32_type->decompose(3), bytes(), int32_type->decompose(6) },
+                { int32_type->decompose(1), int32_type->decompose(3), int32_type->decompose(5), int32_type->decompose(7) },
+            });
+            return e.execute_cql("delete from tcs3 where p1 = 1 and c1 = 2;").discard_result();
+        }).then([&e] {
+            return e.execute_cql("select * from tcs3 where p1 = 1;");
+        }).then([&e] (auto msg) {
+            assert_that(msg).is_rows().with_rows({
+                { int32_type->decompose(1), int32_type->decompose(3), bytes(), int32_type->decompose(6) },
+                { int32_type->decompose(1), int32_type->decompose(3), int32_type->decompose(5), int32_type->decompose(7) },
+            });
+            return e.execute_cql("delete from tcs3 where p1 = 1 and c1 = 3 and c2 = 5;").discard_result();
+        }).then([&e] {
+            return e.execute_cql("select * from tcs3 where p1 = 1;");
+        }).then([&e] (auto msg) {
+            assert_that(msg).is_rows().with_rows({
+                { int32_type->decompose(1), int32_type->decompose(3), bytes(), int32_type->decompose(6) },
+            });
+        });
+    });
+}

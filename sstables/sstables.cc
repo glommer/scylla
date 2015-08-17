@@ -20,6 +20,7 @@
 #include "compress.hh"
 #include "unimplemented.hh"
 #include <boost/algorithm/string.hpp>
+#include <regex>
 
 namespace sstables {
 
@@ -74,6 +75,7 @@ public:
 };
 
 std::unordered_map<sstable::version_types, sstring, enum_hash<sstable::version_types>> sstable::_version_string = {
+    { sstable::version_types::ka , "ka" },
     { sstable::version_types::la , "la" }
 };
 
@@ -81,6 +83,7 @@ std::unordered_map<sstable::format_types, sstring, enum_hash<sstable::format_typ
     { sstable::format_types::big , "big" }
 };
 
+// FIXME: this should be version-dependent
 std::unordered_map<sstable::component_type, sstring, enum_hash<sstable::component_type>> sstable::_component_map = {
     { component_type::Index, "Index.db"},
     { component_type::CompressionInfo, "CompressionInfo.db" },
@@ -676,7 +679,9 @@ future<> sstable::read_toc() {
 }
 
 void sstable::write_toc() {
-    auto file_path = filename(sstable::component_type::TOC);
+    // Create TOC file with the string 'tmp-' prepended to it, meaning TOC
+    // is a temporary file.
+    auto file_path = temporary_filename(sstable::component_type::TOC);
 
     sstlog.debug("Writing TOC file {} ", file_path);
 
@@ -692,6 +697,16 @@ void sstable::write_toc() {
     }
     w.flush().get();
     w.close().get();
+
+    file dir_f = engine().open_directory(_dir).get0();
+    // Guarantee that every component of this sstable reached the disk.
+    dir_f.flush().get();
+    // Rename TOC because it's no longer temporary.
+    engine().rename_file(file_path, filename(sstable::component_type::TOC)).get();
+    // Guarantee that the changes above reached the disk.
+    dir_f.flush().get();
+    dir_f.close().get();
+    // If this point was reached, sstable should be safe in disk.
 }
 
 void write_crc(const sstring file_path, checksum& c) {
@@ -840,7 +855,12 @@ future<> sstable::open_data() {
         _data_file  = std::get<file>(std::get<1>(files).get());
         return _data_file.size().then([this] (auto size) {
           _data_file_size = size;
+        }).then([this] {
+            return _index_file.size().then([this] (auto size) {
+              _index_file_size = size;
+            });
         });
+
     });
 }
 
@@ -874,18 +894,6 @@ future<> sstable::load() {
         if (has_component(sstable::component_type::CompressionInfo)) {
             _compression.update(_data_file_size);
         }
-    });
-}
-
-future<> sstable::store() {
-    _components.erase(component_type::Index);
-    _components.erase(component_type::Data);
-    return seastar::async([this] {
-        write_statistics();
-        write_compression();
-        write_filter();
-        write_summary();
-        write_toc();
     });
 }
 
@@ -1374,23 +1382,65 @@ const bool sstable::has_component(component_type f) {
 }
 
 const sstring sstable::filename(component_type f) {
-
-    auto& version = _version_string.at(_version);
-    auto& format = _format_string.at(_format);
-    auto& component = _component_map.at(f);
-    auto generation =  to_sstring(_generation);
-
-    return _dir + "/" + version + "-" + generation + "-" + format + "-" + component;
+    return filename(_dir, _ks, _cf, _version, _generation, _format, f);
 }
 
-const sstring sstable::filename(sstring dir, version_types version, unsigned long generation,
-                                format_types format, component_type component) {
-    auto& v = _version_string.at(version);
-    auto& f = _format_string.at(format);
-    auto& c= _component_map.at(component);
-    auto g =  to_sstring(generation);
+const sstring sstable::temporary_filename(component_type f) {
+    return filename(_dir, _ks, _cf, _version, _generation, _format, f, true);
+}
 
-    return dir + "/" + v + "-" + g + "-" + f + "-" + c;
+const sstring sstable::filename(sstring dir, sstring ks, sstring cf, version_types version, unsigned long generation,
+                                format_types format, component_type component, bool temporary) {
+
+    static std::unordered_map<version_types, std::function<sstring (entry_descriptor d)>, enum_hash<version_types>> strmap = {
+        { sstable::version_types::ka, [] (entry_descriptor d) {
+            return d.ks + "-" + d.cf + "-" + _version_string.at(d.version) + "-" + to_sstring(d.generation) + "-" + _component_map.at(d.component); }
+        },
+        { sstable::version_types::la, [] (entry_descriptor d) {
+            return _version_string.at(d.version) + "-" + to_sstring(d.generation) + "-" + _format_string.at(d.format) + "-" + _component_map.at(d.component); }
+        }
+    };
+
+    if (temporary) {
+        return dir + "/tmp-" + strmap[version](entry_descriptor(ks, cf, version, generation, format, component));
+    } else {
+        return dir + "/" + strmap[version](entry_descriptor(ks, cf, version, generation, format, component));
+    }
+}
+
+entry_descriptor entry_descriptor::make_descriptor(sstring fname) {
+    static std::regex la("la-(\\d+)-(\\w+)-(.*)");
+    static std::regex ka("(\\w+)-(\\w+)-ka-(\\d+)-(.*)");
+
+    std::smatch match;
+
+    sstable::version_types version;
+
+    sstring generation;
+    sstring format;
+    sstring component;
+    sstring ks;
+    sstring cf;
+
+    std::string s(fname);
+    if (std::regex_match(s, match, la)) {
+        sstring ks = "";
+        sstring cf = "";
+        version = sstable::version_types::la;
+        generation = match[1].str();
+        format = sstring(match[2].str());
+        component = sstring(match[3].str());
+    } else if (std::regex_match(s, match, ka)) {
+        ks = match[1].str();
+        cf = match[2].str();
+        version = sstable::version_types::ka;
+        format = sstring("big");
+        generation = match[3].str();
+        component = sstring(match[4].str());
+    } else {
+        throw malformed_sstable_exception("invalid version");
+    }
+    return entry_descriptor(ks, cf, version, boost::lexical_cast<unsigned long>(generation), sstable::format_from_sstring(format), sstable::component_from_sstring(component));
 }
 
 sstable::version_types sstable::version_from_sstring(sstring &s) {
@@ -1399,6 +1449,10 @@ sstable::version_types sstable::version_from_sstring(sstring &s) {
 
 sstable::format_types sstable::format_from_sstring(sstring &s) {
     return reverse_map(s, _format_string);
+}
+
+sstable::component_type sstable::component_from_sstring(sstring &s) {
+    return reverse_map(s, _component_map);
 }
 
 input_stream<char> sstable::data_stream_at(uint64_t pos) {

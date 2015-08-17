@@ -62,10 +62,10 @@ struct summary_entry {
     }
 };
 
-// Note: Sampling level is present in versions ka and higher. We ATM only support la,
+// Note: Sampling level is present in versions ka and higher. We ATM only support ka,
 // so it's always there. But we need to make this conditional if we ever want to support
-// other formats (unlikely)
-struct summary_la {
+// other formats.
+struct summary_ka {
     struct header {
         // The minimum possible amount of indexes per group (sampling level)
         uint32_t min_index_interval;
@@ -106,7 +106,7 @@ struct summary_la {
     // However, it was tested that Cassandra loads successfully a Summary file with
     // this structure removed from it. Anyway, let's pay attention to it.
 };
-using summary = summary_la;
+using summary = summary_ka;
 
 struct replay_position {
     uint64_t segment;
@@ -152,7 +152,7 @@ struct compaction_metadata : public metadata {
     auto describe_type(Describer f) { return f(ancestors, cardinality); }
 };
 
-struct la_stats_metadata : public metadata {
+struct ka_stats_metadata : public metadata {
     estimated_histogram estimated_row_size;
     estimated_histogram estimated_column_count;
     replay_position position;
@@ -186,7 +186,7 @@ struct la_stats_metadata : public metadata {
         );
     }
 };
-using stats_metadata = la_stats_metadata;
+using stats_metadata = ka_stats_metadata;
 
 // Numbers are found on disk, so they do matter. Also, setting their sizes of
 // that of an uint32_t is a bit wasteful, but it simplifies the code a lot

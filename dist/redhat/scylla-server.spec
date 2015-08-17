@@ -1,18 +1,21 @@
 Name:           scylla-server
 Version:        0.00
 Release:        1%{?dist}
-Summary:        Scylla Server
+Summary:        Scylla is a highly scalable, eventually consistent, distributed, partitioned row DB.
 Group:          Applications/Dataases
 
 License:        Proprietary
 URL:            http://www.seastar-project.org/
 Source0:        %{name}-%{version}.tar
 
-BuildRequires:  libaio-devel boost-devel libstdc++-devel cryptopp-devel xen-devel hwloc-devel numactl-devel libpciaccess-devel libxml2-devel zlib-devel thrift-devel yaml-cpp-devel lz4-devel snappy-devel jsoncpp-devel systemd-devel xz-devel openssl-devel libcap-devel libselinux-devel libgcrypt-devel libgpg-error-devel elfutils-devel krb5-devel libcom_err-devel libattr-devel pcre-devel elfutils-libelf-devel bzip2-devel keyutils-libs-devel ninja-build ragel antlr3-tool antlr3-C++-devel libasan libubsan
+BuildRequires:  libaio-devel boost-devel libstdc++-devel cryptopp-devel xen-devel hwloc-devel numactl-devel libpciaccess-devel libxml2-devel zlib-devel thrift-devel yaml-cpp-devel lz4-devel snappy-devel jsoncpp-devel systemd-devel xz-devel openssl-devel libcap-devel libselinux-devel libgcrypt-devel libgpg-error-devel elfutils-devel krb5-devel libcom_err-devel libattr-devel pcre-devel elfutils-libelf-devel bzip2-devel keyutils-libs-devel ninja-build ragel antlr3-tool antlr3-C++-devel libasan libubsan gcc-c++
 Requires:       libaio boost-program-options boost-system libstdc++ boost-test boost-thread cryptopp xen-libs hwloc-libs numactl-libs libpciaccess libxml2 zlib thrift yaml-cpp lz4 snappy jsoncpp boost-filesystem systemd-libs xz-libs openssl-libs libcap libselinux libgcrypt libgpg-error elfutils-libs krb5-libs libcom_err libattr pcre elfutils-libelf bzip2-libs keyutils-libs
 
 # TODO: create our own bridge device for virtio
 Requires:       libvirt-daemon
+
+Conflicts:       cassandra21
+Provides:       cassandra21
 
 %description
 
@@ -20,7 +23,7 @@ Requires:       libvirt-daemon
 %setup -q
 
 %build
-./configure.py --disable-xen --enable-dpdk
+./configure.py --disable-xen --enable-dpdk --mode=release
 make -C seastar/build/dpdk %{?_smp_mflags}
 ninja-build %{?_smp_mflags}
 
@@ -28,11 +31,13 @@ ninja-build %{?_smp_mflags}
 rm -rf $RPM_BUILD_ROOT
 mkdir -p $RPM_BUILD_ROOT%{_bindir}
 mkdir -p $RPM_BUILD_ROOT%{_sysconfdir}/sysconfig/
+mkdir -p $RPM_BUILD_ROOT%{_sysconfdir}/security/limits.d/
 mkdir -p $RPM_BUILD_ROOT%{_docdir}/scylla/
 mkdir -p $RPM_BUILD_ROOT%{_unitdir}
 mkdir -p $RPM_BUILD_ROOT%{_prefix}/lib/scylla/
 
 install -m644 dist/redhat/sysconfig/scylla-server $RPM_BUILD_ROOT%{_sysconfdir}/sysconfig/
+install -m644 dist/redhat/limits.d/scylla.conf $RPM_BUILD_ROOT%{_sysconfdir}/security/limits.d/
 install -m644 dist/redhat/systemd/scylla-server.service $RPM_BUILD_ROOT%{_unitdir}/
 install -m755 dist/redhat/scripts/* $RPM_BUILD_ROOT%{_prefix}/lib/scylla/
 install -m755 seastar/dpdk/tools/dpdk_nic_bind.py $RPM_BUILD_ROOT%{_prefix}/lib/scylla/
@@ -68,6 +73,7 @@ rm -rf $RPM_BUILD_ROOT
 %defattr(-,root,root)
 
 %{_sysconfdir}/sysconfig/scylla-server
+%{_sysconfdir}/security/limits.d/scylla.conf
 %{_docdir}/scylla/README.md
 %{_docdir}/scylla/README-DPDK.md
 %{_docdir}/scylla/NOTICE.txt

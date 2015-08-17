@@ -25,6 +25,7 @@
 #pragma once
 
 #include "db/consistency_level_type.hh"
+#include "db/write_type.hh"
 #include <stdexcept>
 #include "core/sstring.hh"
 #include "core/print.hh"
@@ -69,14 +70,14 @@ public:
     sstring get_message() const { return what(); }
 };
 
-class protocol_exception : public exceptions::cassandra_exception {
+class protocol_exception : public cassandra_exception {
 public:
     protocol_exception(sstring msg)
         : exceptions::cassandra_exception{exceptions::exception_code::PROTOCOL_ERROR, std::move(msg)}
     { }
 };
 
-struct unavailable_exception : exceptions::cassandra_exception {
+struct unavailable_exception : cassandra_exception {
     db::consistency_level consistency;
     int32_t required;
     int32_t alive;
@@ -111,6 +112,19 @@ public:
         : request_timeout_exception{exception_code::READ_TIMEOUT, consistency, received, block_for}
         , data_present{data_present}
     { }
+};
+
+struct mutation_write_timeout_exception : public request_timeout_exception {
+    db::write_type type;
+    mutation_write_timeout_exception(db::consistency_level consistency, int32_t received, int32_t block_for, db::write_type type) :
+        request_timeout_exception(exception_code::WRITE_TIMEOUT, consistency, received, block_for)
+        , type{std::move(type)}
+    { }
+};
+
+struct overloaded_exception : public cassandra_exception {
+    overloaded_exception(size_t c) :
+        cassandra_exception(exception_code::OVERLOADED, sprint("Too many in flight hints: %lu", c)) {}
 };
 
 class request_validation_exception : public cassandra_exception {

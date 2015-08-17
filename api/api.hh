@@ -111,11 +111,11 @@ inline double pow2(double a) {
 
 inline httpd::utils_json::histogram add_histogram(httpd::utils_json::histogram res,
         const utils::ihistogram& val) {
-    if (val.count == 0) {
-        return res;
-    }
     if (!res.count._set) {
         res = val;
+        return res;
+    }
+    if (val.count == 0) {
         return res;
     }
     if (res.min() > val.min) {
@@ -151,4 +151,11 @@ future<json::json_return_type>  sum_histogram_stats(distributed<T>& d, utils::ih
     });
 }
 
+inline int64_t min_int64(int64_t a, int64_t b) {
+    return std::min(a,b);
+}
+
+inline int64_t max_int64(int64_t a, int64_t b) {
+    return std::max(a,b);
+}
 }

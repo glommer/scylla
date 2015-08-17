@@ -6,6 +6,9 @@
 #include "api/api-doc/column_family.json.hh"
 #include <vector>
 #include "http/exception.hh"
+#include "sstables/sstables.hh"
+#include "sstables/estimated_histogram.hh"
+#include <algorithm>
 
 namespace api {
 using namespace httpd;
@@ -53,6 +56,18 @@ future<json::json_return_type> map_reduce_cf(http_context& ctx, const sstring& n
     });
 }
 
+template<class Mapper, class I, class Reducer, class Result>
+future<json::json_return_type> map_reduce_cf(http_context& ctx, const sstring& name, I init,
+        Mapper mapper, Reducer reducer, Result result) {
+    auto uuid = get_uuid(name, ctx.db.local());
+    return ctx.db.map_reduce0([mapper, uuid](database& db) {
+        return mapper(db.find_column_family(uuid));
+    }, init, reducer).then([result](const I& res) mutable {
+        result = res;
+        return make_ready_future<json::json_return_type>(result);
+    });
+}
+
 template<class Mapper, class I, class Reducer>
 future<json::json_return_type> map_reduce_cf(http_context& ctx, I init,
         Mapper mapper, Reducer reducer) {
@@ -81,17 +96,58 @@ static future<json::json_return_type>  get_cf_stats(http_context& ctx,
     }, std::plus<int64_t>());
 }
 
-static future<json::json_return_type>  map_cf_stats(http_context& ctx,
-        int64_t column_family::stats::*f) {
-    return ctx.db.map([f](const database& db) {
-        int64_t res = 0;
+static future<json::json_return_type>  get_cf_stats_sum(http_context& ctx, const sstring& name,
+        utils::ihistogram column_family::stats::*f) {
+    return map_reduce_cf(ctx, name, 0, [f](const column_family& cf) {
+        return (cf.get_stats().*f).count;
+    }, std::plus<int64_t>());
+}
+
+static future<json::json_return_type>  get_cf_stats_sum(http_context& ctx,
+        utils::ihistogram column_family::stats::*f) {
+    return map_reduce_cf(ctx, 0, [f](const column_family& cf) {
+        return (cf.get_stats().*f).count;
+    }, std::plus<int64_t>());
+}
+
+static future<json::json_return_type>  get_cf_histogram(http_context& ctx, const sstring& name,
+        utils::ihistogram column_family::stats::*f) {
+    utils::UUID uuid = get_uuid(name, ctx.db.local());
+    return ctx.db.map_reduce0([f, uuid](const database& p) {return p.find_column_family(uuid).get_stats().*f;},
+            httpd::utils_json::histogram(),
+            add_histogram)
+            .then([](const httpd::utils_json::histogram& val) {
+                return make_ready_future<json::json_return_type>(val);
+    });
+}
+
+static future<json::json_return_type> get_cf_histogram(http_context& ctx, utils::ihistogram column_family::stats::*f) {
+    std::function<httpd::utils_json::histogram(const database&)> fun = [f] (const database& db)  {
+        httpd::utils_json::histogram res;
         for (auto i : db.get_column_families()) {
-            res += i.second.get()->get_stats().*f;
+            res = add_histogram(res, i.second->get_stats().*f);
         }
         return res;
-    }).then([](const std::vector<int64_t>& res) {
+    };
+    return ctx.db.map(fun).then([](const std::vector<httpd::utils_json::histogram> &res) {
         return make_ready_future<json::json_return_type>(res);
     });
+}
+
+static int64_t min_row_size(column_family& cf) {
+    int64_t res = INT64_MAX;
+    for (auto i: *cf.get_sstables() ) {
+        res = std::min(res, i.second->get_stats_metadata().estimated_row_size.min());
+    }
+    return (res == INT64_MAX) ? 0 : res;
+}
+
+static int64_t max_row_size(column_family& cf) {
+    int64_t res = 0;
+    for (auto i: *cf.get_sstables() ) {
+        res = std::max(i.second->get_stats_metadata().estimated_row_size.max(), res);
+    }
+    return res;
 }
 
 void set_column_family(http_context& ctx, routes& r) {
@@ -209,11 +265,15 @@ void set_column_family(http_context& ctx, routes& r) {
         return get_cf_stats(ctx, &column_family::stats::memtable_switch_count);
     });
 
-    cf::get_estimated_row_size_histogram.set(r, [] (std::unique_ptr<request> req) {
-        //TBD
-        //auto id = get_uuid(req->param["name"], ctx.db.local());
-        std::vector<double> res;
-        return make_ready_future<json::json_return_type>(res);
+    cf::get_estimated_row_size_histogram.set(r, [&ctx] (std::unique_ptr<request> req) {
+        return map_reduce_cf(ctx, req->param["name"], sstables::estimated_histogram(0), [](column_family& cf) {
+            sstables::estimated_histogram res(0);
+            for (auto i: *cf.get_sstables() ) {
+                res.merge(i.second->get_stats_metadata().estimated_row_size);
+            }
+            return res;
+        },
+        sstables::merge, utils_json::estimated_histogram());
     });
 
     cf::get_estimated_column_count_histogram.set(r, [] (std::unique_ptr<request> req) {
@@ -243,85 +303,83 @@ void set_column_family(http_context& ctx, routes& r) {
     });
 
     cf::get_read.set(r, [&ctx] (std::unique_ptr<request> req) {
-        return get_cf_stats(ctx,req->param["name"] ,&column_family::stats::reads);
+        return get_cf_stats_sum(ctx,req->param["name"] ,&column_family::stats::reads);
     });
 
     cf::get_all_read.set(r, [&ctx] (std::unique_ptr<request> req) {
-        return map_cf_stats(ctx, &column_family::stats::reads);
+        return get_cf_stats_sum(ctx, &column_family::stats::reads);
     });
 
     cf::get_write.set(r, [&ctx] (std::unique_ptr<request> req) {
-        return get_cf_stats(ctx,req->param["name"] ,&column_family::stats::writes);
+        return get_cf_stats_sum(ctx, req->param["name"] ,&column_family::stats::writes);
     });
 
     cf::get_all_write.set(r, [&ctx] (std::unique_ptr<request> req) {
-        return map_cf_stats(ctx, &column_family::stats::writes);
+        return get_cf_stats_sum(ctx, &column_family::stats::writes);
     });
 
-    cf::get_pending_compactions.set(r, [] (std::unique_ptr<request> req) {
-        //TBD
-        //auto id = get_uuid(req->param["name"], ctx.db.local());
-        return make_ready_future<json::json_return_type>(0);
+    cf::get_read_latency_histogram.set(r, [&ctx] (std::unique_ptr<request> req) {
+        return get_cf_histogram(ctx, req->param["name"], &column_family::stats::reads);
     });
 
-    cf::get_all_pending_compactions.set(r, [] (std::unique_ptr<request> req) {
-        //TBD
-        return make_ready_future<json::json_return_type>(0);
+    cf::get_all_read_latency_histogram.set(r, [&ctx] (std::unique_ptr<request> req) {
+        return get_cf_histogram(ctx, &column_family::stats::writes);
     });
 
-    cf::get_live_ss_table_count.set(r, [] (std::unique_ptr<request> req) {
-        //TBD
-        //auto id = get_uuid(req->param["name"], ctx.db.local());
-        return make_ready_future<json::json_return_type>(0);
+    cf::get_write_latency_histogram.set(r, [&ctx] (std::unique_ptr<request> req) {
+        return get_cf_histogram(ctx, req->param["name"], &column_family::stats::reads);
     });
 
-    cf::get_all_live_ss_table_count.set(r, [] (std::unique_ptr<request> req) {
-        //TBD
-        return make_ready_future<json::json_return_type>(0);
+    cf::get_all_write_latency_histogram.set(r, [&ctx] (std::unique_ptr<request> req) {
+        return get_cf_histogram(ctx, &column_family::stats::writes);
     });
 
-    cf::get_live_disk_space_used.set(r, [] (std::unique_ptr<request> req) {
-        //TBD
-        //auto id = get_uuid(req->param["name"], ctx.db.local());
-        return make_ready_future<json::json_return_type>(0);
+    cf::get_pending_compactions.set(r, [&ctx] (std::unique_ptr<request> req) {
+        return get_cf_stats(ctx, req->param["name"], &column_family::stats::pending_compactions);
     });
 
-    cf::get_all_live_disk_space_used.set(r, [] (std::unique_ptr<request> req) {
-        //TBD
-        return make_ready_future<json::json_return_type>(0);
+    cf::get_all_pending_compactions.set(r, [&ctx] (std::unique_ptr<request> req) {
+        return get_cf_stats(ctx, &column_family::stats::pending_compactions);
     });
 
-    cf::get_total_disk_space_used.set(r, [] (std::unique_ptr<request> req) {
-        //TBD
-        //auto id = get_uuid(req->param["name"], ctx.db.local());
-        return make_ready_future<json::json_return_type>(0);
+    cf::get_live_ss_table_count.set(r, [&ctx] (std::unique_ptr<request> req) {
+        return get_cf_stats(ctx, req->param["name"], &column_family::stats::live_sstable_count);
     });
 
-    cf::get_all_total_disk_space_used.set(r, [] (std::unique_ptr<request> req) {
-        //TBD
-        return make_ready_future<json::json_return_type>(0);
+    cf::get_all_live_ss_table_count.set(r, [&ctx] (std::unique_ptr<request> req) {
+        return get_cf_stats(ctx, &column_family::stats::live_sstable_count);
     });
 
-    cf::get_min_row_size.set(r, [] (std::unique_ptr<request> req) {
-        //TBD
-        ////auto id = get_uuid(req->param["name"], ctx.db.local());
-        return make_ready_future<json::json_return_type>(0);
+    cf::get_live_disk_space_used.set(r, [&ctx] (std::unique_ptr<request> req) {
+        return get_cf_stats(ctx, req->param["name"], &column_family::stats::live_disk_space_used);
     });
 
-    cf::get_all_min_row_size.set(r, [] (std::unique_ptr<request> req) {
-        //TBD
-        return make_ready_future<json::json_return_type>(0);
+    cf::get_all_live_disk_space_used.set(r, [&ctx] (std::unique_ptr<request> req) {
+        return get_cf_stats(ctx, &column_family::stats::live_disk_space_used);
     });
 
-    cf::get_max_row_size.set(r, [] (std::unique_ptr<request> req) {
-        //TBD
-        //auto id = get_uuid(req->param["name"], ctx.db.local());
-        return make_ready_future<json::json_return_type>(0);
+    cf::get_total_disk_space_used.set(r, [&ctx] (std::unique_ptr<request> req) {
+        return get_cf_stats(ctx, req->param["name"], &column_family::stats::total_disk_space_used);
     });
 
-    cf::get_all_max_row_size.set(r, [] (std::unique_ptr<request> req) {
-        //TBD
-        return make_ready_future<json::json_return_type>(0);
+    cf::get_all_total_disk_space_used.set(r, [&ctx] (std::unique_ptr<request> req) {
+        return get_cf_stats(ctx, &column_family::stats::total_disk_space_used);
+    });
+
+    cf::get_min_row_size.set(r, [&ctx] (std::unique_ptr<request> req) {
+        return map_reduce_cf(ctx, req->param["name"], INT64_MAX, min_row_size, min_int64);
+    });
+
+    cf::get_all_min_row_size.set(r, [&ctx] (std::unique_ptr<request> req) {
+        return map_reduce_cf(ctx, INT64_MAX, min_row_size, min_int64);
+    });
+
+    cf::get_max_row_size.set(r, [&ctx] (std::unique_ptr<request> req) {
+        return map_reduce_cf(ctx, req->param["name"], 0, max_row_size, max_int64);
+    });
+
+    cf::get_all_max_row_size.set(r, [&ctx] (std::unique_ptr<request> req) {
+        return map_reduce_cf(ctx, 0, max_row_size, max_int64);
     });
 
     cf::get_mean_row_size.set(r, [] (std::unique_ptr<request> req) {
@@ -530,5 +588,6 @@ void set_column_family(http_context& ctx, routes& r) {
         std::vector<double> res;
         return make_ready_future<json::json_return_type>(res);
     });
+
 }
 }

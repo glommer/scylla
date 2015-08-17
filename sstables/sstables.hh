@@ -113,11 +113,13 @@ public:
         Filter,
         Statistics,
     };
-    enum class version_types { la };
+    enum class version_types { ka, la };
     enum class format_types { big };
 public:
-    sstable(sstring dir, unsigned long generation, version_types v, format_types f, gc_clock::time_point now = gc_clock::now())
-        : _dir(dir)
+    sstable(sstring ks, sstring cf, sstring dir, unsigned long generation, version_types v, format_types f, gc_clock::time_point now = gc_clock::now())
+        : _ks(std::move(ks))
+        , _cf(std::move(cf))
+        , _dir(std::move(dir))
         , _generation(generation)
         , _version(v)
         , _format(f)
@@ -161,15 +163,13 @@ public:
     // Like data_consume_rows() with bounds, but iterates over whole range
     data_consume_context data_consume_rows(row_consumer& consumer);
 
+    static component_type component_from_sstring(sstring& s);
     static version_types version_from_sstring(sstring& s);
     static format_types format_from_sstring(sstring& s);
-    static const sstring filename(sstring dir, version_types version, unsigned long generation,
-                                  format_types format, component_type component);
+    static const sstring filename(sstring dir, sstring ks, sstring cf, version_types version, unsigned long generation,
+                                  format_types format, component_type component, bool temporary = false);
 
     future<> load();
-    // Used to serialize sstable components, but so far only for the purpose
-    // of testing.
-    future<> store();
 
     void set_generation(unsigned long generation) {
         _generation = generation;
@@ -231,6 +231,9 @@ public:
     }
 
     uint64_t data_size();
+    uint64_t index_size() {
+        return _index_file_size;
+    }
 
     // Returns the total bytes of all components.
     future<uint64_t> bytes_on_disk();
@@ -263,8 +266,11 @@ private:
     file _index_file;
     file _data_file;
     uint64_t _data_file_size;
+    uint64_t _index_file_size;
     uint64_t _bytes_on_disk = 0;
 
+    sstring _ks;
+    sstring _cf;
     sstring _dir;
     unsigned long _generation = 0;
     version_types _version;
@@ -273,12 +279,13 @@ private:
     lw_shared_ptr<distributed<filter_tracker>> _filter_tracker;
 
     bool _marked_for_deletion = false;
-    
+
     gc_clock::time_point _now;
 
     const bool has_component(component_type f);
 
     const sstring filename(component_type f);
+    const sstring temporary_filename(component_type f);
 
     template <sstable::component_type Type, typename T>
     future<> read_simple(T& comp);
@@ -368,6 +375,22 @@ private:
     void write_range_tombstone(file_writer& out, const composite& clustering_prefix, std::vector<bytes_view> suffix, const tombstone t);
     void write_collection(file_writer& out, const composite& clustering_key, const column_definition& cdef, collection_mutation::view collection);
 public:
+    bool filter_has_key(const schema& s, const partition_key& key) {
+        return filter_has_key(key::from_partition_key(s, key));
+    }
+    const stats_metadata& get_stats_metadata() const {
+        auto entry = _statistics.contents.find(metadata_type::Stats);
+        if (entry == _statistics.contents.end()) {
+            throw std::runtime_error("Stats metadata not available");
+        }
+        auto& p = entry->second;
+        if (!p) {
+            throw std::runtime_error("Statistics is malformed");
+        }
+        const stats_metadata& s = *static_cast<stats_metadata *>(p.get());
+        return s;
+    }
+
     // Allow the test cases from sstable_test.cc to test private methods. We use
     // a placeholder to avoid cluttering this class too much. The sstable_test class
     // will then re-export as public every method it needs.
@@ -376,4 +399,19 @@ public:
 
 using shared_sstable = lw_shared_ptr<sstable>;
 
+struct entry_descriptor {
+    sstring ks;
+    sstring cf;
+    sstable::version_types version;
+    unsigned long generation;
+    sstable::format_types format;
+    sstable::component_type component;
+
+    static entry_descriptor make_descriptor(sstring fname);
+
+    entry_descriptor(sstring ks, sstring cf, sstable::version_types version,
+                     unsigned long generation, sstable::format_types format,
+                     sstable::component_type component)
+        : ks(ks), cf(cf), version(version), generation(generation), format(format), component(component) {}
+};
 }

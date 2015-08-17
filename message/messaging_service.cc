@@ -188,7 +188,9 @@ std::ostream& operator<<(std::ostream& os, const shard_id& x) {
 }
 
 size_t shard_id::hash::operator()(const shard_id& id) const {
-    return std::hash<uint32_t>()(id.cpu_id) + std::hash<uint32_t>()(id.addr.raw_addr());
+    // Ignore the cpu id for now since we do not really support
+    // shard to shard connections
+    return std::hash<uint32_t>()(id.addr.raw_addr());
 }
 
 messaging_service::shard_info::shard_info(std::unique_ptr<rpc_protocol_client_wrapper>&& client)
@@ -328,6 +330,14 @@ future<streaming::messages::prepare_message> messaging_service::send_prepare_mes
     inet_address from, inet_address connecting, unsigned src_cpu_id, unsigned dst_cpu_id) {
     return send_message<streaming::messages::prepare_message>(this, messaging_verb::PREPARE_MESSAGE, std::move(id), std::move(msg),
             std::move(plan_id), std::move(from), std::move(connecting), std::move(src_cpu_id), std::move(dst_cpu_id));
+}
+
+void messaging_service::register_prepare_done_message(std::function<future<> (UUID plan_id, inet_address from, inet_address connecting, unsigned dst_cpu_id)>&& func) {
+    register_handler(this, messaging_verb::PREPARE_DONE_MESSAGE, std::move(func));
+}
+
+future<> messaging_service::send_prepare_done_message(shard_id id, UUID plan_id, inet_address from, inet_address connecting, unsigned dst_cpu_id) {
+    return send_message<void>(this, messaging_verb::PREPARE_DONE_MESSAGE, std::move(id), std::move(plan_id), std::move(from), std::move(connecting), std::move(dst_cpu_id));
 }
 
 void messaging_service::register_stream_mutation(std::function<future<> (UUID plan_id, frozen_mutation fm, unsigned dst_cpu_id)>&& func) {

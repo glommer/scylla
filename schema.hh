@@ -19,6 +19,7 @@
 #include "utils/UUID.hh"
 #include "compress.hh"
 #include "compaction_strategy.hh"
+#include "caching_options.hh"
 
 using column_id = uint32_t;
 
@@ -209,7 +210,7 @@ class thrift_schema {
     bool _compound = true;
 public:
     bool has_compound_comparator() const;
-    friend class schema_builder;
+    friend class schema;
 };
 
 bool operator==(const column_definition&, const column_definition&);
@@ -255,6 +256,7 @@ private:
         // we will use by default - when we have the choice.
         sstables::compaction_strategy_type _compaction_strategy = sstables::compaction_strategy_type::size_tiered;
         std::map<sstring, sstring> _compaction_strategy_options;
+        caching_options _caching_options;
     };
     raw_schema _raw;
     thrift_schema _thrift;
@@ -386,6 +388,10 @@ public:
         return _raw._speculative_retry;
     }
 
+    const ::caching_options& caching_options() const {
+        return _raw._caching_options;
+    }
+
     const column_definition* get_column_definition(const bytes& name) const;
     const_iterator regular_begin() const {
         return regular_columns().begin();
@@ -442,6 +448,9 @@ public:
     size_t static_columns_count() const {
         return column_offset(column_kind::regular_column) - column_offset(column_kind::static_column);
     }
+    size_t compact_columns_count() const {
+        return _raw._columns.size() - column_offset(column_kind::compact_column);
+    }
     size_t regular_columns_count() const {
         return _raw._columns.size() - column_offset(column_kind::regular_column);
     }
@@ -465,6 +474,17 @@ public:
         return boost::make_iterator_range(_raw._columns.begin() + column_offset(column_kind::regular_column)
                 , _raw._columns.end());
     }
+
+    // Note that since compact columns are also regular columns, ranging over
+    // regular columns and testing if the table is supposed to have a compact
+    // column should yield the same result as using this.
+    const column_definition& compact_column() const {
+        if (compact_columns_count() > 1) {
+            throw std::runtime_error("unexpected number of compact columns");
+        }
+        return *(_raw._columns.begin() + column_offset(column_kind::compact_column));
+    }
+
     // Returns a range of column definitions
     const columns_type& all_columns_in_select_order() const {
         return _raw._columns;

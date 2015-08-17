@@ -15,6 +15,7 @@
 #include "service/migration_manager.hh"
 #include "streaming/stream_session.hh"
 #include "db/system_keyspace.hh"
+#include "db/batchlog_manager.hh"
 #include "utils/runtime.hh"
 #include "dns.hh"
 #include "log.hh"
@@ -80,7 +81,7 @@ int main(int ac, char** av) {
         ("api-dir", bpo::value<sstring>()->default_value("swagger-ui/dist/"),
                 "The directory location of the API GUI")
         // TODO : default, always read?
-        ("options-file", bpo::value<sstring>(), "cassandra.yaml file to read options from")
+        ("options-file", bpo::value<sstring>()->default_value("conf/scylla.yaml"), "scylla.yaml file to read options from")
         ("help-loggers", bpo::bool_switch(&help_loggers), "print a list of logger names and exit")
         ;
 
@@ -136,6 +137,10 @@ int main(int ac, char** av) {
                 return qp.start(std::ref(proxy), std::ref(db)).then([&qp] {
                     engine().at_exit([&qp] { return qp.stop(); });
                 });
+            }).then([&qp] {
+                return db::get_batchlog_manager().start(std::ref(qp)).then([] {
+                   engine().at_exit([] { return db::get_batchlog_manager().stop(); });
+                });
             }).then([&db] {
                 return parallel_for_each(db.local().get_config().data_file_directories(), [] (sstring datadir) {
                     return recursive_touch_directory(datadir).then_wrapped([datadir] (future<> f) {
@@ -174,12 +179,12 @@ int main(int ac, char** av) {
                 return dns::gethostbyname(rpc_address);
             }).then([&db, &proxy, &qp, rpc_address, cql_port, thrift_port] (dns::hostent e) {
                 auto ip = e.addresses[0].in.s_addr;
-                auto cserver = new distributed<cql_server>;
+                auto cserver = new distributed<transport::cql_server>;
                 cserver->start(std::ref(proxy), std::ref(qp)).then([server = std::move(cserver), cql_port, rpc_address, ip] () mutable {
                     engine().at_exit([server] {
                         return server->stop();
                     });
-                    server->invoke_on_all(&cql_server::listen, ipv4_addr{ip, cql_port});
+                    server->invoke_on_all(&transport::cql_server::listen, ipv4_addr{ip, cql_port});
                 }).then([rpc_address, cql_port] {
                     print("CQL server listening on %s:%s ...\n", rpc_address, cql_port);
                 });

@@ -14,6 +14,7 @@
 #include "message/messaging_service.hh"
 #include "service/storage_service.hh"
 #include "db/config.hh"
+#include "db/batchlog_manager.hh"
 #include "schema_builder.hh"
 #include "init.hh"
 
@@ -96,7 +97,7 @@ public:
         return _db->invoke_on_all([schema_maker, id, this] (database& db) {
             schema_builder builder(make_lw_shared(schema_maker(ks_name)));
             builder.set_uuid(id);
-            auto cf_schema = builder.build();
+            auto cf_schema = builder.build(schema_builder::compact_storage::no);
             auto& ks = db.find_keyspace(ks_name);
             auto cfg = ks.make_column_family_config(*cf_schema);
             db.add_column_family(std::move(cf_schema), std::move(cfg));
@@ -179,11 +180,13 @@ public:
 
     virtual future<> stop() override {
         return _core_local.stop().then([this] {
-            return _qp->stop().then([this] {
-                return service::get_migration_manager().stop().then([this] {
-                    return service::get_storage_proxy().stop().then([this] {
-                        return _db->stop().then([] {
-                            return locator::i_endpoint_snitch::stop_snitch();
+            return db::get_batchlog_manager().stop().then([this] {
+                return _qp->stop().then([this] {
+                    return service::get_migration_manager().stop().then([this] {
+                        return service::get_storage_proxy().stop().then([this] {
+                            return _db->stop().then([this] {
+                                return locator::i_endpoint_snitch::stop_snitch();
+                            });
                         });
                     });
                 });
@@ -192,11 +195,13 @@ public:
     }
 };
 
-future<> init_once(distributed<database>& db) {
+future<> init_once(shared_ptr<distributed<database>> db) {
     static bool done = false;
     if (!done) {
         done = true;
-        return init_storage_service(db).then([] {
+        // FIXME: we leak db, since we're initializing the global storage_service with it.
+        new shared_ptr<distributed<database>>(db);
+        return init_storage_service(*db).then([] {
             return init_ms_fd_gossiper("127.0.0.1", db::config::seed_provider_type());
         });
     } else {
@@ -207,7 +212,7 @@ future<> init_once(distributed<database>& db) {
 future<::shared_ptr<cql_test_env>> make_env_for_test() {
     return locator::i_endpoint_snitch::create_snitch("SimpleSnitch").then([] {
         auto db = ::make_shared<distributed<database>>();
-        return init_once(*db).then([db] {
+        return init_once(db).then([db] {
             return seastar::async([db] {
                 auto cfg = make_lw_shared<db::config>();
                 cfg->data_file_directories() = {};
@@ -215,16 +220,25 @@ future<::shared_ptr<cql_test_env>> make_env_for_test() {
 
                 distributed<service::storage_proxy>& proxy = service::get_storage_proxy();
                 distributed<service::migration_manager>& mm = service::get_migration_manager();
+                distributed<db::batchlog_manager>& bm = db::get_batchlog_manager();
+
                 auto qp = ::make_shared<distributed<cql3::query_processor>>();
                 proxy.start(std::ref(*db)).get();
                 mm.start().get();
                 qp->start(std::ref(proxy), std::ref(*db)).get();
 
                 auto& ss = service::get_local_storage_service();
-                ss.init_server().get();
+                static bool storage_service_started = false;
+                if (!storage_service_started) {
+                    storage_service_started = true;
+                    ss.init_server().get();
+                }
+
+                bm.start(std::ref(*qp));
 
                 auto env = ::make_shared<in_memory_cql_env>(db, qp);
                 env->start().get();
+
                 return dynamic_pointer_cast<cql_test_env>(env);
             });
         });

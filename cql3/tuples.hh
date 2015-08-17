@@ -225,10 +225,12 @@ public:
     private:
         std::vector<std::vector<bytes_opt>> _elements;
     public:
-        in_value(std::vector<std::vector<bytes_opt>> items) : _elements(items) { }
+        in_value(std::vector<std::vector<bytes_opt>> items) : _elements(std::move(items)) { }
         in_value(std::vector<std::vector<bytes_view_opt>> items) {
+            _elements.reserve(items.size());
             for (auto&& tuple : items) {
                 std::vector<bytes_opt> elems;
+                elems.reserve(tuple.size());
                 for (auto&& e : tuple) {
                     elems.emplace_back(e ? bytes_opt(bytes(e->begin(), e->end())) : bytes_opt());
                 }
@@ -265,9 +267,7 @@ public:
 
         virtual sstring to_string() const override {
             std::vector<sstring> tuples(_elements.size());
-            std::transform(_elements.begin(), _elements.end(), tuples.begin(), [] (auto&& e) {
-                return tuple_to_string(e);
-            });
+            std::transform(_elements.begin(), _elements.end(), tuples.begin(), &tuples::tuple_to_string<bytes_opt>);
             return tuple_to_string(tuples);
         }
     };
@@ -372,7 +372,7 @@ public:
         { }
 
         virtual shared_ptr<terminal> bind(const query_options& options) override {
-            auto value = options.get_values().at(_bind_index);
+            auto value = options.get_value_at(_bind_index);
             if (!value) {
                 return nullptr;
             } else {
@@ -394,7 +394,7 @@ public:
         }
 
         virtual shared_ptr<terminal> bind(const query_options& options) override {
-            auto value = options.get_values().at(_bind_index);
+            auto value = options.get_value_at(_bind_index);
             if (!value) {
                 return nullptr;
             } else {
