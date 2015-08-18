@@ -227,8 +227,6 @@ future<::shared_ptr<cql_test_env>> make_env_for_test() {
                 mm.start().get();
                 qp->start(std::ref(proxy), std::ref(*db)).get();
 
-                db::system_keyspace::setup(*db, *qp).get();
-
                 auto& ss = service::get_local_storage_service();
                 static bool storage_service_started = false;
                 if (!storage_service_started) {
