@@ -3,7 +3,6 @@
  */
 
 #include "compaction_manager.hh"
-#include "database.hh"
 
 static logging::logger cmlog("compaction_manager");
 
@@ -17,31 +16,31 @@ void compaction_manager::task_start(lw_shared_ptr<compaction_manager::task>& tas
     task->compaction_done = keep_doing([this, task] {
         return task->compaction_sem.wait().then([this, task] {
             return seastar::with_gate(task->compaction_gate, [this, task] {
-                if (_cfs_to_compact.empty() && !task->compacting_cf) {
+                if (_compaction_jobs.empty() && !task->current_compaction_job) {
                     return make_ready_future<>();
                 }
 
-                // Get a column family from the shared queue if and only
+                // Get a compaction job from the shared queue if and only
                 // if, the previous compaction job succeeded.
-                if (!task->compacting_cf) {
-                    task->compacting_cf = _cfs_to_compact.front();
-                    _cfs_to_compact.pop_front();
+                if (!task->current_compaction_job) {
+                    task->current_compaction_job = _compaction_jobs.front();
+                    _compaction_jobs.pop();
                     _stats.pending_tasks--;
                 }
 
-                return task->compacting_cf->run_compaction().then([this, task] {
+                return task->current_compaction_job().then([this, task] {
                     // If compaction completed successfully, let's reset
                     // sleep time of compaction_retry.
                     task->compaction_retry.reset();
 
                     // current_compaction_job is made empty if compaction
                     // succeeded, meaning no retry is needed.
-                    task->compacting_cf = nullptr;
+                    task->current_compaction_job = nullptr;
 
                     _stats.completed_tasks++;
                 });
             });
-        }).then_wrapped([this, task] (future<> f) {
+        }).then_wrapped([task] (future<> f) {
             bool retry = false;
 
             // Certain exceptions are used for regular termination of the fiber,
@@ -65,12 +64,7 @@ void compaction_manager::task_start(lw_shared_ptr<compaction_manager::task>& tas
             if (retry) {
                 cmlog.info("compaction task handler sleeping for {} seconds",
                     std::chrono::duration_cast<std::chrono::seconds>(task->compaction_retry.sleep_time()).count());
-                return task->compaction_retry.retry().then([this, task] {
-                    // pushing cf to the back, so if the error is persistent,
-                    // at least the others get a chance.
-                    _cfs_to_compact.push_back(task->compacting_cf);
-                    task->compacting_cf = nullptr;
-
+                return task->compaction_retry.retry().then([task] {
                     // after sleeping, signal semaphore for the next compaction attempt.
                     task->compaction_sem.signal();
                 });
@@ -127,7 +121,7 @@ future<> compaction_manager::stop() {
     });
 }
 
-void compaction_manager::submit(column_family* cf) {
+void compaction_manager::submit(std::function<future<> ()> compaction_job) {
     if (_tasks.empty()) {
         return;
     }
@@ -135,29 +129,7 @@ void compaction_manager::submit(column_family* cf) {
     auto result = std::min_element(std::begin(_tasks), std::end(_tasks), [] (auto& i, auto& j) {
         return i->compaction_sem.current() < j->compaction_sem.current();
     });
-    _cfs_to_compact.push_back(cf);
+    _compaction_jobs.push(compaction_job);
     _stats.pending_tasks++;
     (*result)->compaction_sem.signal();
-}
-
-future<> compaction_manager::remove(column_family* cf) {
-    // Remove every reference to cf from _cfs_to_compact.
-    _cfs_to_compact.erase(
-        std::remove_if(_cfs_to_compact.begin(), _cfs_to_compact.end(), [cf] (column_family* entry) {
-            return cf == entry;
-        }),
-        _cfs_to_compact.end());
-
-    // Wait for the termination of an ongoing compaction on cf, if any.
-    return do_for_each(_tasks, [this, cf] (auto& task) {
-        if (task->compacting_cf == cf) {
-            return this->task_stop(task).then([this, &task] {
-                // assert that task finished successfully.
-                assert(task->compacting_cf == nullptr);
-                this->task_start(task);
-                return make_ready_future<>();
-            });
-        }
-        return make_ready_future<>();
-    });
 }

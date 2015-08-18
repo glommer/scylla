@@ -184,7 +184,6 @@ public:
 
     void start_compaction();
     void trigger_compaction();
-    future<> run_compaction();
     void set_compaction_strategy(sstables::compaction_strategy_type strategy);
     const stats& get_stats() const {
         return _stats;
@@ -220,8 +219,6 @@ public:
     future<bool> for_all_partitions_slow(std::function<bool (const dht::decorated_key&, const mutation_partition&)> func) const;
 
     friend std::ostream& operator<<(std::ostream& out, const column_family& cf);
-    // Testing purposes.
-    friend class column_family_test;
 };
 
 class user_types_metadata {
