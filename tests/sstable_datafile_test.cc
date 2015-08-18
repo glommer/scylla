@@ -18,6 +18,7 @@
 #include "core/seastar.hh"
 #include "core/do_with.hh"
 #include "utils/compaction_manager.hh"
+#include "tmpdir.hh"
 
 #include <stdio.h>
 #include <ftw.h>
@@ -951,22 +952,67 @@ static ::mutation_reader sstable_reader(shared_sstable sst, schema_ptr s) {
 }
 
 SEASTAR_TEST_CASE(compaction_manager_test) {
-    auto counter = make_lw_shared<int>(0);
+    auto s = make_lw_shared(schema({}, some_keyspace, some_column_family,
+        {{"p1", utf8_type}}, {{"c1", utf8_type}}, {{"r1", int32_type}}, {}, utf8_type));
+
     auto cm = make_lw_shared<compaction_manager>();
     cm->start(2); // starting two task handlers.
 
-    for (auto i = 0; i < 10; i++) {
-        cm->submit([counter] () -> future<> {
-            (*counter)++;
-            return make_ready_future<>();
+    auto tmp = make_lw_shared<tmpdir>();
+
+    column_family::config cfg;
+    cfg.datadir = tmp->path;
+    cfg.enable_commitlog = false;
+    auto cf = make_lw_shared<column_family>(s, cfg, column_family::no_commitlog(), *cm);
+    cf->start();
+    cf->set_compaction_strategy(sstables::compaction_strategy_type::size_tiered);
+
+    auto generations = make_lw_shared<std::vector<unsigned long>>({1, 2, 3, 4});
+
+    return do_for_each(*generations, [generations, cf, cm, s, tmp] (unsigned long generation) {
+        // create 4 sstables of similar size to be compacted later on.
+
+        auto mt = make_lw_shared<memtable>(s);
+
+        const column_definition& r1_col = *s->get_column_definition("r1");
+
+        sstring k = "key" + to_sstring(generation);
+        auto key = partition_key::from_exploded(*s, {to_bytes(k)});
+        auto c_key = clustering_key::from_exploded(*s, {to_bytes("abc")});
+
+        mutation m(key, s);
+        m.set_clustered_cell(c_key, r1_col, make_atomic_cell(int32_type->decompose(1)));
+        mt->apply(std::move(m));
+
+        auto sst = make_lw_shared<sstable>("ks", "cf", tmp->path, generation, la, big);
+
+        return sst->write_components(*mt).then([mt, sst, cf] {
+            return sst->load().then([sst, cf] {
+                column_family_test(cf).add_sstable(std::move(*sst));
+                return make_ready_future<>();
+            });
         });
-    }
-    // wait for all submitted jobs to finish.
-    return sleep(std::chrono::milliseconds(100)).then([cm, counter] {
-        return cm->stop().then([cm, counter] {
-            BOOST_REQUIRE(*counter == 10);
-            return make_ready_future<>();
+    }).then([cf, cm, generations] {
+        // submit cf to compaction manager and then check that cf's sstables
+        // were compacted.
+
+        BOOST_REQUIRE(cf->sstables_count() == generations->size());
+        cm->submit(&*cf);
+        // wait for all submitted jobs to finish.
+        return sleep(std::chrono::milliseconds(100)).then([cf, cm] {
+            // remove cf from compaction manager; this will wait for the
+            // ongoing compaction to finish.
+            return cm->remove(&*cf).then([cf, cm] {
+                // expect sstables of cf to be compacted.
+                BOOST_REQUIRE(cf->sstables_count() == 1);
+                // stop all compaction manager tasks.
+                return cm->stop().then([cf, cm] {
+                    return make_ready_future<>();
+                });
+            });
         });
+    }).then([s, tmp] {
+        return make_ready_future<>();
     });
 }
 
@@ -1372,5 +1418,36 @@ SEASTAR_TEST_CASE(datafile_generation_40) {
                 });
             });
         });
+    });
+}
+
+SEASTAR_TEST_CASE(datafile_generation_41) {
+    return test_setup::do_with_test_directory([] {
+        auto s = make_lw_shared(schema({}, some_keyspace, some_column_family,
+            {{"p1", utf8_type}}, {{"c1", utf8_type}}, {{"r1", int32_type}, {"r2", int32_type}}, {}, utf8_type));
+
+        auto mt = make_lw_shared<memtable>(s);
+
+        auto key = partition_key::from_exploded(*s, {to_bytes("key1")});
+        auto c_key = clustering_key::from_exploded(*s, {to_bytes("c1")});
+        mutation m(key, s);
+
+        tombstone tomb(db_clock::now_in_usecs(), gc_clock::now());
+        m.partition().apply_delete(*s, std::move(c_key), tomb);
+        mt->apply(std::move(m));
+
+        auto sst = make_lw_shared<sstable>("ks", "cf", "tests/sstables/tests-temporary", 41, la, big);
+        return sst->write_components(*mt).then([s, tomb] {
+            return reusable_sst("tests/sstables/tests-temporary", 41).then([s, tomb] (auto sstp) mutable {
+                return do_with(sstables::key("key1"), [sstp, s, tomb] (auto& key) {
+                    return sstp->read_row(s, key).then([sstp, s, tomb] (auto mutation) {
+                        auto& mp = mutation->partition();
+                        BOOST_REQUIRE(mp.clustered_rows().size() == 1);
+                        auto c_row = *(mp.clustered_rows().begin());
+                        BOOST_REQUIRE(c_row.row().deleted_at() == tomb);
+                    });
+                });
+            });
+        }).then([sst, mt] {});
     });
 }
