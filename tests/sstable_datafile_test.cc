@@ -950,7 +950,7 @@ static ::mutation_reader sstable_reader(shared_sstable sst, schema_ptr s) {
     return [sst, s, r = make_lw_shared(sst->read_rows(s))] () mutable { return r->read(); };
 
 }
-
+#if 0
 SEASTAR_TEST_CASE(compaction_manager_test) {
     auto s = make_lw_shared(schema({}, some_keyspace, some_column_family,
         {{"p1", utf8_type}}, {{"c1", utf8_type}}, {{"r1", int32_type}}, {}, utf8_type));
@@ -1021,7 +1021,7 @@ SEASTAR_TEST_CASE(compaction_manager_test) {
         return make_ready_future<>();
     });
 }
-
+#endif
 SEASTAR_TEST_CASE(compact) {
     constexpr int generation = 17;
     // The "compaction" sstable was created with the following schema:
