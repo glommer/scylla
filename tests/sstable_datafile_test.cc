@@ -1004,7 +1004,7 @@ SEASTAR_TEST_CASE(compaction_manager_test) {
         auto end = [cm] { return cm->get_stats().pending_tasks == 0; };
         return do_until(end, [] {
             // sleep until compaction manager selects cf for compaction.
-            return sleep(std::chrono::milliseconds(100));
+            return sleep(std::chrono::milliseconds(1000));
         }).then([cf, cm] {
             // remove cf from compaction manager; this will wait for the
             // ongoing compaction to finish.
