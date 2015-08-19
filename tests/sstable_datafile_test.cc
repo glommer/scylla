@@ -1006,15 +1006,9 @@ SEASTAR_TEST_CASE(compaction_manager_test) {
             // sleep until compaction manager selects cf for compaction.
             return sleep(std::chrono::milliseconds(100));
         }).then([cf, cm] {
-            // remove cf from compaction manager; this will wait for the
-            // ongoing compaction to finish.
-            return cm->remove(&*cf).then([cf, cm] {
-                // expect sstables of cf to be compacted.
-                BOOST_REQUIRE(cf->sstables_count() == 1);
-                // stop all compaction manager tasks.
-                return cm->stop().then([cf, cm] {
-                    return make_ready_future<>();
-                });
+            // stop all compaction manager tasks.
+            return cm->stop().then([cf, cm] {
+                return make_ready_future<>();
             });
         });
     }).then([s, tmp] {
