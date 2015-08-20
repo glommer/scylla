@@ -1001,7 +1001,7 @@ SEASTAR_TEST_CASE(compaction_manager_test) {
         BOOST_REQUIRE(cm->get_stats().pending_tasks == 1);
 
         // wait for submitted job to finish.
-        auto end = [cm] { return cm->get_stats().pending_tasks == 0; };
+        auto end = [cm] { return cm->get_stats().completed_tasks == 1; };
         return do_until(end, [] {
             // sleep until compaction manager selects cf for compaction.
             return sleep(std::chrono::milliseconds(100));
