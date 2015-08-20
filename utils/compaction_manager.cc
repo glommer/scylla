@@ -48,7 +48,7 @@ void compaction_manager::task_start(lw_shared_ptr<compaction_manager::task>& tas
             // such as broken_semaphore and seastar::gate_closed_exception.
             try {
                 f.get();
-            } catch (broken_semaphore& e) {
+            } catch (std::exception_ptr& e) {
                 cmlog.info("compaction task handler stopped due to shutdown");
                 throw;
             } catch (seastar::gate_closed_exception& e) {
