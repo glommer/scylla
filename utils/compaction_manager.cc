@@ -120,7 +120,8 @@ void compaction_manager::start(int task_nr) {
 
 future<> compaction_manager::stop() {
     return do_for_each(_tasks, [this] (auto& task) {
-        return this->task_stop(task);
+        //return this->task_stop(task);
+        return make_ready_future<>();
     }).then([this] {
         _stopped = true;
         return make_ready_future<>();
