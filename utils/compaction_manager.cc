@@ -94,6 +94,7 @@ void compaction_manager::task_start(lw_shared_ptr<compaction_manager::task>& tas
 future<> compaction_manager::task_stop(lw_shared_ptr<compaction_manager::task>& task) {
     return task->compaction_gate.close().then([task] {
         task->compaction_sem.broken();
+        task->compaction_sem.signal();
         return task->compaction_done.then([] {
             return make_ready_future<>();
         });
