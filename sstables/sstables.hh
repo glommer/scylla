@@ -235,6 +235,10 @@ public:
         return _index_file_size;
     }
 
+    future<uint64_t> filter_size() {
+        return engine().file_size(filename(component_type::Filter));
+    }
+
     // Returns the total bytes of all components.
     future<uint64_t> bytes_on_disk();
 
