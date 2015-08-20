@@ -61,7 +61,8 @@ void compaction_manager::task_start(lw_shared_ptr<compaction_manager::task>& tas
                 cmlog.error("compaction failed: unknown error");
                 retry = true;
             }
-
+            (void) retry;
+#if 0
             if (retry) {
                 cmlog.info("compaction task handler sleeping for {} seconds",
                     std::chrono::duration_cast<std::chrono::seconds>(task->compaction_retry.sleep_time()).count());
@@ -75,6 +76,7 @@ void compaction_manager::task_start(lw_shared_ptr<compaction_manager::task>& tas
                     task->compaction_sem.signal();
                 });
             }
+#endif
             return make_ready_future<>();
         });
     }).then_wrapped([] (future<> f) {
@@ -93,7 +95,8 @@ void compaction_manager::task_start(lw_shared_ptr<compaction_manager::task>& tas
 
 future<> compaction_manager::task_stop(lw_shared_ptr<compaction_manager::task>& task) {
     return task->compaction_gate.close().then([task] {
-        task->compaction_sem.broken();
+        //task->compaction_sem.broken();
+        task->compaction_sem.signal();
         return task->compaction_done.then([] {
             return make_ready_future<>();
         });
