@@ -220,8 +220,6 @@ public:
     future<bool> for_all_partitions_slow(std::function<bool (const dht::decorated_key&, const mutation_partition&)> func) const;
 
     friend std::ostream& operator<<(std::ostream& out, const column_family& cf);
-    // Testing purposes.
-    friend class column_family_test;
 };
 
 class user_types_metadata {
