@@ -69,7 +69,21 @@ future<json::json_return_type> map_reduce_cf(http_context& ctx, const sstring& n
 }
 
 template<class Mapper, class I, class Reducer>
-future<json::json_return_type> map_reduce_cf(http_context& ctx, I init,
+std::enable_if_t<is_future<result_of_t<Mapper(column_family&)>>::value, future<json::json_return_type>>
+map_reduce_cf(http_context& ctx, I init,
+        Mapper mapper, Reducer reducer) {
+    return ctx.db.map_reduce0([mapper, init, reducer](database& db) {
+        return map_reduce(db.get_column_families().begin(), db.get_column_families().end(), [mapper] (auto i) {
+            return mapper(*i.second.get());
+        }, init, reducer);
+    }, init, reducer).then([](const I& res) {
+        return make_ready_future<json::json_return_type>(res);
+    });
+}
+
+template<class Mapper, class I, class Reducer>
+std::enable_if_t<!is_future<result_of_t<Mapper(column_family&)>>::value, future<json::json_return_type>>
+map_reduce_cf(http_context& ctx, I init,
         Mapper mapper, Reducer reducer) {
     return ctx.db.map_reduce0([mapper, init, reducer](database& db) {
         auto res = init;
