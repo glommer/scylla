@@ -7,6 +7,10 @@
 #include "core/shared_ptr.hh"
 #include "core/distributed.hh"
 
+namespace sstables {
+class sstable;
+}
+
 class filter_tracker {
 
     lw_shared_ptr<distributed<filter_tracker>> _ptr;
@@ -45,20 +49,5 @@ public:
     void add_true_positive() {
         true_positive++;
     }
-
-    future<uint64_t> get_false_positive() {
-        return _ptr->map_reduce(adder<uint64_t>(), [] (auto& t) { return t.local_false_positive(); });
-    }
-
-    future<uint64_t> get_true_positive() {
-        return _ptr->map_reduce(adder<uint64_t>(), [] (auto& t) { return t.local_true_positive(); });
-    }
-
-    future<uint64_t> get_recent_false_positive() {
-        return _ptr->map_reduce(adder<uint64_t>(), [] (auto& t) { return t.local_recent_false_positive(); });
-    }
-
-    future<uint64_t> get_recent_true_positive() {
-        return _ptr->map_reduce(adder<uint64_t>(), [] (auto& t) { return t.local_recent_true_positive(); });
-    }
+    friend class sstables::sstable;
 };

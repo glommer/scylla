@@ -248,6 +248,22 @@ public:
     const sstring get_filename() {
         return filename(component_type::Data);
     }
+
+    future<uint64_t> filter_get_false_positive() {
+        return _filter_tracker->map_reduce(adder<uint64_t>(), [] (auto& t) { return t.local_false_positive(); });
+    }
+
+    future<uint64_t> filter_get_true_positive() {
+        return _filter_tracker->map_reduce(adder<uint64_t>(), [] (auto& t) { return t.local_true_positive(); });
+    }
+
+    future<uint64_t> filter_get_recent_false_positive() {
+        return _filter_tracker->map_reduce(adder<uint64_t>(), [] (auto& t) { return t.local_recent_false_positive(); });
+    }
+
+    future<uint64_t> filter_get_recent_true_positive() {
+        return _filter_tracker->map_reduce(adder<uint64_t>(), [] (auto& t) { return t.local_recent_true_positive(); });
+    }
 private:
     void do_write_components(::mutation_reader mr,
             uint64_t estimated_partitions, schema_ptr schema, file_writer& out);
