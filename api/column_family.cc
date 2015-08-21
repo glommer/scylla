@@ -476,26 +476,52 @@ void set_column_family(http_context& ctx, routes& r) {
         })();
     });
 
-    cf::get_bloom_filter_false_ratio.set(r, [] (std::unique_ptr<request> req) {
-        //TBD
-        //auto id = get_uuid(req->param["name"], ctx.db.local());
-        return make_ready_future<json::json_return_type>(0);
+    cf::get_bloom_filter_false_ratio.set(r, [&ctx] (std::unique_ptr<request> req) {
+        return make_sstable_stat(ctx, [] (sstables::sstable& sst) {
+            return when_all(sst.filter_get_false_positive(),
+                            sst.filter_get_true_positive()).then([] (auto futs) {
+                double f = std::get<uint64_t>(std::get<0>(futs).get());
+                double t = std::get<uint64_t>(std::get<1>(futs).get());
+
+                return f / (f + t);
+            });
+        })(req->param["name"]);
     });
 
-    cf::get_all_bloom_filter_false_ratio.set(r, [] (std::unique_ptr<request> req) {
-        //TBD
-        return make_ready_future<json::json_return_type>(0);
+    cf::get_all_bloom_filter_false_ratio.set(r, [&ctx] (std::unique_ptr<request> req) {
+        return make_sstable_stat(ctx, [] (sstables::sstable& sst) {
+            return when_all(sst.filter_get_false_positive(),
+                            sst.filter_get_true_positive()).then([] (auto futs) {
+                double f = std::get<uint64_t>(std::get<0>(futs).get());
+                double t = std::get<uint64_t>(std::get<1>(futs).get());
+
+                return f / (f + t);
+            });
+        })();
     });
 
-    cf::get_recent_bloom_filter_false_ratio.set(r, [] (std::unique_ptr<request> req) {
-        //TBD
-        //auto id = get_uuid(req->param["name"], ctx.db.local());
-        return make_ready_future<json::json_return_type>(0);
+    cf::get_recent_bloom_filter_false_ratio.set(r, [&ctx] (std::unique_ptr<request> req) {
+        return make_sstable_stat(ctx, [] (sstables::sstable& sst) {
+            return when_all(sst.filter_get_recent_false_positive(),
+                            sst.filter_get_recent_true_positive()).then([] (auto futs) {
+                double f = std::get<uint64_t>(std::get<0>(futs).get());
+                double t = std::get<uint64_t>(std::get<1>(futs).get());
+
+                return f / (f + t);
+            });
+        })(req->param["name"]);
     });
 
-    cf::get_all_recent_bloom_filter_false_ratio.set(r, [] (std::unique_ptr<request> req) {
-        //TBD
-        return make_ready_future<json::json_return_type>(0);
+    cf::get_all_recent_bloom_filter_false_ratio.set(r, [&ctx] (std::unique_ptr<request> req) {
+        return make_sstable_stat(ctx, [] (sstables::sstable& sst) {
+            return when_all(sst.filter_get_recent_false_positive(),
+                            sst.filter_get_recent_true_positive()).then([] (auto futs) {
+                double f = std::get<uint64_t>(std::get<0>(futs).get());
+                double t = std::get<uint64_t>(std::get<1>(futs).get());
+
+                return f / (f + t);
+            });
+        })();
     });
 
     cf::get_bloom_filter_disk_space_used.set(r, [] (std::unique_ptr<request> req) {
