@@ -452,26 +452,28 @@ void set_column_family(http_context& ctx, routes& r) {
         return make_ready_future<json::json_return_type>(0);
     });
 
-    cf::get_bloom_filter_false_positives.set(r, [] (std::unique_ptr<request> req) {
-        //TBD
-        //auto id = get_uuid(req->param["name"], ctx.db.local());
-        return make_ready_future<json::json_return_type>(0);
+    cf::get_bloom_filter_false_positives.set(r, [&ctx] (std::unique_ptr<request> req) {
+        return make_sstable_stat(ctx, [] (sstables::sstable& sst) {
+            return sst.filter_get_false_positive();
+        })(req->param["name"]);
     });
 
-    cf::get_all_bloom_filter_false_positives.set(r, [] (std::unique_ptr<request> req) {
-        //TBD
-        return make_ready_future<json::json_return_type>(0);
+    cf::get_all_bloom_filter_false_positives.set(r, [&ctx] (std::unique_ptr<request> req) {
+        return make_sstable_stat(ctx, [] (sstables::sstable& sst) {
+            return sst.filter_get_false_positive();
+        })();
     });
 
-    cf::get_recent_bloom_filter_false_positives.set(r, [] (std::unique_ptr<request> req) {
-        //TBD
-        //auto id = get_uuid(req->param["name"], ctx.db.local());
-        return make_ready_future<json::json_return_type>(0);
+    cf::get_recent_bloom_filter_false_positives.set(r, [&ctx] (std::unique_ptr<request> req) {
+        return make_sstable_stat(ctx, [] (sstables::sstable& sst) {
+            return sst.filter_get_recent_false_positive();
+        })(req->param["name"]);
     });
 
-    cf::get_all_recent_bloom_filter_false_positives.set(r, [] (std::unique_ptr<request> req) {
-        //TBD
-        return make_ready_future<json::json_return_type>(0);
+    cf::get_all_recent_bloom_filter_false_positives.set(r, [&ctx] (std::unique_ptr<request> req) {
+        return make_sstable_stat(ctx, [] (sstables::sstable& sst) {
+            return sst.filter_get_recent_false_positive();
+        })();
     });
 
     cf::get_bloom_filter_false_ratio.set(r, [] (std::unique_ptr<request> req) {
