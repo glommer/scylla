@@ -164,6 +164,50 @@ static int64_t max_row_size(column_family& cf) {
     return res;
 }
 
+template<typename Func>
+class sstable_stat;
+
+template <typename Func>
+sstable_stat<Func> make_sstable_stat(http_context& ctx, Func func) {
+    return sstable_stat<Func>(ctx, func);
+}
+
+template<typename Func>
+class sstable_stat {
+    using fut_type = result_of_t<Func(sstables::sstable&)>;
+    static_assert(is_future<fut_type>::value, "Expected future");
+    using tupl_type = typename fut_type::value_type;
+    static_assert(tuple_size<tupl_type>::value == 1, "Expected single value");
+    using stat_type = typename std::tuple_element<0, tupl_type>::type;
+    static_assert(is_arithmetic<stat_type>::value, "Expected arithmetic type");
+
+    http_context& _ctx;
+    Func _func;
+
+    future<stat_type> inner_map_reduce(column_family& cf) {
+        return map_reduce(cf.get_sstables()->begin(), cf.get_sstables()->end(), [this] (auto& pair) {
+            return _func(*(pair.second));
+        }, stat_type(0), std::plus<stat_type>());
+    }
+    sstable_stat(http_context& ctx, Func func) : _ctx(ctx), _func(func) {}
+
+public:
+    future<json::json_return_type> operator()(const sstring& name) {
+        return map_reduce_cf(_ctx, name, stat_type(0), [this](column_family& cf) {
+            return inner_map_reduce(cf);
+        }, std::plus<stat_type>());
+    }
+
+    future<json::json_return_type> operator()() {
+        return map_reduce_cf(_ctx, stat_type(0), [this](column_family& cf) {
+            return inner_map_reduce(cf);
+        }, std::plus<stat_type>());
+    }
+
+    template <typename F>
+    friend sstable_stat<F> make_sstable_stat(http_context& ctx, F func);
+};
+
 void set_column_family(http_context& ctx, routes& r) {
     cf::get_column_family_name.set(r, [&ctx] (const_req req){
         vector<sstring> res;
