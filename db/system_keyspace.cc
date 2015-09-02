@@ -432,6 +432,8 @@ static future<> build_dc_rack_info() {
             return _local_cache.invoke_on_all([gms_addr = std::move(gms_addr), element = std::move(element)] (local_cache& lc) {
                 lc._cached_dc_rack_info.emplace(gms_addr, element);
             });
+        }).then([msg] {
+            return make_ready_future<>();
         });
     });
 }
@@ -613,7 +615,7 @@ future<std::unordered_map<gms::inet_address, std::unordered_set<dht::token>>> lo
                 ret->emplace(peer, decode_tokens(tokens));
             }
             return make_ready_future<>();
-        }).then([ret] () mutable {
+        }).then([ret, msg] () mutable {
             return std::move(*ret);
         });
     });
@@ -629,7 +631,7 @@ future<std::unordered_map<gms::inet_address, utils::UUID>> load_host_ids() {
                 ret->emplace(peer, row.template get_as<utils::UUID>("host_id"));
             }
             return make_ready_future<>();
-        }).then([ret] () mutable {
+        }).then([ret, msg] () mutable {
             return std::move(*ret);
         });
     });
