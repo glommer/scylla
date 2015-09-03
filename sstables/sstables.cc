@@ -576,7 +576,9 @@ future<> parse(random_access_reader& in, estimated_histogram& eh) {
     return f.then([&in, &eh, len = std::move(len)] {
         uint32_t length = *len;
 
-        assert(length > 0);
+        if (length == 0) {
+            throw malformed_sstable_exception("Estimated histogram with zero size found. Can't continue!");
+        }
         eh.bucket_offsets.resize(length - 1);
         eh.buckets.resize(length);
 
@@ -810,7 +812,15 @@ void sstable::write_compression() {
 }
 
 future<> sstable::read_statistics() {
-    return read_simple<component_type::Statistics>(_statistics);
+    return read_simple<component_type::Statistics>(_statistics).then_wrapped([this] (future<> f) {
+        try {
+            f.get();
+        } catch (malformed_sstable_exception& e) {
+           sstlog.error("Failed reading SSTable's {} Statistics file. Trying to continue without it. Error: {}", filename(component_type::Statistics), e.what());
+        } catch (...) {
+            std::rethrow_exception(std::current_exception());
+        }
+    });
 }
 
 void sstable::write_statistics() {
