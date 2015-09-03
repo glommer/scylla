@@ -21,7 +21,17 @@ future<> sstable::read_filter() {
     }
 
     return do_with(sstables::filter(), [this] (auto& filter) {
-        return this->read_simple<sstable::component_type::Filter>(filter).then([this, &filter] {
+        return this->read_simple<sstable::component_type::Filter>(filter).then_wrapped([this, &filter] (future<> f) {
+            try {
+                f.get();
+            } catch (malformed_sstable_exception& e) {
+               sstlog.error("Failed reading SSTable's {} Filter file. Trying to continue without it. Error: {}", this->filename(component_type::Filter), e.what());
+               _filter = std::make_unique<utils::filter::always_present_filter>();
+               return make_ready_future<>();
+            } catch (...) {
+                std::rethrow_exception(std::current_exception());
+            }
+
             large_bitset bs(filter.buckets.elements.size() * 64);
             for (size_t i = 0; i != filter.buckets.elements.size(); ++i) {
                 auto w = filter.buckets.elements[i];
