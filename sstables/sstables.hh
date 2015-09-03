@@ -29,6 +29,10 @@
 #include "filter.hh"
 #include "exceptions.hh"
 
+namespace logging {
+class logger;
+}
+
 namespace sstables {
 
 // data_consume_context is an object returned by sstable::data_consume_rows()
@@ -452,4 +456,6 @@ struct entry_descriptor {
                      sstable::component_type component)
         : ks(ks), cf(cf), version(version), generation(generation), format(format), component(component) {}
 };
+
+extern logging::logger sstlog;
 }
