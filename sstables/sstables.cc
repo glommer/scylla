@@ -1452,6 +1452,11 @@ sstable::get_last_partition_key(const schema& s) const {
     return key::from_bytes(_summary.last_key.value).to_partition_key(s);
 }
 
+void
+sstable::set_destructor_callback(std::function<void (sstable*) noexcept> callback) {
+    _destructor_callback = std::move(callback);
+}
+
 sstable::~sstable() {
     if (_index_file) {
         _index_file.close().handle_exception([save = _index_file] (auto ep) {
@@ -1464,7 +1469,9 @@ sstable::~sstable() {
         });
     }
 
-    if (_marked_for_deletion) {
+    if (_destructor_callback) {
+        _destructor_callback(this);
+    } else if (_marked_for_deletion) {
         // We need to delete the on-disk files for this table. Since this is a
         // destructor, we can't wait for this to finish, or return any errors,
         // but just need to do our best. If a deletion fails for some reason we

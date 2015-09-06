@@ -247,6 +247,8 @@ public:
     metadata_collector& get_metadata_collector() {
         return _collector;
     }
+
+    void set_destructor_callback(std::function<void (sstable*) noexcept> callback);
 private:
     sstable(size_t wbuffer_size, sstring ks, sstring cf, sstring dir, unsigned long generation, version_types v, format_types f, gc_clock::time_point now = gc_clock::now())
         : sstable_buffer_size(wbuffer_size)
@@ -297,6 +299,7 @@ private:
     filter_tracker _filter_tracker;
 
     bool _marked_for_deletion = false;
+    std::function<void (sstable*) noexcept> _destructor_callback;
 
     gc_clock::time_point _now;
 
