@@ -341,6 +341,11 @@ auto send_message_oneway(messaging_service* ms, messaging_verb verb, shard_id id
     return send_message<rpc::no_wait_type>(ms, std::move(verb), std::move(id), std::forward<MsgOut>(msg)...);
 }
 
+template <typename... MsgOut>
+auto send_message_oneway_timeout(messaging_service* ms, messaging_verb verb, shard_id id, std::chrono::milliseconds timeout, MsgOut&&... msg) {
+    return send_message_timeout<rpc::no_wait_type>(ms, std::move(verb), std::move(id), timeout, std::forward<MsgOut>(msg)...);
+}
+
 // Wrappers for verbs
 void messaging_service::register_stream_init_message(std::function<future<unsigned> (streaming::messages::stream_init_message msg, unsigned src_cpu_id)>&& func) {
     register_handler(this, messaging_verb::STREAM_INIT_MESSAGE, std::move(func));
