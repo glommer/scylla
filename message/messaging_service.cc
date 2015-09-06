@@ -404,7 +404,7 @@ void messaging_service::register_gossip_shutdown(std::function<rpc::no_wait_type
     register_handler(this, messaging_verb::GOSSIP_SHUTDOWN, std::move(func));
 }
 future<> messaging_service::send_gossip_shutdown(shard_id id, inet_address from) {
-    return send_message_oneway(this, messaging_verb::GOSSIP_SHUTDOWN, std::move(id), std::move(from));
+    return send_message_oneway_timeout(this, messaging_verb::GOSSIP_SHUTDOWN, std::move(id), 1000ms, std::move(from));
 }
 
 void messaging_service::register_gossip_digest_syn(std::function<future<gossip_digest_ack> (gossip_digest_syn)>&& func) {
