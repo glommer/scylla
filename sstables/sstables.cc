@@ -20,6 +20,7 @@
 #include "compress.hh"
 #include "unimplemented.hh"
 #include "index_reader.hh"
+#include "remove.hh"
 #include <boost/algorithm/string.hpp>
 #include <regex>
 #include <core/align.hh>
@@ -1490,6 +1491,42 @@ sstable::~sstable() {
         }
 
     }
+}
+
+future<>
+fsync_directory_of(sstring fname) {
+    auto slash_pos = fname.find_last_of('/');
+    sstring dir = slash_pos == sstring::npos ? sstring(".") : fname.substr(0, slash_pos + 1);
+    return open_directory(dir).then([] (file f) {
+        return do_with(std::move(f), [] (file& f) {
+            return f.flush();
+        });
+    });
+}
+
+future<>
+remove_by_toc_name(sstring sstable_toc_name) {
+    return seastar::async([sstable_toc_name] {
+        auto toc_file = open_file_dma(sstable_toc_name, open_flags::ro).get0();
+        auto in = make_file_input_stream(toc_file);
+        auto size = toc_file.size().get0();
+        auto text = in.read_exactly(size).get0();
+        remove_file(sstable_toc_name).get();
+        fsync_directory_of(sstable_toc_name).get();
+        std::vector<sstring> components;
+        sstring all(text.begin(), text.end());
+        boost::split(components, all, boost::is_any_of("\n"));
+        auto toc_txt = sstring("TOC.txt");
+        sstring prefix = sstable_toc_name.substr(0, sstable_toc_name.size() - toc_txt.size());
+        parallel_for_each(components, [prefix, toc_txt] (sstring component) {
+            if (component == toc_txt) {
+                // already deleted
+                return make_ready_future<>();
+            }
+            return remove_file(prefix + component);
+        }).get();
+        fsync_directory_of(sstable_toc_name).get();
+    });
 }
 
 }
