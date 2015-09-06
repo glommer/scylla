@@ -1345,7 +1345,7 @@ const bool sstable::has_component(component_type f) {
     return _components.count(f);
 }
 
-const sstring sstable::filename(component_type f) {
+const sstring sstable::filename(component_type f) const {
     return filename(_dir, _ks, _cf, _version, _generation, _format, f);
 }
 
