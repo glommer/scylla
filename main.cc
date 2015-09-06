@@ -24,6 +24,7 @@
 #include "log.hh"
 #include "debug.hh"
 #include "init.hh"
+#include "sstable_deletion_manager.hh"
 #include <cstdio>
 
 namespace bpo = boost::program_options;
@@ -136,6 +137,7 @@ int main(int ac, char** av) {
     auto& mm = service::get_migration_manager();
     api::http_context ctx(db, proxy);
     directories dirs;
+    sstable_deletion_manager sdm = make_sstable_deletion_manager();
 
     return app.run_deprecated(ac, av, [&] {
         if (help_loggers) {
@@ -145,7 +147,7 @@ int main(int ac, char** av) {
         }
         auto&& opts = app.configuration();
 
-        return read_config(opts, *cfg).then([&cfg, &db, &qp, &proxy, &mm, &ctx, &opts, &dirs]() {
+        return read_config(opts, *cfg).then([&cfg, &db, &qp, &proxy, &mm, &ctx, &opts, &dirs, &sdm]() {
             apply_logger_settings(cfg->default_log_level(), cfg->logger_log_level(),
                     cfg->log_to_stdout(), cfg->log_to_syslog());
             dht::set_global_partitioner(cfg->partitioner());
@@ -162,8 +164,12 @@ int main(int ac, char** av) {
                 engine().at_exit([] { return i_endpoint_snitch::stop_snitch(); });
             }).then([&db] {
                 return init_storage_service(db);
-            }).then([&db, cfg] {
-                return db.start(std::move(*cfg)).then([&db] {
+            }).then([&sdm] {
+                return sdm.start().then([&sdm] {
+                    engine().at_exit([&sdm] { return sdm.stop(); });
+                });
+            }).then([&db, cfg, &sdm] {
+                return db.start(std::ref(sdm), std::move(*cfg)).then([&db] {
                     engine().at_exit([&db] { return db.stop(); });
                 });
             }).then([listen_address, seed_provider] {

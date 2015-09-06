@@ -52,6 +52,7 @@
 
 class frozen_mutation;
 class reconcilable_result;
+class sstable_deletion_manager;
 
 namespace service {
 class storage_proxy;
@@ -123,11 +124,14 @@ private:
     compaction_manager& _compaction_manager;
     // Whether or not a cf is queued by its compaction manager.
     bool _compaction_manager_queued = false;
+    sstable_deletion_manager& _sstable_deletion_manager;
+    seastar::gate _active_sstables;
 private:
     void update_stats_for_new_sstable(uint64_t new_sstable_data_size);
     void add_sstable(sstables::sstable&& sstable);
     void add_memtable();
     future<> flush_memtable_to_sstable(lw_shared_ptr<memtable> memt);
+    void delete_sstable(sstables::sstable* sst);
     future<stop_iteration> try_flush_memtable_to_sstable(lw_shared_ptr<memtable> memt);
     future<> update_cache(memtable&, lw_shared_ptr<sstable_list> old_sstables);
     struct merge_comparator;
@@ -159,8 +163,8 @@ public:
         return _cache;
     }
 public:
-    column_family(schema_ptr schema, config cfg, db::commitlog& cl, compaction_manager&);
-    column_family(schema_ptr schema, config cfg, no_commitlog, compaction_manager&);
+    column_family(schema_ptr schema, config cfg, db::commitlog& cl, compaction_manager&, sstable_deletion_manager& sdm);
+    column_family(schema_ptr schema, config cfg, no_commitlog, compaction_manager&, sstable_deletion_manager& sdm);
     column_family(column_family&&) = delete; // 'this' is being captured during construction
     ~column_family();
     schema_ptr schema() const { return _schema; }
@@ -331,10 +335,12 @@ private:
     std::unique_ptr<locator::abstract_replication_strategy> _replication_strategy;
     lw_shared_ptr<keyspace_metadata> _metadata;
     config _config;
+    sstable_deletion_manager& _sstable_deletion_manager;
 public:
-    explicit keyspace(lw_shared_ptr<keyspace_metadata> metadata, config cfg)
+    explicit keyspace(lw_shared_ptr<keyspace_metadata> metadata, config cfg, sstable_deletion_manager& sdm)
         : _metadata(std::move(metadata))
         , _config(std::move(cfg))
+        , _sstable_deletion_manager(sdm)
     {}
     user_types_metadata _user_types;
     const lw_shared_ptr<keyspace_metadata>& metadata() const {
@@ -388,6 +394,7 @@ class database {
     std::vector<scollectd::registration> _collectd;
     timer<> _throttling_timer{[this] { unthrottle(); }};
     circular_buffer<promise<>> _throttled_requests;
+    sstable_deletion_manager& _sstable_deletion_manager;
 
     future<> init_commitlog();
     future<> apply_in_memory(const frozen_mutation&, const db::replay_position&);
@@ -408,8 +415,8 @@ public:
     static utils::UUID empty_version;
 
     future<> parse_system_tables(distributed<service::storage_proxy>&);
-    database();
-    database(const db::config&);
+    explicit database(sstable_deletion_manager& sdm);
+    explicit database(sstable_deletion_manager& sdm, const db::config&);
     database(database&&) = delete;
     ~database();
 
@@ -423,6 +430,10 @@ public:
 
     const compaction_manager& get_compaction_manager() const {
         return _compaction_manager;
+    }
+
+    sstable_deletion_manager& get_sstable_deletion_manager() {
+        return _sstable_deletion_manager;
     }
 
     future<> init_system_keyspace();

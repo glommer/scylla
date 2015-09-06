@@ -17,6 +17,7 @@
 #include "db/batchlog_manager.hh"
 #include "schema_builder.hh"
 #include "init.hh"
+#include "sstable_deletion_manager.hh"
 
 class in_memory_cql_env : public cql_test_env {
 public:
@@ -24,6 +25,7 @@ public:
 private:
     ::shared_ptr<distributed<database>> _db;
     ::shared_ptr<distributed<cql3::query_processor>> _qp;
+    ::shared_ptr<sstable_deletion_manager> _sdm;
 private:
     struct core_local_state {
         service::client_state client_state;
@@ -45,9 +47,11 @@ private:
 public:
     in_memory_cql_env(
         ::shared_ptr<distributed<database>> db,
-        ::shared_ptr<distributed<cql3::query_processor>> qp)
+        ::shared_ptr<distributed<cql3::query_processor>> qp,
+        ::shared_ptr<sstable_deletion_manager> sdm)
             : _db(db)
             , _qp(qp)
+            , _sdm(sdm)
     { }
 
     virtual future<::shared_ptr<transport::messages::result_message>> execute_cql(const sstring& text) override {
@@ -211,13 +215,14 @@ future<> init_once(shared_ptr<distributed<database>> db) {
 
 future<::shared_ptr<cql_test_env>> make_env_for_test() {
     return locator::i_endpoint_snitch::create_snitch("SimpleSnitch").then([] {
+        auto sdm = make_shared(make_dummy_sstable_deletion_manager());
         auto db = ::make_shared<distributed<database>>();
-        return init_once(db).then([db] {
-            return seastar::async([db] {
+        return init_once(db).then([db, sdm] {
+            return seastar::async([db, sdm] {
                 auto cfg = make_lw_shared<db::config>();
                 cfg->data_file_directories() = {};
                 cfg->volatile_system_keyspace_for_testing() = true;
-                db->start(std::move(*cfg)).get();
+                db->start(std::ref(*sdm), std::move(*cfg)).get();
 
                 distributed<service::storage_proxy>& proxy = service::get_storage_proxy();
                 distributed<service::migration_manager>& mm = service::get_migration_manager();
@@ -237,7 +242,7 @@ future<::shared_ptr<cql_test_env>> make_env_for_test() {
 
                 bm.start(std::ref(*qp));
 
-                auto env = ::make_shared<in_memory_cql_env>(db, qp);
+                auto env = ::make_shared<in_memory_cql_env>(db, qp, sdm);
                 env->start().get();
 
                 return dynamic_pointer_cast<cql_test_env>(env);

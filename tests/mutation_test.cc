@@ -20,6 +20,7 @@
 #include "query-result-set.hh"
 #include "query-result-reader.hh"
 #include "partition_slice_builder.hh"
+#include "sstable_deletion_manager.hh"
 
 #include "tests/test-utils.hh"
 #include "tests/mutation_assertions.hh"
@@ -44,8 +45,9 @@ static mutation_partition get_partition(const memtable& mt, const partition_key&
 template <typename Func>
 future<>
 with_column_family(schema_ptr s, column_family::config cfg, Func func) {
+    static thread_local sstable_deletion_manager sdm = make_dummy_sstable_deletion_manager();
     auto cm = make_lw_shared<compaction_manager>();
-    auto cf = make_lw_shared<column_family>(s, cfg, column_family::no_commitlog(), *cm);
+    auto cf = make_lw_shared<column_family>(s, cfg, column_family::no_commitlog(), *cm, sdm);
     return func(*cf).then([cf, cm] {
         return cf->stop();
     }).finally([cf] {});
@@ -293,8 +295,9 @@ SEASTAR_TEST_CASE(test_multiple_memtables_multiple_partitions) {
     column_family::config cfg;
     cfg.enable_disk_reads = false;
     cfg.enable_disk_writes = false;
+    auto sdm = make_shared(make_dummy_sstable_deletion_manager());
     auto cm = make_lw_shared<compaction_manager>();
-    return do_with(make_lw_shared<column_family>(s, cfg, column_family::no_commitlog(), *cm), [s, cm] (auto& cf_ptr) mutable {
+    return do_with(make_lw_shared<column_family>(s, cfg, column_family::no_commitlog(), *cm, *sdm), [s, cm, sdm] (auto& cf_ptr) mutable {
         column_family& cf = *cf_ptr;
         std::map<int32_t, std::map<int32_t, int32_t>> shadow, result;
 
@@ -335,7 +338,7 @@ SEASTAR_TEST_CASE(test_multiple_memtables_multiple_partitions) {
                 BOOST_REQUIRE(shadow == result);
             });
         });
-    });
+    }).then([sdm] {});
 }
 
 SEASTAR_TEST_CASE(test_cell_ordering) {

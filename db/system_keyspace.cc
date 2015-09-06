@@ -833,7 +833,7 @@ void make(database& db, bool durable, bool volatile_testing_only) {
     kscfg.enable_disk_writes = !volatile_testing_only;
     kscfg.enable_commitlog = !volatile_testing_only;
     kscfg.enable_cache = true;
-    keyspace _ks{ksm, std::move(kscfg)};
+    keyspace _ks{ksm, std::move(kscfg), db.get_sstable_deletion_manager()};
     auto rs(locator::abstract_replication_strategy::create_replication_strategy(NAME, "LocalStrategy", service::get_local_storage_service().get_token_metadata(), ksm->strategy_options()));
     _ks.set_replication_strategy(std::move(rs));
     db.add_keyspace(NAME, std::move(_ks));

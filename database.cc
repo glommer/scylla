@@ -34,12 +34,14 @@
 #include "service/migration_manager.hh"
 #include "service/storage_service.hh"
 #include "mutation_query.hh"
+#include "sstable_deletion_manager.hh"
 
 using namespace std::chrono_literals;
 
 logging::logger dblog("database");
 
-column_family::column_family(schema_ptr schema, config config, db::commitlog& cl, compaction_manager& compaction_manager)
+column_family::column_family(schema_ptr schema, config config, db::commitlog& cl, compaction_manager& compaction_manager,
+        sstable_deletion_manager& sdm)
     : _schema(std::move(schema))
     , _config(std::move(config))
     , _memtables(make_lw_shared(memtable_list{}))
@@ -47,6 +49,7 @@ column_family::column_family(schema_ptr schema, config config, db::commitlog& cl
     , _cache(_schema, sstables_as_mutation_source(), global_cache_tracker())
     , _commitlog(&cl)
     , _compaction_manager(compaction_manager)
+    , _sstable_deletion_manager(sdm)
 {
     add_memtable();
     if (!_config.enable_disk_writes) {
@@ -54,7 +57,8 @@ column_family::column_family(schema_ptr schema, config config, db::commitlog& cl
     }
 }
 
-column_family::column_family(schema_ptr schema, config config, no_commitlog cl, compaction_manager& compaction_manager)
+column_family::column_family(schema_ptr schema, config config, no_commitlog cl, compaction_manager& compaction_manager,
+        sstable_deletion_manager& sdm)
     : _schema(std::move(schema))
     , _config(std::move(config))
     , _memtables(make_lw_shared(memtable_list{}))
@@ -62,6 +66,7 @@ column_family::column_family(schema_ptr schema, config config, no_commitlog cl, 
     , _cache(_schema, sstables_as_mutation_source(), global_cache_tracker())
     , _commitlog(nullptr)
     , _compaction_manager(compaction_manager)
+    , _sstable_deletion_manager(sdm)
 {
     add_memtable();
     if (!_config.enable_disk_writes) {
@@ -356,6 +361,8 @@ future<sstables::entry_descriptor> column_family::probe_file(sstring sstdir, sst
     assert(_sstables->count(comps.generation) == 0);
 
     auto sst = std::make_unique<sstables::sstable>(_schema->ks_name(), _schema->cf_name(), sstdir, comps.generation, comps.version, comps.format);
+    _active_sstables.enter();
+    sst->set_destructor_callback([this] (sstables::sstable* sst) { delete_sstable(sst); });
     auto fut = sst->load();
     return std::move(fut).then([this, sst = std::move(sst)] () mutable {
         add_sstable(std::move(*sst));
@@ -378,6 +385,15 @@ void column_family::update_stats_for_new_sstable(uint64_t new_sstable_data_size)
     _stats.live_disk_space_used += new_sstable_data_size;
     _stats.total_disk_space_used += new_sstable_data_size;
     _stats.live_sstable_count++;
+}
+
+void column_family::delete_sstable(sstables::sstable* sst) {
+    if (sst->marked_for_deletion()) {
+        _sstable_deletion_manager.may_delete(
+                sst->toc_filename(),
+                sst->is_shared());
+    }
+    _active_sstables.leave();
 }
 
 void column_family::add_sstable(sstables::sstable&& sstable) {
@@ -458,6 +474,9 @@ column_family::try_flush_memtable_to_sstable(lw_shared_ptr<memtable> old) {
     dblog.debug("Flushing to {}", newtab.get_filename());
     return do_with(std::move(newtab), [old, this] (sstables::sstable& newtab) {
         // FIXME: write all components
+        newtab.set_unshared();
+        _active_sstables.enter();
+        newtab.set_destructor_callback([this] (sstables::sstable* sst) { delete_sstable(sst); });
         return newtab.write_components(*old).then([this, &newtab, old] {
             return newtab.load();
         }).then([this, old, &newtab] {
@@ -520,7 +539,8 @@ column_family::stop() {
 
     return _compaction_manager.remove(this).then([this] {
         return _in_flight_seals.close().then([this] {
-            return make_ready_future<>();
+            _sstables = nullptr; // allow sstable destructor callbacks to fire
+            return _active_sstables.close();
         });
     });
 }
@@ -543,6 +563,9 @@ column_family::compact_sstables(std::vector<sstables::shared_sstable> sstables) 
             auto sst = make_lw_shared<sstables::sstable>(_schema->ks_name(), _schema->cf_name(), _config.datadir, gen,
                     sstables::sstable::version_types::ka,
                     sstables::sstable::format_types::big);
+            sst->set_unshared();
+            _active_sstables.enter();
+            sst->set_destructor_callback([this] (sstables::sstable* sst) { delete_sstable(sst); });
             new_tables->emplace_back(gen, sst);
             return sst;
     };
@@ -689,12 +712,13 @@ future<> column_family::populate(sstring sstdir) {
 
 utils::UUID database::empty_version = utils::UUID_gen::get_name_UUID(bytes{});
 
-database::database() : database(db::config())
+database::database(sstable_deletion_manager& sdm) : database(sdm, db::config())
 {}
 
-database::database(const db::config& cfg)
+database::database(sstable_deletion_manager& sdm, const db::config& cfg)
     : _cfg(std::make_unique<db::config>(cfg))
     , _version(empty_version)
+    , _sstable_deletion_manager(sdm)
 {
     _memtable_total_space = size_t(_cfg->memtable_total_space_in_mb()) << 20;
     if (!_memtable_total_space) {
@@ -890,9 +914,11 @@ void database::add_column_family(schema_ptr schema, column_family::config cfg) {
     auto uuid = schema->id();
     lw_shared_ptr<column_family> cf;
     if (cfg.enable_commitlog && _commitlog) {
-       cf = make_lw_shared<column_family>(schema, std::move(cfg), *_commitlog, _compaction_manager);
+       cf = make_lw_shared<column_family>(schema, std::move(cfg), *_commitlog, _compaction_manager,
+               _sstable_deletion_manager);
     } else {
-       cf = make_lw_shared<column_family>(schema, std::move(cfg), column_family::no_commitlog(), _compaction_manager);
+       cf = make_lw_shared<column_family>(schema, std::move(cfg), column_family::no_commitlog(), _compaction_manager,
+               _sstable_deletion_manager);
     }
 
     auto ks = _keyspaces.find(schema->ks_name());
@@ -1083,7 +1109,7 @@ bool database::has_schema(const sstring& ks_name, const sstring& cf_name) const 
 
 
 void database::create_in_memory_keyspace(const lw_shared_ptr<keyspace_metadata>& ksm) {
-    keyspace ks(ksm, std::move(make_keyspace_config(*ksm)));
+    keyspace ks(ksm, std::move(make_keyspace_config(*ksm)), _sstable_deletion_manager);
     ks.create_replication_strategy(ksm->strategy_options());
     _keyspaces.emplace(ksm->name(), std::move(ks));
 }

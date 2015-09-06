@@ -19,6 +19,7 @@
 #include "core/do_with.hh"
 #include "utils/compaction_manager.hh"
 #include "tmpdir.hh"
+#include "sstable_deletion_manager.hh"
 
 #include <stdio.h>
 #include <ftw.h>
@@ -963,7 +964,8 @@ SEASTAR_TEST_CASE(compaction_manager_test) {
     column_family::config cfg;
     cfg.datadir = tmp->path;
     cfg.enable_commitlog = false;
-    auto cf = make_lw_shared<column_family>(s, cfg, column_family::no_commitlog(), *cm);
+    auto sdm = make_shared(make_dummy_sstable_deletion_manager());
+    auto cf = make_lw_shared<column_family>(s, cfg, column_family::no_commitlog(), *cm, *sdm);
     cf->start();
     cf->set_compaction_strategy(sstables::compaction_strategy_type::size_tiered);
 
@@ -1017,7 +1019,7 @@ SEASTAR_TEST_CASE(compaction_manager_test) {
                 });
             });
         });
-    }).then([s, tmp] {
+    }).then([s, tmp, sdm] {
         return make_ready_future<>();
     });
 }
