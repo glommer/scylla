@@ -418,7 +418,7 @@ void messaging_service::register_gossip_digest_ack2(std::function<rpc::no_wait_t
     register_handler(this, messaging_verb::GOSSIP_DIGEST_ACK2, std::move(func));
 }
 future<> messaging_service::send_gossip_digest_ack2(shard_id id, gossip_digest_ack2 msg) {
-    return send_message_oneway(this, messaging_verb::GOSSIP_DIGEST_ACK2, std::move(id), std::move(msg));
+    return send_message_oneway_timeout(this, messaging_verb::GOSSIP_DIGEST_ACK2, std::move(id), 1000ms, std::move(msg));
 }
 
 void messaging_service::register_definitions_update(std::function<rpc::no_wait_type (std::vector<frozen_mutation> fm)>&& func) {
