@@ -778,6 +778,8 @@ database::database(const db::config& cfg)
         _memtable_total_space = memory::stats().total_memory() / 2;
     }
     bool durable = cfg.data_file_directories().size() > 0;
+    auto backups = cfg.incremental_backups();
+    service::get_local_storage_service().incremental_backups_set_value(backups);
     db::system_keyspace::make(*this, durable, _cfg->volatile_system_keyspace_for_testing());
     // Start compaction manager with two tasks for handling compaction jobs.
     _compaction_manager.start(2);

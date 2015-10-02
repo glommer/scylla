@@ -77,11 +77,20 @@ class storage_service : public gms::i_endpoint_state_change_subscriber, public s
     private final AtomicLong notificationSerialNumber = new AtomicLong();
 #endif
     distributed<database>& _db;
+    bool _do_backups = false;
 public:
     storage_service(distributed<database>& db)
         : _db(db) {
     }
     static int RING_DELAY; // delay after which we assume ring has stablized
+
+    bool incremental_backups_enabled() {
+        return _do_backups;
+    }
+
+    void incremental_backups_set_value(bool val) {
+        _do_backups = val;
+    }
 
     // Needed by distributed<>
     future<> stop();
