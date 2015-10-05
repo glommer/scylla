@@ -1242,6 +1242,43 @@ future<> storage_service::stop_gossiping() {
     });
 }
 
+void check_snapshot_not_exist(database& db, sstring name, sstring ks_name) {
+    auto &ks = db.find_keyspace(ks_name);
+    if (ks.snapshot_exists(name)) {
+        throw std::runtime_error(sprint("Keyspace %s: snapshot %s already exists.", ks_name, name));
+    }
+}
+
+future<> storage_service::take_snapshot(sstring tag, std::vector<sstring> keyspace_names) {
+    if (tag.empty()) {
+        throw std::runtime_error("You must supply a snapshot name.");
+    }
+
+    return smp::submit_to(0, [] {
+        auto mode = get_local_storage_service()._operation_mode;
+        if (mode == storage_service::mode::JOINING) {
+            throw std::runtime_error("Cannot snapshot until bootstrap completes");
+        }
+    }).then([tag = std::move(tag), keyspace_names = std::move(keyspace_names), this] {
+        return _db.invoke_on_all([tag, keyspace_names] (database& db) {
+            return parallel_for_each(keyspace_names, [tag, &db] (auto& ks_name) {
+                check_snapshot_not_exist(db, tag, ks_name);
+                return make_ready_future<>();
+            });
+        }).then([this, tag, keyspace_names] {
+            return _db.invoke_on_all([tag = std::move(tag), keyspace_names] (database& db) {
+                return parallel_for_each(keyspace_names, [&db, tag = std::move(tag)] (auto& ks_name) {
+                    auto& ks = db.find_keyspace(ks_name);
+                    return parallel_for_each(ks.metadata()->cf_meta_data(), [&db, tag = std::move(tag)] (auto& pair) {
+                        auto& cf = db.find_column_family(pair.second);
+                        return cf.snapshot(db, tag);
+                    });
+                });
+            });
+        });
+    });
+}
+
 future<> storage_service::start_rpc_server() {
     fail(unimplemented::cause::STORAGE_SERVICE);
 #if 0
