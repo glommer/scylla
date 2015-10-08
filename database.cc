@@ -835,25 +835,52 @@ future<> database::populate_keyspace(sstring datadir, sstring ks_name) {
         dblog.warn("Skipping undefined keyspace: {}", ks_name);
     } else {
         dblog.info("Populating Keyspace {}", ks_name);
-        return lister::scan_dir(ksdir, directory_entry_type::directory, [this, ksdir, ks_name] (directory_entry de) {
-            auto comps = parse_fname(de.name);
-            if (comps.size() < 2) {
-                dblog.error("Keyspace {}: Skipping malformed CF {} ", ksdir, de.name);
-                return make_ready_future<>();
-            }
-            sstring cfname = comps[0];
-
+        auto& ks = (*i).second;
+        return lister::scan_dir(ksdir, directory_entry_type::directory, [this, ksdir, ks_name, &ks] (directory_entry de) {
+            auto valid_old_data = make_lw_shared<std::unordered_set<sstring>>();
             auto sstdir = ksdir + "/" + de.name;
-
-            try {
-                auto& cf = find_column_family(ks_name, cfname);
-                dblog.info("Keyspace {}: Reading CF {} ", ksdir, cfname);
-                // FIXME: Increase parallelism.
-                return cf.populate(sstdir);
-            } catch (no_such_column_family&) {
-                dblog.warn("{}, CF {}: schema not loaded!", ksdir, comps[0]);
+            // The column family may have been deleted, so we can't store that
+            // in the CF object and therefore reuse the cf's populate method.
+            // Snapshots are deleted through clearsnapshot, and we have to keep
+            // track of them for the snapshot creation process anyway, so we'll
+            // store them at the KS level.
+            //
+            // Backups are different, because they can disappear under our
+            // nose: the default procedure is to delete them from the file
+            // system. So we can just ignore them, but we'll keep track locally just so
+            // we can improve our error messages.
+            return lister::scan_dir(sstdir, directory_entry_type::directory, [this, &ks, sstdir, valid_old_data] (directory_entry de) {
+                if (de.name == "snapshots") {
+                    valid_old_data->insert(sstdir);
+                    return lister::scan_dir(sstdir + "/snapshots",  directory_entry_type::directory, [this, &ks] (directory_entry de) {
+                        ks.add_snapshot(std::move(de.name));
+                        return make_ready_future<>();
+                    });
+                } else if (de.name == "backups") {
+                    valid_old_data->insert(sstdir);
+                }
                 return make_ready_future<>();
-            }
+            }).then([this, ks_name, ksdir, sstdir, de = std::move(de), valid_old_data] {
+                auto comps = parse_fname(de.name);
+                if (comps.size() < 2) {
+                    dblog.error("Keyspace {}: Skipping malformed CF {} ", ksdir, de.name);
+                    return make_ready_future<>();
+                }
+                sstring cfname = comps[0];
+
+                try {
+                    auto& cf = find_column_family(ks_name, cfname);
+                    dblog.info("Keyspace {}: Reading CF {} ", ksdir, cfname);
+                    // FIXME: Increase parallelism.
+                    return cf.populate(sstdir);
+                } catch (no_such_column_family&) {
+                    // This is not a dangling CF, since
+                    if (valid_old_data->count(sstdir) == 0) {
+                        dblog.warn("{}, CF {}: schema not loaded!", ksdir, comps[0]);
+                    }
+                    return make_ready_future<>();
+                }
+            });
         });
     }
     return make_ready_future<>();

@@ -390,6 +390,7 @@ private:
     std::unique_ptr<locator::abstract_replication_strategy> _replication_strategy;
     lw_shared_ptr<keyspace_metadata> _metadata;
     config _config;
+    std::unordered_set<sstring> _snapshots;
 public:
     explicit keyspace(lw_shared_ptr<keyspace_metadata> metadata, config cfg)
         : _metadata(std::move(metadata))
@@ -406,6 +407,10 @@ public:
     future<> make_directory_for_column_family(const sstring& name, utils::UUID uuid);
     void add_column_family(const schema_ptr& s) {
         _metadata->add_column_family(s);
+    }
+
+    void add_snapshot(sstring name) {
+        _snapshots.insert(std::move(name));
     }
 
     // FIXME to allow simple registration at boostrap
