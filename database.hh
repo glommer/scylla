@@ -391,6 +391,7 @@ private:
     std::unique_ptr<locator::abstract_replication_strategy> _replication_strategy;
     lw_shared_ptr<keyspace_metadata> _metadata;
     config _config;
+    std::unordered_set<sstring> _snapshots;
 public:
     explicit keyspace(lw_shared_ptr<keyspace_metadata> metadata, config cfg)
         : _metadata(std::move(metadata))
