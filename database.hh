@@ -216,7 +216,7 @@ public:
     // Compact all sstables provided in the vector.
     future<> compact_sstables(std::vector<lw_shared_ptr<sstables::sstable>> sstables);
 
-    future<> snapshot(sstring name);
+    future<> snapshot(database& db, sstring name);
 
     const bool incremental_backups_enabled() const {
         return _config.enable_incremental_backups;
@@ -411,6 +411,19 @@ public:
 
     void add_snapshot(sstring name) {
         _snapshots.insert(std::move(name));
+    }
+
+    void remove_snapshot(sstring name) {
+        _snapshots.erase(std::move(name));
+    }
+
+    void remove_all_snapshots() {
+        std::unordered_set<sstring> empty;
+        _snapshots.swap(empty);
+    }
+
+    bool snapshot_exists(sstring name) {
+        return _snapshots.count(name);
     }
 
     // FIXME to allow simple registration at boostrap
