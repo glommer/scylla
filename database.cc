@@ -1601,8 +1601,8 @@ future<> database::truncate(db_clock::time_point truncated_at, const keyspace& k
         cf.clear();
     }
 
-    return cf.run_with_compaction_disabled([truncated_at, f = std::move(f), &cf, auto_snapshot, cfname = cf.schema()->cf_name()]() mutable {
-        return f.then([truncated_at, &cf, auto_snapshot, cfname = std::move(cfname)] {
+    return cf.run_with_compaction_disabled([this, truncated_at, f = std::move(f), &cf, auto_snapshot, cfname = cf.schema()->cf_name()]() mutable {
+        return f.then([this, truncated_at, &cf, auto_snapshot, cfname = std::move(cfname)] {
             dblog.debug("Discarding sstable data for truncated CF + indexes");
             // TODO: notify truncation
 
@@ -1707,7 +1707,9 @@ seal_snapshot(sstring jsondir) {
 }
 
 future<> column_family::snapshot(sstring name) {
-    return flush().then([this, name = std::move(name)]() {
+    return add_snapshot(schema()->ks_name(), name).then([this] {
+        return flush();
+    }).then([this, name]() {
         auto tables = boost::copy_range<std::vector<sstables::shared_sstable>>(*_sstables | boost::adaptors::map_values);
         return do_with(std::move(tables), [this, name](std::vector<sstables::shared_sstable> & tables) {
             auto jsondir = _config.datadir + "/snapshots/" + name;
