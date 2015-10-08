@@ -413,6 +413,10 @@ public:
         _snapshots.insert(std::move(name));
     }
 
+    bool snapshot_exists(sstring name) {
+        return _snapshots.count(name);
+    }
+
     // FIXME to allow simple registration at boostrap
     void set_replication_strategy(std::unique_ptr<locator::abstract_replication_strategy> replication_strategy);
 
