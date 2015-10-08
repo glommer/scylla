@@ -1613,8 +1613,8 @@ future<> database::truncate(const keyspace& ks, column_family& cf)
         cf.clear();
     }
 
-    return cf.run_with_compaction_disabled([f = std::move(f), &cf, auto_snapshot, cfname = cf.schema()->cf_name()]() mutable {
-        return f.then([&cf, auto_snapshot, cfname = std::move(cfname)] {
+    return cf.run_with_compaction_disabled([this, f = std::move(f), &cf, auto_snapshot, cfname = cf.schema()->cf_name()]() mutable {
+        return f.then([this, &cf, auto_snapshot, cfname = std::move(cfname)] {
             dblog.debug("Discarding sstable data for truncated CF + indexes");
 
             const auto truncated_at = db_clock::now();
@@ -1623,7 +1623,7 @@ future<> database::truncate(const keyspace& ks, column_family& cf)
             future<> f = make_ready_future<>();
             if (auto_snapshot) {
                 auto name = sprint("%d-%s", truncated_at.time_since_epoch().count(), cfname);
-                f = cf.snapshot(name);
+                f = cf.snapshot(*this, name);
             }
             return f.then([&cf, truncated_at] {
                 return cf.discard_sstables(truncated_at).then([&cf, truncated_at](db::replay_position rp) {
@@ -1715,7 +1715,10 @@ seal_snapshot(sstring jsondir, std::unordered_set<sstring> tables) {
     });
 }
 
-future<> column_family::snapshot(sstring name) {
+future<> column_family::snapshot(database& db, sstring name) {
+    auto& ks = db.find_keyspace(schema()->ks_name());
+    ks.add_snapshot(name);
+
     return flush().then([this, name = std::move(name)]() {
         auto tables = boost::copy_range<std::vector<sstables::shared_sstable>>(*_sstables | boost::adaptors::map_values);
         if (tables.size() == 0) {

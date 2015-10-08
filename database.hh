@@ -216,7 +216,7 @@ public:
     // Compact all sstables provided in the vector.
     future<> compact_sstables(std::vector<lw_shared_ptr<sstables::sstable>> sstables);
 
-    future<> snapshot(sstring name);
+    future<> snapshot(database& db, sstring name);
 
     const bool incremental_backups_enabled() const {
         return _config.enable_incremental_backups;
