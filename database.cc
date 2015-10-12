@@ -53,6 +53,7 @@
 #include "mutation_query.hh"
 #include "sstable_mutation_readers.hh"
 #include <core/fstream.hh>
+#include <seastar/core/enum.hh>
 #include "utils/latency.hh"
 #include "utils/flush_queue.hh"
 #include "snapshots.hh"
@@ -322,14 +323,17 @@ column_family::for_all_partitions_slow(std::function<bool (const dht::decorated_
 }
 
 class lister {
+public:
+    using dir_entry_types = std::unordered_set<directory_entry_type, enum_hash<directory_entry_type>>;
+private:
     file _f;
     std::function<future<> (directory_entry de)> _walker;
-    directory_entry_type _expected_type;
+    dir_entry_types _expected_type;
     subscription<directory_entry> _listing;
     sstring _dirname;
 
 public:
-    lister(file f, directory_entry_type type, std::function<future<> (directory_entry)> walker, sstring dirname)
+    lister(file f, dir_entry_types type, std::function<future<> (directory_entry)> walker, sstring dirname)
             : _f(std::move(f))
             , _walker(std::move(walker))
             , _expected_type(type)
@@ -337,13 +341,13 @@ public:
             , _dirname(dirname) {
     }
 
-    static future<> scan_dir(sstring name, directory_entry_type type, std::function<future<> (directory_entry)> walker);
+    static future<> scan_dir(sstring name, dir_entry_types type, std::function<future<> (directory_entry)> walker);
 protected:
     future<> _visit(directory_entry de) {
 
         return guarantee_type(std::move(de)).then([this] (directory_entry de) {
             // Hide all synthetic directories and hidden files.
-            if ((de.type != _expected_type) || (de.name[0] == '.')) {
+            if ((!_expected_type.count(*(de.type))) || (de.name[0] == '.')) {
                 return make_ready_future<>();
             }
             return _walker(de);
@@ -366,8 +370,7 @@ private:
 };
 
 
-future<> lister::scan_dir(sstring name, directory_entry_type type, std::function<future<> (directory_entry)> walker) {
-
+future<> lister::scan_dir(sstring name, lister::dir_entry_types type, std::function<future<> (directory_entry)> walker) {
     return engine().open_directory(name).then([type, walker = std::move(walker), name] (file f) {
         auto l = make_lw_shared<lister>(std::move(f), type, walker, name);
         return l->done().then([l] { });
@@ -717,7 +720,7 @@ future<> column_family::populate(sstring sstdir) {
     auto verifier = make_lw_shared<std::unordered_map<unsigned long, status>>();
     auto descriptor = make_lw_shared<sstable_descriptor>();
 
-    return lister::scan_dir(sstdir, directory_entry_type::regular, [this, sstdir, verifier, descriptor] (directory_entry de) {
+    return lister::scan_dir(sstdir, { directory_entry_type::regular }, [this, sstdir, verifier, descriptor] (directory_entry de) {
         // FIXME: The secondary indexes are in this level, but with a directory type, (starting with ".")
         return probe_file(sstdir, de.name).then([verifier, descriptor] (auto entry) {
             if (verifier->count(entry.generation)) {
@@ -825,7 +828,7 @@ future<> database::populate_keyspace(sstring datadir, sstring ks_name) {
     } else {
         dblog.info("Populating Keyspace {}", ks_name);
         auto& ks = (*i).second;
-        return lister::scan_dir(ksdir, directory_entry_type::directory, [this, ksdir, ks_name, &ks] (directory_entry de) {
+        return lister::scan_dir(ksdir, { directory_entry_type::directory }, [this, ksdir, ks_name, &ks] (directory_entry de) {
             auto valid_old_data = make_lw_shared<std::unordered_set<sstring>>();
             auto sstdir = ksdir + "/" + de.name;
             // The column family may have been deleted, so we can't store that
@@ -838,10 +841,10 @@ future<> database::populate_keyspace(sstring datadir, sstring ks_name) {
             // nose: the default procedure is to delete them from the file
             // system. So we can just ignore them, but we'll keep track locally just so
             // we can improve our error messages.
-            return lister::scan_dir(sstdir, directory_entry_type::directory, [this, ks_name, sstdir, valid_old_data] (directory_entry de) {
+            return lister::scan_dir(sstdir, { directory_entry_type::directory }, [this, ks_name, sstdir, valid_old_data] (directory_entry de) {
                 if (de.name == "snapshots") {
                     valid_old_data->insert(sstdir);
-                    return lister::scan_dir(sstdir + "/snapshots",  directory_entry_type::directory, [this, ks_name] (directory_entry de) {
+                    return lister::scan_dir(sstdir + "/snapshots",  { directory_entry_type::directory }, [this, ks_name] (directory_entry de) {
                         return add_snapshot(ks_name, std::move(de.name));
                     });
                 } else if (de.name == "backups") {
@@ -875,7 +878,7 @@ future<> database::populate_keyspace(sstring datadir, sstring ks_name) {
 }
 
 future<> database::populate(sstring datadir) {
-    return lister::scan_dir(datadir, directory_entry_type::directory, [this, datadir] (directory_entry de) {
+    return lister::scan_dir(datadir, { directory_entry_type::directory }, [this, datadir] (directory_entry de) {
         auto& ks_name = de.name;
         if (ks_name == "system") {
             return make_ready_future<>();
