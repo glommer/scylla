@@ -1309,6 +1309,53 @@ future<> storage_service::take_column_family_snapshot(sstring ks_name, sstring c
     });
 }
 
+// For the filesystem operations, this code will assume that all keyspaces are visible in all shards
+// (as we have been doing for a lot of the other operations, like the snapshot itself).
+//
+// Once the filesystem operation is completed, then we broadcast the change to all shards so they can update
+// their views.
+future<> storage_service::clear_snapshot(sstring tag, std::vector<sstring> keyspace_names) {
+    std::vector<std::reference_wrapper<keyspace>> keyspaces;
+    for (auto& ksname: keyspace_names) {
+        try {
+            keyspaces.push_back(std::reference_wrapper<keyspace>(_db.local().find_keyspace(ksname)));
+        } catch (no_such_keyspace& e) {
+            return make_exception_future(std::current_exception());
+        }
+    }
+
+    auto deleted_keyspaces = make_lw_shared<std::vector<sstring>>();
+    return parallel_for_each(keyspaces, [this, tag, deleted_keyspaces] (auto& ks) {
+        return parallel_for_each(ks.get().metadata()->cf_meta_data(), [this, tag] (auto& pair) {
+            auto& cf = _db.local().find_column_family(pair.second);
+            return cf.clear_snapshot(tag);
+        }).then_wrapped([deleted_keyspaces, tag, ks] (future<> f) {
+            auto msg = "Exception found when trying to delete snapshot: {}. Don't know what to do!";
+            try {
+                f.get();
+                deleted_keyspaces->push_back(ks.get().metadata()->name());
+            } catch (std::exception& e) {
+                logger.error(msg, e.what());
+                throw;
+            } catch (...) {
+                logger.error(msg, "Unknown exception");
+                throw;
+            }
+            return make_ready_future<>();
+        });
+    }).finally([deleted_keyspaces, tag] {
+        return parallel_for_each(*deleted_keyspaces, [tag] (auto ks_name) {
+            if (tag.empty()) {
+                return remove_all_snapshots(ks_name);
+            } else {
+                return remove_snapshot(ks_name, tag);
+            };
+        });
+    });
+    logger.debug("Cleared out snapshot directories");
+}
+
+
 future<> storage_service::start_rpc_server() {
     fail(unimplemented::cause::STORAGE_SERVICE);
 #if 0
