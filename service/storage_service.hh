@@ -2814,15 +2814,13 @@ public:
     {
         SSTableDeletingTask.rescheduleFailedTasks();
     }
+#endif
 
     /**
      * #{@inheritDoc}
      */
-    public void loadNewSSTables(String ksName, String cfName)
-    {
-        ColumnFamilyStore.loadNewSSTables(ksName, cfName);
-    }
-
+    future<> load_new_sstables(sstring ks_name, sstring cf_name);
+#if 0
     /**
      * #{@inheritDoc}
      */
