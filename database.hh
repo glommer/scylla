@@ -127,6 +127,12 @@ public:
         sstables::estimated_histogram estimated_write;
     };
 
+    struct snapshot_details {
+        int64_t live;
+        int64_t total;
+        sstring cf;
+        sstring key;
+    };
 private:
     schema_ptr _schema;
     config _config;
@@ -218,6 +224,7 @@ public:
 
     future<> snapshot(database& db, sstring name);
     future<> clear_snapshot(sstring name);
+    future<std::vector<snapshot_details>> get_snapshot_details();
 
     const bool incremental_backups_enabled() const {
         return _config.enable_incremental_backups;

@@ -1841,6 +1841,34 @@ future<> column_family::clear_snapshot(sstring tag) {
     });
 }
 
+future<std::vector<column_family::snapshot_details>> column_family::get_snapshot_details() {
+    return do_with(std::vector<snapshot_details>(), [this] (auto& all_snapshots) {
+        return lister::scan_dir(_config.datadir + "/snapshots",  { directory_entry_type::directory }, [this, &all_snapshots] (directory_entry de) {
+            auto snapshot = _config.datadir + "/snapshots/" + de.name;
+            all_snapshots.push_back({0, 0, this->schema()->cf_name(), de.name});
+            auto& entry = all_snapshots.back();
+            return lister::scan_dir(snapshot,  { directory_entry_type::regular }, [this, &entry, snapshot] (directory_entry de) {
+                return file_size(snapshot + "/" + de.name).then([&entry, name = std::move(de.name)] (auto size) {
+                    entry.total += size;
+                    // The manifest is the only file expected to be in this directory not belonging to the SSTable
+                    // We test that explicitly to avoid exceptions
+                    if (name != "manifest.json") {
+                        try {
+                            sstables::entry_descriptor::make_descriptor(name);
+                            entry.live += size;
+                        } catch (sstables::malformed_sstable_exception& e) {
+                            dblog.error("unexpected file found at snapshot {}, CF {}: {}.", entry.key, entry.cf, name);
+                        }
+                    }
+                    return make_ready_future<>();
+                });
+            });
+        }).then([&all_snapshots] {
+            return std::move(all_snapshots);
+        });
+    });
+}
+
 future<> column_family::flush() {
     // FIXME: this will synchronously wait for this write to finish, but doesn't guarantee
     // anything about previous writes.
