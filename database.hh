@@ -254,6 +254,7 @@ public:
     // Compact all sstables provided in the vector.
     future<> compact_sstables(std::vector<lw_shared_ptr<sstables::sstable>> sstables);
 
+    future<> load_new_sstables(std::vector<sstables::entry_descriptor> new_tables);
     future<> snapshot(sstring name);
 
     const bool incremental_backups_enabled() const {
