@@ -577,11 +577,11 @@ void set_storage_service(http_context& ctx, routes& r) {
     });
 
     ss::load_new_ss_tables.set(r, [&ctx](std::unique_ptr<request> req) {
-        //TBD
-        unimplemented();
         auto keyspace = validate_keyspace(ctx, req->param);
         auto column_family = req->get_query_param("cf");
-        return make_ready_future<json::json_return_type>(json_void());
+        return service::get_local_storage_service().load_new_sstables(keyspace, column_family).then([] {
+            return make_ready_future<json::json_return_type>(json_void());
+        });
     });
 
     ss::sample_key_range.set(r, [](std::unique_ptr<request> req) {
