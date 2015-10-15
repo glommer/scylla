@@ -185,9 +185,8 @@ public:
     future<> load();
     future<> open_data();
 
-    void set_generation(unsigned long generation) {
-        _generation = generation;
-    }
+    future<> set_generation(unsigned long generation);
+
     unsigned long generation() const {
         return _generation;
     }
