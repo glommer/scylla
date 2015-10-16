@@ -239,6 +239,13 @@ public:
         _sstables_lock.write_unlock();
         return std::chrono::high_resolution_clock::now() - _sstable_writes_disabled_at;
     }
+
+    // Make sure the generation numbers are sequential, starting from "start".
+    // Generations before "start" are left untouched.
+    //
+    // Return the highest generation number seen so far
+    future<std::vector<sstables::entry_descriptor>> reshuffle_sstables(unsigned long start);
+
     // FIXME: this is just an example, should be changed to something more
     // general. compact_all_sstables() starts a compaction of all sstables.
     // It doesn't flush the current memtable first. It's just a ad-hoc method,
