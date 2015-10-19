@@ -217,6 +217,8 @@ public:
     // Compact all sstables provided in the vector.
     future<> compact_sstables(std::vector<lw_shared_ptr<sstables::sstable>> sstables);
 
+    future<bool> snapshot_exists(sstring name);
+
     future<> snapshot(sstring name);
     future<> clear_snapshot(sstring name);
 

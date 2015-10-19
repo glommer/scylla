@@ -1740,6 +1740,34 @@ future<> column_family::snapshot(sstring name) {
     });
 }
 
+future<bool> column_family::snapshot_exists(sstring tag) {
+    class found: public std::exception {};
+
+    sstring jsondir = _config.datadir + "/snapshots/";
+    return lister::scan_dir(jsondir, { directory_entry_type::directory }, [this, tag] (directory_entry de) {
+        if (de.name == tag) {
+            // FIXME: Should really have a way to stop this without exceptions
+            // We can't call close() in the subscription's stream because list_directory already does
+            // internally. Did I mention we need a new directory walker?
+            throw found();
+        }
+        return make_ready_future<>();
+    }).then_wrapped([] (future<> f) {
+        try {
+            f.get();
+            return make_ready_future<bool>(false);
+        } catch (std::system_error& e) {
+            // If the directory itself does not exist, then the snapshot certainly do not exist.
+            if (e.code() != std::error_code(ENOENT, std::system_category())) {
+                throw;
+            }
+            return make_ready_future<bool>(false);
+        } catch (found& e) {
+            return make_ready_future<bool>(true);
+        }
+    });
+}
+
 enum class missing { no, yes };
 static missing
 file_missing(future<> f) {
