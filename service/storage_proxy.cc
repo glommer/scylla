@@ -212,6 +212,7 @@ storage_proxy::response_id_type storage_proxy::register_response_handler(std::un
         auto& e = _response_handlers.find(id)->second;
         auto block_for = e.handler->total_block_for();
         auto left_for_cl = block_for - e.handler->_cl_acks;
+        printf("LEFT FOR CL: %ld - %ld = %ld\n", block_for, e.handler->_cl_acks, left_for_cl);
         if (left_for_cl <= 0 || e.handler->_cl == db::consistency_level::ANY) {
             // we are here because either cl was achieved, but targets left in the handler are not
             // responding, so a hint should be written for them, or cl == any in which case
