@@ -31,6 +31,7 @@
 #include "service/storage_service.hh"
 #include "service/migration_manager.hh"
 #include "service/load_broadcaster.hh"
+#include "service/priority_manager.hh"
 #include "streaming/stream_session.hh"
 #include "db/system_keyspace.hh"
 #include "db/batchlog_manager.hh"
@@ -319,6 +320,10 @@ int main(int ac, char** av) {
                     engine().set_strict_dma(false);
                 }
                 return make_ready_future<>();
+            }).then([] {
+                supervisor_notify("initializing priority manager service");
+                return service::init_priority_manager();
+                // #293 - do not stop anything. This service is newer than #293
             }).then([cfg] {
                 supervisor_notify("creating snitch");
                 return i_endpoint_snitch::create_snitch(cfg->endpoint_snitch());
