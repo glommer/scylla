@@ -61,6 +61,7 @@
 #include "db/system_keyspace.hh"
 #include "db/query_context.hh"
 #include "service/storage_service.hh"
+#include "service/priority_manager.hh"
 
 namespace sstables {
 
@@ -71,7 +72,9 @@ class sstable_reader final : public ::mutation_reader::impl {
     mutation_reader _reader;
 public:
     sstable_reader(shared_sstable sst, schema_ptr schema)
-            : _sst(std::move(sst)), _reader(_sst->read_rows(schema)) {}
+            : _sst(std::move(sst))
+            , _reader(_sst->read_rows(schema, service::get_local_priority_manager().compaction_priority()))
+            {}
     virtual future<mutation_opt> operator()() override {
         return _reader.read();
     }
@@ -282,8 +285,8 @@ future<> compact_sstables(std::vector<shared_sstable> sstables, column_family& c
             }
 
             ::mutation_reader mutation_queue_reader = make_mutation_reader<queue_reader>(output_reader);
-
-            return newtab->write_components(std::move(mutation_queue_reader), partitions_per_sstable, schema, max_sstable_size).then([newtab, stats] {
+            auto& priority = service::get_local_priority_manager().compaction_priority();
+            return newtab->write_components(std::move(mutation_queue_reader), partitions_per_sstable, schema, max_sstable_size, priority).then([newtab, stats] {
                 return newtab->open_data().then([newtab, stats] {
                     stats->new_sstables.push_back(newtab);
                     stats->end_size += newtab->data_size();
