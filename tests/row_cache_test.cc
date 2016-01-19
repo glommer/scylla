@@ -69,10 +69,10 @@ SEASTAR_TEST_CASE(test_cache_delegates_to_underlying) {
         auto m = make_new_mutation(s);
 
         cache_tracker tracker;
-        row_cache cache(s, [m] (schema_ptr s, const query::partition_range&) {
+        row_cache cache(s, [m] (schema_ptr s, const query::partition_range&, const io_priority_class& pc) {
             assert(m.schema() == s);
             return make_reader_returning(m);
-        }, [m] (auto&&) {
+        }, [m] (auto&&, const io_priority_class& pc) {
             return make_key_from_mutation_reader(make_reader_returning(m));
         }, tracker);
 
@@ -88,10 +88,10 @@ SEASTAR_TEST_CASE(test_cache_works_after_clearing) {
         auto m = make_new_mutation(s);
 
         cache_tracker tracker;
-        row_cache cache(s, [m] (schema_ptr s, const query::partition_range&) {
+        row_cache cache(s, [m] (schema_ptr s, const query::partition_range&, const io_priority_class& pc) {
             assert(m.schema() == s);
             return make_reader_returning(m);
-        }, [m] (auto&&) {
+        }, [m] (auto&&, const io_priority_class& pc) {
             return make_key_from_mutation_reader(make_reader_returning(m));
         }, tracker);
 
@@ -209,7 +209,7 @@ SEASTAR_TEST_CASE(test_row_cache_conforms_to_mutation_source) {
             }
 
             auto cache = make_lw_shared<row_cache>(s, mt->as_data_source(), mt->as_key_source(), tracker);
-            return [cache] (schema_ptr s, const query::partition_range& range) {
+            return [cache] (schema_ptr s, const query::partition_range& range, const io_priority_class& pc) {
                 return cache->make_reader(s, range);
             };
         });
@@ -413,7 +413,7 @@ private:
         { }
 
         mutation_reader make_reader(schema_ptr s, const query::partition_range& pr) {
-            return make_mutation_reader<reader>(_throttle, _underlying(s, pr));
+            return make_mutation_reader<reader>(_throttle, _underlying(s, pr, default_priority_class()));
         }
 
         ::throttle& throttle() { return _throttle; }
@@ -432,7 +432,7 @@ public:
         _impl->throttle().unblock();
     }
 
-    mutation_reader operator()(schema_ptr s, const query::partition_range& pr) {
+    mutation_reader operator()(schema_ptr s, const query::partition_range& pr, const io_priority_class& pc) {
         return _impl->make_reader(s, pr);
     }
 };
@@ -449,17 +449,17 @@ SEASTAR_TEST_CASE(test_cache_population_and_update_race) {
     return seastar::async([] {
         auto s = make_schema();
         std::vector<lw_shared_ptr<memtable>> memtables;
-        auto memtables_data_source = [&] (schema_ptr s, const query::partition_range& pr) {
+        auto memtables_data_source = [&] (schema_ptr s, const query::partition_range& pr, const io_priority_class& pc) {
             std::vector<mutation_reader> readers;
             for (auto&& mt : memtables) {
                 readers.emplace_back(mt->make_reader(s, pr));
             }
             return make_combined_reader(std::move(readers));
         };
-        auto memtables_key_source = [&] (const query::partition_range& pr) {
+        auto memtables_key_source = [&] (const query::partition_range& pr, const io_priority_class& pc) {
             std::vector<key_reader> readers;
             for (auto&& mt : memtables) {
-                readers.emplace_back(mt->as_key_source()(pr));
+                readers.emplace_back(mt->as_key_source()(pr, default_priority_class()));
             }
             return make_combined_reader(s, std::move(readers));
         };

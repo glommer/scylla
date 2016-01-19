@@ -59,7 +59,7 @@ struct mutation_less_cmp {
 };
 
 mutation_source make_source(std::vector<mutation> mutations) {
-    return [mutations = std::move(mutations)] (schema_ptr s, const query::partition_range& range) {
+    return [mutations = std::move(mutations)] (schema_ptr s, const query::partition_range& range, const io_priority_class& pc) {
         assert(range.is_full()); // slicing not implemented yet
         for (auto&& m : mutations) {
             assert(m.schema() == s);

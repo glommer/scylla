@@ -144,7 +144,7 @@ mutation_query(schema_ptr s,
 
     return do_with(query_state(range, slice, row_limit, query_time),
                    [&source, s = std::move(s)] (query_state& state) -> future<reconcilable_result> {
-        state.reader = source(std::move(s), state.range);
+        state.reader = source(std::move(s), state.range, default_priority_class());
         return consume(state.reader, [&state] (mutation&& m) {
             // FIXME: Make data sources respect row_ranges so that we don't have to filter them out here.
             auto is_distinct = state.slice.options.contains(query::partition_slice::option::distinct);
