@@ -59,6 +59,7 @@
 #include "utils/latency.hh"
 #include "utils/flush_queue.hh"
 #include "schema_registry.hh"
+#include "service/priority_manager.hh"
 
 using namespace std::chrono_literals;
 
@@ -129,7 +130,7 @@ column_family::make_partition_presence_checker(lw_shared_ptr<sstable_list> old_s
 mutation_source
 column_family::sstables_as_mutation_source() {
     return [this] (schema_ptr s, const query::partition_range& r) {
-        return make_sstable_reader(std::move(s), r, default_priority_class());
+        return make_sstable_reader(std::move(s), r, service::get_local_priority_manager().sstable_query_read_priority());
     };
 }
 
@@ -235,7 +236,7 @@ key_source column_family::sstables_as_key_source() const {
         readers.reserve(_sstables->size());
         std::transform(_sstables->begin(), _sstables->end(), std::back_inserter(readers), [&] (auto&& entry) {
             auto& sst = entry.second;
-            auto rd = sstables::make_key_reader(_schema, sst, range);
+            auto rd = sstables::make_key_reader(_schema, sst, range, service::get_local_priority_manager().sstable_query_read_priority());
             if (sst->is_shared()) {
                 rd = make_filtering_reader(std::move(rd), [] (const dht::decorated_key& dk) {
                     return dht::shard_of(dk.token()) == engine().cpu_id();
@@ -595,7 +596,8 @@ column_family::try_flush_memtable_to_sstable(lw_shared_ptr<memtable> old) {
     _config.cf_stats->pending_memtables_flushes_bytes += memtable_size;
     newtab->set_unshared();
     dblog.debug("Flushing to {}", newtab->get_filename());
-    return newtab->write_components(*old).then([this, newtab, old] {
+    auto& priority = service::get_local_priority_manager().memtable_flush_priority();
+    return newtab->write_components(*old, priority).then([this, newtab, old] {
         return newtab->open_data().then([this, newtab] {
             // Note that due to our sharded architecture, it is possible that
             // in the face of a value change some shards will backup sstables
@@ -1551,7 +1553,7 @@ column_family::query(schema_ptr s, const query::read_command& cmd, const std::ve
     return do_with(query_state(std::move(s), cmd, partition_ranges), [this] (query_state& qs) {
         return do_until(std::bind(&query_state::done, &qs), [this, &qs] {
             auto&& range = *qs.current_partition_range++;
-            qs.reader = make_reader(qs.schema, default_priority_class(), range);
+            qs.reader = make_reader(qs.schema, service::get_local_priority_manager().sstable_query_read_priority(), range);
             qs.range_empty = false;
             return do_until([&qs] { return !qs.limit || qs.range_empty; }, [&qs] {
                 return qs.reader().then([&qs](mutation_opt mo) {
@@ -1582,7 +1584,7 @@ mutation_source
 column_family::as_mutation_source() const {
     return [this] (schema_ptr s, const query::partition_range& range) {
         return this->make_reader(std::move(s),
-                default_priority_class(),
+                service::get_local_priority_manager().sstable_query_read_priority(),
                 range);
     };
 }

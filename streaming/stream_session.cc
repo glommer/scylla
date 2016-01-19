@@ -61,6 +61,7 @@
 #include "streaming/stream_session_state.hh"
 #include "streaming/stream_exception.hh"
 #include "service/storage_proxy.hh"
+#include "service/priority_manager.hh"
 #include "query-request.hh"
 #include "schema_registry.hh"
 
@@ -631,7 +632,7 @@ void stream_session::add_transfer_ranges(sstring keyspace, std::vector<query::ra
         auto cf_id = cf->schema()->id();
         for (auto& range : ranges) {
             auto pr = query::to_partition_range(range);
-            auto mr = service::get_storage_proxy().local().make_local_reader(cf_id, pr);
+            auto mr = service::get_storage_proxy().local().make_local_reader(cf_id, pr, service::get_local_priority_manager().mutation_stream_priority());
             readers.push_back(std::move(mr));
         }
         // Store this mutation_reader so we can send mutaions later
