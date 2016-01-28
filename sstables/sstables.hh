@@ -274,6 +274,10 @@ public:
         return _filter->memory_size();
     }
 
+    uint64_t partitions() const {
+        return _partitions;
+    }
+
     // Returns the total bytes of all components.
     future<uint64_t> bytes_on_disk();
 
@@ -362,6 +366,8 @@ private:
     uint64_t _index_file_size;
     uint64_t _filter_file_size = 0;
     uint64_t _bytes_on_disk = 0;
+    // How many partitions are present in this SSTable.
+    uint64_t _partitions = 0;
 
     sstring _ks;
     sstring _cf;

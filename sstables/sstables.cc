@@ -1345,6 +1345,7 @@ void sstable::do_write_components(::mutation_reader mr,
         }
         int16_t end_of_row = 0;
         write(out, end_of_row);
+        _partitions++;
 
         // compute size of the current row.
         _c_stats.row_size = out.offset() - _c_stats.start_offset;
