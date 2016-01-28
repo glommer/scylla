@@ -138,6 +138,14 @@ struct cf_stats {
         }
         return total_bytes;
     }
+    int64_t pending_memtables_bytes_already_flushed() const {
+        int64_t total_bytes = 0;
+        for (auto&& m: memtables_in_flush) {
+            auto ratio = float(m.second.sst->partitions()) / m.first->partition_count();
+            total_bytes += ratio * m.second.size;
+        }
+        return total_bytes;
+    }
 };
 
 class column_family {
@@ -617,6 +625,7 @@ private:
     future<> throttle();
     future<> do_apply(schema_ptr, const frozen_mutation&);
     void unthrottle();
+    uint64_t estimated_dirty_memory_usage() const;
 public:
     static utils::UUID empty_version;
 
