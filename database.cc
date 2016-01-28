@@ -1746,8 +1746,13 @@ future<> database::do_apply(schema_ptr s, const frozen_mutation& m) {
     return apply_in_memory(m, s, db::replay_position());
 }
 
+uint64_t database::estimated_dirty_memory_usage() const {
+    return _dirty_memory_region_group.memory_used() -
+           (_cf_stats.pending_memtables_bytes_already_flushed() / 2);
+}
+
 future<> database::throttle() {
-    if (_dirty_memory_region_group.memory_used() < _memtable_total_space
+    if (estimated_dirty_memory_usage() < _memtable_total_space
             && _throttled_requests.empty()) {
         // All is well, go ahead
         return make_ready_future<>();
@@ -1763,7 +1768,7 @@ future<> database::throttle() {
 void database::unthrottle() {
     // Release one request per free 1MB we have
     // FIXME: improve this
-    if (_dirty_memory_region_group.memory_used() >= _memtable_total_space) {
+    if (estimated_dirty_memory_usage() >= _memtable_total_space) {
         return;
     }
     size_t avail = (_memtable_total_space - _dirty_memory_region_group.memory_used()) >> 20;
