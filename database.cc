@@ -590,10 +590,7 @@ column_family::try_flush_memtable_to_sstable(lw_shared_ptr<memtable> old) {
         sstables::sstable::version_types::ka,
         sstables::sstable::format_types::big);
 
-    auto memtable_size = old->occupancy().total_space();
-
-    _config.cf_stats->pending_memtables_flushes_count++;
-    _config.cf_stats->pending_memtables_flushes_bytes += memtable_size;
+    _config.cf_stats->memtable_flush_start(old, newtab);
     newtab->set_unshared();
     dblog.debug("Flushing to {}", newtab->get_filename());
     // Note that due to our sharded architecture, it is possible that
@@ -610,9 +607,8 @@ column_family::try_flush_memtable_to_sstable(lw_shared_ptr<memtable> old) {
     auto&& priority = service::get_local_memtable_flush_priority();
     return newtab->write_components(*old, incremental_backups_enabled(), priority).then([this, newtab, old] {
         return newtab->open_data();
-    }).then_wrapped([this, old, newtab, memtable_size] (future<> ret) {
-        _config.cf_stats->pending_memtables_flushes_count--;
-        _config.cf_stats->pending_memtables_flushes_bytes -= memtable_size;
+    }).then_wrapped([this, old, newtab] (future<> ret) {
+        _config.cf_stats->memtable_flush_finish(old);
         dblog.debug("Flushing done");
         try {
             ret.get();
@@ -1056,7 +1052,9 @@ database::setup_collectd() {
         scollectd::add_polled_metric(scollectd::type_instance_id("memtables"
                 , scollectd::per_cpu_plugin_instance
                 , "bytes", "pending_flushes")
-                , scollectd::make_typed(scollectd::data_type::GAUGE, _cf_stats.pending_memtables_flushes_bytes)
+                , scollectd::make_typed(scollectd::data_type::GAUGE, [this] {
+                   return _cf_stats.pending_memtables_flushes_bytes();
+                })
     ));
 }
 

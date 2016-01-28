@@ -108,8 +108,36 @@ using sstable_list = sstables::sstable_list;
 // untouched. And we need more fields. We will summarize it in here what
 // we need.
 struct cf_stats {
+    struct pending_mt {
+        lw_shared_ptr<sstables::sstable> sst;
+        // We store the size separately because a reclaim in the middle of the
+        // memtable flush can change the size.  Right now this is very
+        // unlikely, but in the future this might change - for instance, if we
+        // start moving partitions out of the memtable while it is still in
+        // flight.
+        uint64_t size;
+    };
+
     int64_t pending_memtables_flushes_count = 0;
-    int64_t pending_memtables_flushes_bytes = 0;
+
+    std::unordered_map<lw_shared_ptr<memtable>, pending_mt> memtables_in_flush;
+    void memtable_flush_start(lw_shared_ptr<memtable> mt, lw_shared_ptr<sstables::sstable> sst) {
+        pending_memtables_flushes_count++;
+        memtables_in_flush.emplace(mt, pending_mt{sst, mt->occupancy().total_space()});
+    }
+    void memtable_flush_finish(lw_shared_ptr<memtable> mt) {
+        auto it = memtables_in_flush.find(mt);
+        pending_memtables_flushes_count--;
+        memtables_in_flush.erase(it);
+    }
+    int64_t pending_memtables_flushes_bytes() const {
+        int64_t total_bytes = 0;
+        for (auto&& m: memtables_in_flush) {
+            auto ratio = 1.0f - float(m.second.sst->partitions()) / m.first->partition_count();
+            total_bytes += ratio * m.second.size;
+        }
+        return total_bytes;
+    }
 };
 
 class column_family {
