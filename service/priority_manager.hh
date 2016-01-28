@@ -21,48 +21,56 @@
 #include <seastar/core/future.hh>
 #include <seastar/core/distributed.hh>
 #include <seastar/core/reactor.hh>
+#include <seastar/core/enum.hh>
 
 namespace service {
 class priority_manager {
-    ::io_priority_class _commitlog_priority;
-    ::io_priority_class _mt_flush_priority;
-    ::io_priority_class _mut_stream_priority;
-    ::io_priority_class _sstable_query_read;
-    ::io_priority_class _compaction_priority;
+    enum class priority_class_id { commitlog, memtable_flush, mutation_streaming, sstable_query_read, compaction };
 
+    struct priority_class {
+        ::io_priority_class pclass;
+        std::function<int()> pressure;
+        priority_class(sstring name, uint32_t shares)
+            : pclass(engine().register_one_priority_class(name, shares))
+            , pressure([] { return 50; })
+        {}
+    };
+
+    std::unordered_map<priority_class_id, priority_class, enum_hash<priority_class_id>> _classes;
 public:
     const ::io_priority_class&
     commitlog_priority() {
-        return _commitlog_priority;
+        return _classes.at(priority_class_id::commitlog).pclass;
     }
 
     const ::io_priority_class&
     memtable_flush_priority() {
-        return _mt_flush_priority;
+        return _classes.at(priority_class_id::memtable_flush).pclass;
     }
 
     const ::io_priority_class&
     mutation_stream_priority() {
-        return _mut_stream_priority;
+        return _classes.at(priority_class_id::mutation_streaming).pclass;
     }
 
     const ::io_priority_class&
     sstable_query_read_priority() {
-        return _sstable_query_read;
+        return _classes.at(priority_class_id::sstable_query_read).pclass;
     }
 
     const ::io_priority_class&
     compaction_priority() {
-        return _compaction_priority;
+        return _classes.at(priority_class_id::compaction).pclass;
     }
 
     priority_manager()
-        : _commitlog_priority(engine().register_one_priority_class("commitlog", 100))
-        , _mt_flush_priority(engine().register_one_priority_class("memtable_flush", 100))
-        , _mut_stream_priority(engine().register_one_priority_class("streaming", 100))
-        , _sstable_query_read(engine().register_one_priority_class("query", 100))
-        , _compaction_priority(engine().register_one_priority_class("compaction", 100))
-
+        : _classes({
+            { priority_class_id::commitlog, priority_class{"commitlog", 100}},
+            { priority_class_id::memtable_flush, priority_class{"memtable_flush", 100}},
+            { priority_class_id::mutation_streaming, priority_class{"mutation_streaming", 100}},
+            { priority_class_id::sstable_query_read, priority_class{"sstable_query_read", 100}},
+            { priority_class_id::compaction, priority_class{"compaction", 100}},
+        })
     {}
 };
 
