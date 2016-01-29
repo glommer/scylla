@@ -24,4 +24,13 @@ priority_manager& get_local_priority_manager() {
     static thread_local priority_manager pm = priority_manager();
     return pm;
 }
+void priority_manager::adjust_priorities() {
+    std::map<int, priority_class_id> sorted_pressures;
+    for (auto&& pc: _classes) {
+        auto id = pc.first;
+        auto pressure = pc.second.pressure();
+        printf("Class %d, pressure %d\n", int(id), pressure);
+        sorted_pressures.emplace(pressure, id);
+    }
+}
 }

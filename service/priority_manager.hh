@@ -22,22 +22,34 @@
 #include <seastar/core/distributed.hh>
 #include <seastar/core/reactor.hh>
 #include <seastar/core/enum.hh>
+#include <seastar/core/timer.hh>
+#include <chrono>
 
 namespace service {
 class priority_manager {
+public:
     enum class priority_class_id { commitlog, memtable_flush, mutation_streaming, sstable_query_read, compaction };
-
+private:
     struct priority_class {
         ::io_priority_class pclass;
+        uint32_t current_shares;
         std::function<int()> pressure;
         priority_class(sstring name, uint32_t shares)
             : pclass(engine().register_one_priority_class(name, shares))
+            , current_shares(shares)
             , pressure([] { return 50; })
         {}
     };
 
     std::unordered_map<priority_class_id, priority_class, enum_hash<priority_class_id>> _classes;
+    timer<> _adjustment_timer;
+    void adjust_priorities();
 public:
+
+    void update_pressure_function(priority_class_id id, std::function<int()> func) {
+        _classes.at(id).pressure = std::move(func);
+    }
+
     const ::io_priority_class&
     commitlog_priority() {
         return _classes.at(priority_class_id::commitlog).pclass;
@@ -71,7 +83,10 @@ public:
             { priority_class_id::sstable_query_read, priority_class{"sstable_query_read", 100}},
             { priority_class_id::compaction, priority_class{"compaction", 100}},
         })
-    {}
+        , _adjustment_timer([this] { adjust_priorities(); })
+    {
+        _adjustment_timer.arm_periodic(std::chrono::seconds(1));
+    }
 };
 
 priority_manager& get_local_priority_manager();

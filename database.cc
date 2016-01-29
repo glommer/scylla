@@ -1168,6 +1168,14 @@ future<> database::parse_system_tables(distributed<service::storage_proxy>& prox
 
 future<>
 database::init_system_keyspace() {
+    static thread_local int initialize_priority_manager  __attribute__((unused)) = [this] {
+        auto&& pm = service::get_local_priority_manager();
+        pm.update_pressure_function(service::priority_manager::priority_class_id::memtable_flush, [this] {
+            return 50 + 2 * _cf_stats.pending_memtables_flushes_count;
+        });
+        return 0;
+    }();
+
     bool durable = _cfg->data_file_directories().size() > 0;
     db::system_keyspace::make(*this, durable, _cfg->volatile_system_keyspace_for_testing());
 

@@ -899,6 +899,14 @@ db::commitlog::segment_manager::list_descriptors(sstring dirname) {
 }
 
 future<> db::commitlog::segment_manager::init() {
+    static thread_local int initialize_priority_manager  __attribute__((unused)) = [this] {
+        auto&& pm = service::get_local_priority_manager();
+        pm.update_pressure_function(service::priority_manager::priority_class_id::commitlog, [this] {
+            return 50 + totals.pending_writes;
+        });
+        return 0;
+    }();
+
     return list_descriptors(cfg.commit_log_location).then([this](std::vector<descriptor> descs) {
         segment_id_type id = std::chrono::duration_cast<std::chrono::milliseconds>(runtime::get_boot_time().time_since_epoch()).count() + 1;
         for (auto& d : descs) {
