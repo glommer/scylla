@@ -1395,7 +1395,7 @@ void sstable::prepare_write_components(::mutation_reader mr, uint64_t estimated_
         options.io_priority_class = pc;
 
         prepare_compression(_compression, *schema);
-        auto w = make_shared<file_writer>(make_compressed_file_output_stream(_data_file, std::move(options), &_compression));
+        auto w = make_shared<compressed_file_writer>(_data_file, std::move(options), &_compression);
         this->do_write_components(std::move(mr), estimated_partitions, std::move(schema), max_sstable_size, *w, pc);
         w->close().get();
         _data_file = file(); // w->close() closed _data_file
