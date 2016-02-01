@@ -1455,6 +1455,14 @@ future<uint64_t> sstable::bytes_on_disk() {
     });
 }
 
+uint64_t sstable::partitions() const {
+    if (_data_file_writer) {
+        return _data_file_writer->current_progress();
+    } else {
+        return 0;
+    }
+}
+
 const bool sstable::has_component(component_type f) const {
     return _components.count(f);
 }
