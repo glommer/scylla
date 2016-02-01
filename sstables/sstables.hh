@@ -335,7 +335,7 @@ private:
 
     void do_write_components(::mutation_reader mr,
             uint64_t estimated_partitions, schema_ptr schema, uint64_t max_sstable_size,
-            file_writer& out, const io_priority_class& pc);
+            const io_priority_class& pc);
     void prepare_write_components(::mutation_reader mr,
             uint64_t estimated_partitions, schema_ptr schema, uint64_t max_sstable_size,
             const io_priority_class& pc);
@@ -346,6 +346,8 @@ private:
     static thread_local std::unordered_map<sstring, unsigned> _shards_agreeing_to_remove_sstable;
 
     std::unordered_set<component_type, enum_hash<component_type>> _components;
+
+    ::shared_ptr<file_writer> _data_file_writer = {};
 
     bool _shared = true;  // across shards; safe default
     compression _compression;
