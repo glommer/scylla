@@ -28,9 +28,19 @@
 
 namespace sstables {
 
+struct progress_tracker {
+    uint64_t non_pushed = 0;
+    uint64_t pushed = 0;
+    void push() {
+        pushed += non_pushed;
+    }
+};
+
 class file_writer {
     output_stream<char> _out;
     size_t _offset = 0;
+protected:
+    progress_tracker _progress_tracker;
 public:
     file_writer(file f, file_output_stream_options options)
         : _out(make_file_output_stream(std::move(f), std::move(options))) {}
@@ -55,19 +65,28 @@ public:
     future<> close() {
         return _out.close();
     }
+    void add_progress_marker() {
+        _progress_tracker.non_pushed++;
+    };
+
+    uint64_t current_progress() const {
+        return _progress_tracker.pushed;
+    };
+
     size_t offset() {
         return _offset;
     }
 };
 
-output_stream<char> make_checksummed_file_output_stream(file f, struct checksum& cinfo, uint32_t& full_file_checksum, bool checksum_file, file_output_stream_options options);
+output_stream<char> make_checksummed_file_output_stream(file f, struct checksum& cinfo, uint32_t& full_file_checksum, bool checksum_file,
+                                                        file_output_stream_options options, progress_tracker& t);
 
 class checksummed_file_writer : public file_writer {
     checksum _c;
     uint32_t _full_checksum;
 public:
     checksummed_file_writer(file f, file_output_stream_options options, bool checksum_file = false)
-            : file_writer(make_checksummed_file_output_stream(std::move(f), _c, _full_checksum, checksum_file, options))
+            : file_writer(make_checksummed_file_output_stream(std::move(f), _c, _full_checksum, checksum_file, options, _progress_tracker))
             , _c({uint32_t(std::min(size_t(DEFAULT_CHUNK_SIZE), size_t(options.buffer_size)))})
             , _full_checksum(init_checksum_adler32()) {}
 
@@ -90,19 +109,21 @@ class checksummed_file_data_sink_impl : public data_sink_impl {
     struct checksum& _c;
     uint32_t& _full_checksum;
     bool _checksum_file;
+    progress_tracker& _progress_tracker;
 public:
-    checksummed_file_data_sink_impl(file f, struct checksum& c, uint32_t& full_file_checksum, bool checksum_file, file_output_stream_options options)
+    checksummed_file_data_sink_impl(file f, struct checksum& c, uint32_t& full_file_checksum, bool checksum_file, file_output_stream_options options, progress_tracker& t)
             : _out(make_file_output_stream(std::move(f), std::move(options)))
             , _c(c)
             , _full_checksum(full_file_checksum)
             , _checksum_file(checksum_file)
+            , _progress_tracker(t)
             {}
 
     future<> put(net::packet data) { abort(); }
     virtual future<> put(temporary_buffer<char> buf) override {
         // bufs will usually be a multiple of chunk size, but this won't be the case for
         // the last buffer being flushed.
-
+        _progress_tracker.push();
         if (!_checksum_file) {
             _full_checksum = checksum_adler32(_full_checksum, buf.begin(), buf.size());
         } else {
@@ -127,14 +148,15 @@ public:
 
 class checksummed_file_data_sink : public data_sink {
 public:
-    checksummed_file_data_sink(file f, struct checksum& cinfo, uint32_t& full_file_checksum, bool checksum_file, file_output_stream_options options)
-        : data_sink(std::make_unique<checksummed_file_data_sink_impl>(std::move(f), cinfo, full_file_checksum, checksum_file, std::move(options))) {}
+    checksummed_file_data_sink(file f, struct checksum& cinfo, uint32_t& full_file_checksum, bool checksum_file, file_output_stream_options options, progress_tracker& t)
+        : data_sink(std::make_unique<checksummed_file_data_sink_impl>(std::move(f), cinfo, full_file_checksum, checksum_file, std::move(options), t)) {}
 };
 
 inline
-output_stream<char> make_checksummed_file_output_stream(file f, struct checksum& cinfo, uint32_t& full_file_checksum, bool checksum_file, file_output_stream_options options) {
+output_stream<char> make_checksummed_file_output_stream(file f, struct checksum& cinfo, uint32_t& full_file_checksum,
+                                                        bool checksum_file, file_output_stream_options options, progress_tracker& t) {
     auto buffer_size = options.buffer_size;
-    return output_stream<char>(checksummed_file_data_sink(std::move(f), cinfo, full_file_checksum, checksum_file, std::move(options)), buffer_size, true);
+    return output_stream<char>(checksummed_file_data_sink(std::move(f), cinfo, full_file_checksum, checksum_file, std::move(options), t), buffer_size, true);
 }
 
 // compressed_file_data_sink_impl works as a filter for a file output stream,
@@ -144,10 +166,12 @@ class compressed_file_data_sink_impl : public data_sink_impl {
     output_stream<char> _out;
     sstables::compression* _compression_metadata;
     size_t _pos = 0;
+    progress_tracker& _progress_tracker;
 public:
-    compressed_file_data_sink_impl(file f, sstables::compression* cm, file_output_stream_options options)
+    compressed_file_data_sink_impl(file f, sstables::compression* cm, file_output_stream_options options, progress_tracker& t)
             : _out(make_file_output_stream(std::move(f), options))
-            , _compression_metadata(cm) {}
+            , _compression_metadata(cm)
+            , _progress_tracker(t) {}
 
     future<> put(net::packet data) { abort(); }
     virtual future<> put(temporary_buffer<char> buf) override {
@@ -161,6 +185,7 @@ public:
             throw std::runtime_error("possible overflow during compression");
         }
 
+        _progress_tracker.push();
         _compression_metadata->offsets.elements.push_back(_pos);
         // account compressed data + 32-bit checksum.
         _pos += len + 4;
@@ -187,22 +212,22 @@ public:
 
 class compressed_file_data_sink : public data_sink {
 public:
-    compressed_file_data_sink(file f, sstables::compression* cm, file_output_stream_options options)
+    compressed_file_data_sink(file f, sstables::compression* cm, file_output_stream_options options, progress_tracker& t)
         : data_sink(std::make_unique<compressed_file_data_sink_impl>(
-                std::move(f), cm, options)) {}
+                std::move(f), cm, options, t)) {}
 };
 
-static inline output_stream<char> make_compressed_file_output_stream(file f, file_output_stream_options options, sstables::compression* cm) {
+static inline output_stream<char> make_compressed_file_output_stream(file f, file_output_stream_options options, progress_tracker& t, sstables::compression* cm) {
     // buffer of output stream is set to chunk length, because flush must
     // happen every time a chunk was filled up.
     options.buffer_size = cm->uncompressed_chunk_length();
-    return output_stream<char>(compressed_file_data_sink(std::move(f), cm, options), options.buffer_size, true);
+    return output_stream<char>(compressed_file_data_sink(std::move(f), cm, options, t), options.buffer_size, true);
 }
 
 class compressed_file_writer : public file_writer {
 public:
     compressed_file_writer(file f, file_output_stream_options options, sstables::compression *cm)
-            : file_writer(make_compressed_file_output_stream(std::move(f), options, cm))
+            : file_writer(make_compressed_file_output_stream(std::move(f), options, _progress_tracker, cm))
             {}
     compressed_file_writer(compressed_file_writer&&) = delete;
     compressed_file_writer(const compressed_file_writer&) = default;
