@@ -199,4 +199,12 @@ static inline output_stream<char> make_compressed_file_output_stream(file f, fil
     return output_stream<char>(compressed_file_data_sink(std::move(f), cm, options), options.buffer_size, true);
 }
 
+class compressed_file_writer : public file_writer {
+public:
+    compressed_file_writer(file f, file_output_stream_options options, sstables::compression *cm)
+            : file_writer(make_compressed_file_output_stream(std::move(f), options, cm))
+            {}
+    compressed_file_writer(compressed_file_writer&&) = delete;
+    compressed_file_writer(const compressed_file_writer&) = default;
+};
 }
