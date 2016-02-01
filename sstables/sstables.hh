@@ -274,6 +274,10 @@ public:
         return _filter->memory_size();
     }
 
+    // Returns the number of partitions present in this SSTable. For an SSTable that is
+    // being currently written, that is the number of partitions already written to storage.
+    uint64_t partitions() const;
+
     // Returns the total bytes of all components.
     future<uint64_t> bytes_on_disk();
 

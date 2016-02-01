@@ -1347,6 +1347,7 @@ void sstable::do_write_components(::mutation_reader mr,
         }
         int16_t end_of_row = 0;
         write(*_data_file_writer, end_of_row);
+        _data_file_writer->add_progress_marker(1);
 
         // compute size of the current row.
         _c_stats.row_size = _data_file_writer->offset() - _c_stats.start_offset;
@@ -1453,6 +1454,14 @@ future<uint64_t> sstable::bytes_on_disk() {
     }).then([this] {
         return make_ready_future<uint64_t>(_bytes_on_disk);
     });
+}
+
+uint64_t sstable::partitions() const {
+    if (_data_file_writer) {
+        return _data_file_writer->current_progress();
+    } else {
+        return 0;
+    }
 }
 
 const bool sstable::has_component(component_type f) const {
