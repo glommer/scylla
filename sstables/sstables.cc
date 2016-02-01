@@ -1269,8 +1269,10 @@ static void seal_statistics(statistics& s, metadata_collector& collector,
 ///  @param out holds an output stream to data file.
 ///
 void sstable::do_write_components(::mutation_reader mr,
-        uint64_t estimated_partitions, schema_ptr schema, uint64_t max_sstable_size, file_writer& out,
+        uint64_t estimated_partitions, schema_ptr schema, uint64_t max_sstable_size,
         const io_priority_class& pc) {
+    assert(_data_file_writer);
+
     file_output_stream_options options;
     options.buffer_size = sstable_buffer_size;
     options.io_priority_class = pc;
@@ -1288,14 +1290,14 @@ void sstable::do_write_components(::mutation_reader mr,
 
     // Iterate through CQL partitions, then CQL rows, then CQL columns.
     // Each mt.all_partitions() entry is a set of clustered rows sharing the same partition key.
-    while (out.offset() < max_sstable_size) {
+    while (_data_file_writer->offset() < max_sstable_size) {
         mutation_opt mut = mr().get0();
         if (!mut) {
             break;
         }
 
         // Set current index of data to later compute row size.
-        _c_stats.start_offset = out.offset();
+        _c_stats.start_offset = _data_file_writer->offset();
 
         auto partition_key = key::from_partition_key(*schema, mut->key());
 
@@ -1307,10 +1309,10 @@ void sstable::do_write_components(::mutation_reader mr,
         p_key.value = bytes_view(partition_key);
 
         // Write index file entry from partition key into index file.
-        write_index_entry(*index, p_key, out.offset());
+        write_index_entry(*index, p_key, _data_file_writer->offset());
 
         // Write partition key into data file.
-        write(out, p_key);
+        write(*_data_file_writer, p_key);
 
         auto tombstone = mut->partition().partition_tombstone();
         deletion_time d;
@@ -1328,26 +1330,26 @@ void sstable::do_write_components(::mutation_reader mr,
             d.local_deletion_time = std::numeric_limits<int32_t>::max();
             d.marked_for_delete_at = std::numeric_limits<int64_t>::min();
         }
-        write(out, d);
+        write(*_data_file_writer, d);
 
         auto& partition = mut->partition();
         auto& static_row = partition.static_row();
 
-        write_static_row(out, *schema, static_row);
+        write_static_row(*_data_file_writer, *schema, static_row);
         for (const auto& rt: partition.row_tombstones()) {
             auto prefix = composite::from_clustering_element(*schema, rt.prefix());
-            write_range_tombstone(out, prefix, {}, rt.t());
+            write_range_tombstone(*_data_file_writer, prefix, {}, rt.t());
         }
 
         // Write all CQL rows from a given mutation partition.
         for (auto& clustered_row: partition.clustered_rows()) {
-            write_clustered_row(out, *schema, clustered_row);
+            write_clustered_row(*_data_file_writer, *schema, clustered_row);
         }
         int16_t end_of_row = 0;
-        write(out, end_of_row);
+        write(*_data_file_writer, end_of_row);
 
         // compute size of the current row.
-        _c_stats.row_size = out.offset() - _c_stats.start_offset;
+        _c_stats.row_size = _data_file_writer->offset() - _c_stats.start_offset;
         // update is about merging column_stats with the data being stored by collector.
         _collector.update(std::move(_c_stats));
         _c_stats.reset();
@@ -1384,8 +1386,9 @@ void sstable::prepare_write_components(::mutation_reader mr, uint64_t estimated_
         options.io_priority_class = pc;
 
         auto w = make_shared<checksummed_file_writer>(_data_file, std::move(options), checksum_file);
-        this->do_write_components(std::move(mr), estimated_partitions, std::move(schema), max_sstable_size, *w, pc);
-        w->close().get();
+        _data_file_writer = w;
+        this->do_write_components(std::move(mr), estimated_partitions, std::move(schema), max_sstable_size, pc);
+        _data_file_writer->close().get();
         _data_file = file(); // w->close() closed _data_file
 
         write_digest(filename(sstable::component_type::Digest), w->full_checksum());
@@ -1395,9 +1398,9 @@ void sstable::prepare_write_components(::mutation_reader mr, uint64_t estimated_
         options.io_priority_class = pc;
 
         prepare_compression(_compression, *schema);
-        auto w = make_shared<compressed_file_writer>(_data_file, std::move(options), &_compression);
-        this->do_write_components(std::move(mr), estimated_partitions, std::move(schema), max_sstable_size, *w, pc);
-        w->close().get();
+        _data_file_writer = make_shared<compressed_file_writer>(_data_file, std::move(options), &_compression);
+        this->do_write_components(std::move(mr), estimated_partitions, std::move(schema), max_sstable_size, pc);
+        _data_file_writer->close().get();
         _data_file = file(); // w->close() closed _data_file
 
         write_digest(filename(sstable::component_type::Digest), _compression.full_checksum());
