@@ -120,9 +120,10 @@ void stream_session::init_messaging_service_handler() {
         auto from = net::messaging_service::get_source(cinfo);
         return do_with(std::move(fm), [plan_id, from] (const auto& fm) {
             auto fm_size = fm.representation().size();
+            auto version = fm.schema_version();
             get_local_stream_manager().update_progress(plan_id, from.addr, progress_info::direction::IN, fm_size);
-            return service::get_schema_for_write(fm.schema_version(), from).then([&fm] (schema_ptr s) {
-                return service::get_storage_proxy().local().mutate_locally(std::move(s), fm);
+            return service::get_schema_for_write(version, from).then([&fm] (schema_ptr s) {
+                return service::get_storage_proxy().local().mutate_streaming_mutation(std::move(s), fm);
             });
         });
     });
@@ -133,9 +134,12 @@ void stream_session::init_messaging_service_handler() {
             session->receive_task_completed(cf_id);
             return session->get_db().invoke_on_all([ranges = std::move(ranges), cf_id] (database& db) {
                 auto& cf = db.find_column_family(cf_id);
+                std::vector<query::partition_range> query_ranges;
+                query_ranges.reserve(ranges.size());
                 for (auto& range : ranges) {
-                    cf.get_row_cache().invalidate(query::to_partition_range(range));
+                    query_ranges.push_back(query::to_partition_range(range));
                 }
+                return cf.flush_streaming_mutations(std::move(query_ranges));
             });
         });
     });

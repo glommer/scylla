@@ -86,6 +86,7 @@ column_family::column_family(schema_ptr schema, config config, db::commitlog& cl
     : _schema(std::move(schema))
     , _config(std::move(config))
     , _memtables(make_lw_shared<memtable_list>([this] { return seal_active_memtable(); }, [this] { return new_memtable(); }, _config.max_memtable_size))
+    , _streaming_memtables(make_lw_shared<memtable_list>([this] { return seal_active_streaming_memtable(); }, [this] { return new_memtable(); }, _config.max_memtable_size))
     , _sstables(make_lw_shared<sstable_list>())
     , _cache(_schema, sstables_as_mutation_source(), sstables_as_key_source(), global_cache_tracker())
     , _commitlog(&cl)
@@ -101,6 +102,7 @@ column_family::column_family(schema_ptr schema, config config, no_commitlog cl, 
     : _schema(std::move(schema))
     , _config(std::move(config))
     , _memtables(make_lw_shared<memtable_list>([this] { return seal_active_memtable(); }, [this] { return new_memtable(); }, _config.max_memtable_size))
+    , _streaming_memtables(make_lw_shared<memtable_list>([this] { return seal_active_streaming_memtable(); }, [this] { return new_memtable(); }, _config.max_memtable_size))
     , _sstables(make_lw_shared<sstable_list>())
     , _cache(_schema, sstables_as_mutation_source(), sstables_as_key_source(), global_cache_tracker())
     , _commitlog(nullptr)
@@ -139,6 +141,9 @@ column_family::~column_family() {
 logalloc::occupancy_stats column_family::occupancy() const {
     logalloc::occupancy_stats res;
     for (auto m : *_memtables) {
+        res += m->region().occupancy();
+    }
+    for (auto m : *_streaming_memtables) {
         res += m->region().occupancy();
     }
     return res;
@@ -289,7 +294,7 @@ column_family::make_reader(schema_ptr s, const query::partition_range& range, co
     }
 
     std::vector<mutation_reader> readers;
-    readers.reserve(_memtables->size() + _sstables->size());
+    readers.reserve(_memtables->size() + _streaming_memtables->size() + _sstables->size());
 
     // We're assuming that cache and memtables are both read atomically
     // for single-key queries, so we don't need to special case memtable
@@ -312,6 +317,10 @@ column_family::make_reader(schema_ptr s, const query::partition_range& range, co
     // https://github.com/scylladb/scylla/issues/185
 
     for (auto&& mt : *_memtables) {
+        readers.emplace_back(mt->make_reader(s, range, pc));
+    }
+
+    for (auto&& mt : *_streaming_memtables) {
         readers.emplace_back(mt->make_reader(s, range, pc));
     }
 
@@ -547,6 +556,62 @@ column_family::update_cache(memtable& m, lw_shared_ptr<sstable_list> old_sstable
 }
 
 future<>
+column_family::seal_active_streaming_memtable() {
+    if (!_config.enable_disk_writes) {
+       return make_ready_future<>();
+    }
+
+    auto old = _streaming_memtables->back();
+    if (old->empty()) {
+        return make_ready_future<>();
+    }
+    _streaming_memtables->add_memtable();
+    return with_gate(_streaming_flush_gate, [this, old] {
+        return with_lock(_sstables_lock.for_read(), [this, old] {
+            auto newtab = make_lw_shared<sstables::sstable>(_schema->ks_name(), _schema->cf_name(),
+                _config.datadir, get_new_sstable_generation(),
+                sstables::sstable::version_types::ka,
+                sstables::sstable::format_types::big);
+
+            newtab->set_unshared();
+
+            auto&& priority = service::get_local_stream_write_priority();
+            // This is almost like the main memtable flush.
+            // The first difference, is that we don't keep statistics. If we ever need, we'll keep them separate.
+            // But we don't want to polute the main stats about memtables with streaming memtables.
+            //
+            // But more importantly, we will not bother touching the cache after this flush. We have no reason to
+            // believe that those mutations are hot - if they are, they will soon be in the cache anyway, and the
+            // ones who are not will simply push everything away from the cache.
+            //
+            // Now, it is entirely possible that the cache holds data that should be invalidated by the entries in
+            // those memtables. We will simply invalidate those, regardless of our success or failure.
+            //
+            // We are not in as good as a position to know about the affected ranges as our caller is. So instead,
+            // we'll just not touch the cache at all, and leave that up to the caller.
+            return newtab->write_components(*old, incremental_backups_enabled(), priority).then([this, newtab, old] {
+                return newtab->open_data();
+            }).then_wrapped([this, old, newtab] (future<> ret) {
+                try {
+                    ret.get();
+
+                    auto old_sstables = _sstables;
+                    add_sstable(newtab);
+                    old->mark_flushed(newtab);
+
+                    trigger_compaction();
+                } catch (...) {
+                    dblog.error("failed to write streamed sstable: {}", std::current_exception());
+                    throw;
+                }
+            }).finally([this, old] {
+                _streaming_memtables->erase(old);
+            });
+        });
+    });
+}
+
+future<>
 column_family::seal_active_memtable() {
     auto old = _memtables->back();
     dblog.debug("Sealing active memtable, partitions: {}, occupancy: {}", old->partition_count(), old->occupancy());
@@ -656,8 +721,9 @@ column_family::start() {
 future<>
 column_family::stop() {
     _memtables->seal_active_memtable();
+    _streaming_memtables->seal_active_memtable();
     return _compaction_manager.remove(this).then([this] {
-        return _flush_queue->close();
+        return when_all(_flush_queue->close(), _streaming_flush_gate.close()).discard_result();
     });
 }
 
@@ -1711,6 +1777,11 @@ column_family::apply(const frozen_mutation& m, const schema_ptr& m_schema, const
     }
 }
 
+void column_family::apply_streaming_mutation(schema_ptr m_schema, const frozen_mutation& m) {
+    _streaming_memtables->active_memtable().apply(m, m_schema);
+    _streaming_memtables->seal_on_overflow();
+}
+
 void
 column_family::check_valid_rp(const db::replay_position& rp) const {
     if (rp < _highest_flushed_rp) {
@@ -1794,6 +1865,34 @@ future<> database::apply(schema_ptr s, const frozen_mutation& m) {
     }
     return throttle().then([this, &m, s = std::move(s)] {
         return do_apply(std::move(s), m);
+    });
+}
+
+future<> database::apply_streaming_mutation(schema_ptr s, const frozen_mutation& m) {
+    if (!s->is_synced()) {
+        throw std::runtime_error(sprint("attempted to mutate using not synced schema of %s.%s, version=%s",
+                                 s->ks_name(), s->cf_name(), s->version()));
+    }
+
+    // TODO (maybe): This will use the same memory region as memtables, so when
+    // one of them throttles, both will.
+    //
+    // It would be possible to provide further QoS for CQL originated memtables
+    // by keeping the streaming memtables into a different region, with its own
+    // separate limit.
+    //
+    // Because, however, there are many other limits in play that may kick in,
+    // I am not convinced that this will ever be a problem.
+    //
+    // If we do find ourselves in the situation that we are throttling incoming
+    // writes due to high level of streaming writes, and we are sure that this
+    // is the best solution, we can just change the memtable creation method so
+    // that each kind of memtable creates from a different region - and then
+    // update the throttle conditions accordingly.
+    return throttle().then([this, &m, s = std::move(s)] {
+        auto uuid = m.column_family_id();
+        auto& cf = find_column_family(uuid);
+        cf.apply_streaming_mutation(s, std::move(m));
     });
 }
 
@@ -2244,20 +2343,22 @@ future<> column_family::flush() {
     // FIXME: this will synchronously wait for this write to finish, but doesn't guarantee
     // anything about previous writes.
     _stats.pending_flushes++;
-    return _memtables->seal_active_memtable().finally([this]() mutable {
+    auto memtable_flush = _memtables->seal_active_memtable().finally([this]() mutable {
         _stats.pending_flushes--;
         // In origin memtable_switch_count is incremented inside
         // ColumnFamilyMeetrics Flush.run
         _stats.memtable_switch_count++;
         return make_ready_future<>();
     });
+    return when_all(std::move(memtable_flush), flush_streaming_mutations()).discard_result();
 }
 
 future<> column_family::flush(const db::replay_position& pos) {
+    auto memtable_flush = make_ready_future<>();
     // Technically possible if we've already issued the
     // sstable write, but it is not done yet.
-    if (pos < _highest_flushed_rp) {
-        return make_ready_future<>();
+    if (!(pos < _highest_flushed_rp)) {
+        memtable_flush = _memtables->seal_active_memtable();
     }
 
     // TODO: Origin looks at "secondary" memtables
@@ -2266,13 +2367,25 @@ future<> column_family::flush(const db::replay_position& pos) {
     // We ignore this for now and just say that if we're asked for
     // a CF and it exists, we pretty much have to have data that needs
     // flushing. Let's do it.
-    return _memtables->seal_active_memtable();
+    return when_all(std::move(memtable_flush), flush_streaming_mutations()).discard_result();
+}
+
+future<> column_family::flush_streaming_mutations(std::vector<query::partition_range> ranges) {
+    return _streaming_memtables->seal_active_memtable().finally([this, ranges = std::move(ranges)] {
+        if (_config.enable_cache) {
+            for (auto& range : ranges) {
+                _cache.invalidate(range);
+            }
+        }
+    });
 }
 
 void column_family::clear() {
     _cache.clear();
     _memtables->clear();
     _memtables->add_memtable();
+    _streaming_memtables->clear();
+    _streaming_memtables->add_memtable();
 }
 
 // NOTE: does not need to be futurized, but might eventually, depending on
@@ -2343,6 +2456,10 @@ void column_family::set_schema(schema_ptr s) {
                 _schema->ks_name(), _schema->cf_name(), _schema->id(), _schema->version(), s->version());
 
     for (auto& m : *_memtables) {
+        m->set_schema(s);
+    }
+
+    for (auto& m : *_streaming_memtables) {
         m->set_schema(s);
     }
 
