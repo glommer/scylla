@@ -1813,6 +1813,12 @@ future<> database::apply(schema_ptr s, const frozen_mutation& m) {
     });
 }
 
+future<> database::apply_streamed_mutation(schema_ptr s, frozen_mutation&& m) {
+    return do_with(std::move(m), [this, s] (const frozen_mutation& m) {
+        return apply(s, m);
+    });
+}
+
 keyspace::config
 database::make_keyspace_config(const keyspace_metadata& ksm) {
     // FIXME support multiple directories

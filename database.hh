@@ -650,6 +650,7 @@ public:
     future<lw_shared_ptr<query::result>> query(schema_ptr, const query::read_command& cmd, const std::vector<query::partition_range>& ranges);
     future<reconcilable_result> query_mutations(schema_ptr, const query::read_command& cmd, const query::partition_range& range);
     future<> apply(schema_ptr, const frozen_mutation&);
+    future<> apply_streamed_mutation(schema_ptr, frozen_mutation&&);
     keyspace::config make_keyspace_config(const keyspace_metadata& ksm);
     const sstring& get_snitch_name() const;
     future<> clear_snapshot(sstring tag, std::vector<sstring> keyspace_names);
