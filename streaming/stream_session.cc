@@ -117,13 +117,13 @@ void stream_session::init_messaging_service_handler() {
         });
     });
     ms().register_stream_mutation([] (const rpc::client_info& cinfo, UUID plan_id, frozen_mutation fm, unsigned dst_cpu_id) {
+        printf("Receiving a stream mutation message\n");
         auto from = net::messaging_service::get_source(cinfo);
-        return do_with(std::move(fm), [plan_id, from] (const auto& fm) {
-            auto fm_size = fm.representation().size();
-            get_local_stream_manager().update_progress(plan_id, from.addr, progress_info::direction::IN, fm_size);
-            return service::get_schema_for_write(fm.schema_version(), from).then([&fm] (schema_ptr s) {
-                return service::get_storage_proxy().local().mutate_locally(std::move(s), fm);
-            });
+        auto fm_size = fm.representation().size();
+        auto version = fm.schema_version();
+        get_local_stream_manager().update_progress(plan_id, from.addr, progress_info::direction::IN, fm_size);
+        return service::get_schema_for_write(version, from).then([fm = std::move(fm)] (schema_ptr s) mutable {
+            return service::get_storage_proxy().local().mutate_streamed_mutation(std::move(s), std::move(fm));
         });
     });
     ms().register_stream_mutation_done([] (const rpc::client_info& cinfo, UUID plan_id, std::vector<range<dht::token>> ranges, UUID cf_id, unsigned dst_cpu_id) {
