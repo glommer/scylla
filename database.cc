@@ -1713,13 +1713,18 @@ column_family::apply(const frozen_mutation& m, const schema_ptr& m_schema, const
     }
 }
 
+void column_family::apply_streaming_mutation(schema_ptr m_schema, frozen_mutation&& m) {
+    active_memtable(_streaming_memtables).apply(m, m_schema);
+    if (active_memtable().occupancy().total_space() >= _config.max_memtable_size) {
+        _memtables->seal_active_memtable();
+    }
+}
+
 void
 column_family::seal_on_overflow() {
-    ++_mutation_count;
     if (active_memtable().occupancy().total_space() >= _config.max_memtable_size) {
         // FIXME: if sparse, do some in-memory compaction first
         // FIXME: maybe merge with other in-memory memtables
-        _mutation_count = 0;
         seal_active_memtable();
     }
 }

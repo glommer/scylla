@@ -191,7 +191,6 @@ private:
         return _sstable_generation++ * smp::count + engine().cpu_id();
     }
 
-    unsigned _mutation_count = 0;
     db::replay_position _highest_flushed_rp;
     // Provided by the database that owns this commitlog
     db::commitlog* _commitlog;
