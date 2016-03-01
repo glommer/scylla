@@ -41,6 +41,7 @@
 #include <set>
 #include <iostream>
 #include <boost/functional/hash.hpp>
+#include <boost/range/algorithm/find.hpp>
 #include <experimental/optional>
 #include <string.h>
 #include "types.hh"
@@ -98,7 +99,53 @@ void make(database& db, bool durable, bool volatile_testing_only);
 
 class replay_position_reordered_exception : public std::exception {};
 
-using memtable_list = std::vector<lw_shared_ptr<memtable>>;
+class memtable_list {
+    using shared_memtable = lw_shared_ptr<memtable>;
+    std::vector<shared_memtable> _memtables;
+    std::function<future<> ()> _seal_fn;
+public:
+    memtable_list(std::function<future<> ()> seal_fn) : _memtables({}), _seal_fn(seal_fn) {}
+    memtable_list(const memtable_list& mt_list) : _memtables(mt_list._memtables), _seal_fn(mt_list._seal_fn) {}
+    shared_memtable& back() {
+        return _memtables.back();
+    }
+    void erase(shared_memtable element) {
+        _memtables.erase(boost::range::find(_memtables, element));
+    }
+    void clear() {
+        _memtables.clear();
+    }
+
+    size_t size() const {
+        return _memtables.size();
+    }
+
+    future<> seal_active_memtable() {
+        return _seal_fn();
+    }
+
+    void emplace_back(shared_memtable mt) {
+        _memtables.emplace_back(std::move(mt));
+    }
+
+    auto begin() noexcept {
+        return _memtables.begin();
+    }
+
+    auto begin() const noexcept {
+        return _memtables.begin();
+    }
+
+    auto end() noexcept {
+        return _memtables.end();
+    }
+
+    auto end() const noexcept {
+        return _memtables.end();
+    }
+
+};
+
 using sstable_list = sstables::sstable_list;
 
 // The CF has a "stats" structure. But we don't want all fields here,
