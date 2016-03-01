@@ -98,7 +98,31 @@ void make(database& db, bool durable, bool volatile_testing_only);
 
 class replay_position_reordered_exception : public std::exception {};
 
-using memtable_list = std::vector<lw_shared_ptr<memtable>>;
+class memtable_list {
+    using shared_memtable = lw_shared_ptr<memtable>;
+    std::vector<shared_memtable> _memtables;
+    std::function<future<> ()> _seal_fn;
+public:
+    memtable_list(std::function<future<> ()> seal_fn): _memtables(make_lw_shared(std::vector<shared_memtable>{})), _seal_fn(seal_fn) {}
+    shared_memtable& back() {
+        return _memtables.back();
+    }
+    void erase(shared_memtable element) {
+        _memtables->erase(boost::range::find(*_memtables, element));
+    }
+    void clear() {
+        _memtables.clear();
+    }
+
+    size_t size() const {
+        return _memtables.size();
+    }
+
+    emplace_back - and there is where the pointer comes from (add_memtable)
+
+    // Iterators so for() work
+};
+
 using sstable_list = sstables::sstable_list;
 
 // The CF has a "stats" structure. But we don't want all fields here,
@@ -152,7 +176,7 @@ private:
     schema_ptr _schema;
     config _config;
     stats _stats;
-    lw_shared_ptr<memtable_list> _memtables;
+    memtable_list _memtables;
     // generation -> sstable. Ordered by key so we can easily get the most recent.
     lw_shared_ptr<sstable_list> _sstables;
     // There are situations in which we need to stop writing sstables. Flushers will take
