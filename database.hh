@@ -41,6 +41,7 @@
 #include <set>
 #include <iostream>
 #include <boost/functional/hash.hpp>
+#include <boost/range/algorithm/find.hpp>
 #include <experimental/optional>
 #include <string.h>
 #include "types.hh"
@@ -103,12 +104,12 @@ class memtable_list {
     std::vector<shared_memtable> _memtables;
     std::function<future<> ()> _seal_fn;
 public:
-    memtable_list(std::function<future<> ()> seal_fn): _memtables(make_lw_shared(std::vector<shared_memtable>{})), _seal_fn(seal_fn) {}
+    memtable_list(std::function<future<> ()> seal_fn) : _memtables({}), _seal_fn(seal_fn) {}
     shared_memtable& back() {
         return _memtables.back();
     }
     void erase(shared_memtable element) {
-        _memtables->erase(boost::range::find(*_memtables, element));
+        _memtables.erase(boost::range::find(_memtables, element));
     }
     void clear() {
         _memtables.clear();
@@ -118,9 +119,30 @@ public:
         return _memtables.size();
     }
 
-    emplace_back - and there is where the pointer comes from (add_memtable)
+    future<> seal_active_memtable() {
+        return _seal_fn();
+    }
 
-    // Iterators so for() work
+    void emplace_back(shared_memtable mt) {
+        _memtables.emplace_back(std::move(mt));
+    }
+
+    auto begin() noexcept {
+        return _memtables.begin();
+    }
+
+    auto begin() const noexcept {
+        return _memtables.begin();
+    }
+
+    auto end() noexcept {
+        return _memtables.end();
+    }
+
+    auto end() const noexcept {
+        return _memtables.end();
+    }
+
 };
 
 using sstable_list = sstables::sstable_list;
@@ -176,7 +198,7 @@ private:
     schema_ptr _schema;
     config _config;
     stats _stats;
-    memtable_list _memtables;
+    lw_shared_ptr<memtable_list> _memtables;
     // generation -> sstable. Ordered by key so we can easily get the most recent.
     lw_shared_ptr<sstable_list> _sstables;
     // There are situations in which we need to stop writing sstables. Flushers will take
