@@ -160,6 +160,13 @@ private:
     rwlock _sstables_lock;
     mutable row_cache _cache; // Cache covers only sstables.
     int64_t _sstable_generation = 1;
+
+    int64_t get_new_sstable_generation() {
+        // FIXME: better way of ensuring we don't attempt to
+        // overwrite an existing table.
+        return _sstable_generation++ * smp::count + engine().cpu_id();
+    }
+
     unsigned _mutation_count = 0;
     db::replay_position _highest_flushed_rp;
     // Provided by the database that owns this commitlog
