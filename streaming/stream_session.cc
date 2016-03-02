@@ -117,7 +117,6 @@ void stream_session::init_messaging_service_handler() {
         });
     });
     ms().register_stream_mutation([] (const rpc::client_info& cinfo, UUID plan_id, frozen_mutation fm, unsigned dst_cpu_id) {
-        printf("Receiving a stream mutation message\n");
         auto from = net::messaging_service::get_source(cinfo);
         auto fm_size = fm.representation().size();
         auto version = fm.schema_version();
@@ -133,9 +132,11 @@ void stream_session::init_messaging_service_handler() {
             session->receive_task_completed(cf_id);
             return session->get_db().invoke_on_all([ranges = std::move(ranges), cf_id] (database& db) {
                 auto& cf = db.find_column_family(cf_id);
-                for (auto& range : ranges) {
-                    cf.get_row_cache().invalidate(query::to_partition_range(range));
-                }
+                return cf.flush_streaming_mutation().then([&cf, ranges = std::move(ranges)] () mutable {
+                    for (auto& range : ranges) {
+                        cf.get_row_cache().invalidate(query::to_partition_range(range));
+                    }
+                });
             });
         });
     });

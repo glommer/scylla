@@ -199,6 +199,25 @@ private:
     config _config;
     stats _stats;
     lw_shared_ptr<memtable_list> _memtables;
+ 
+    // We will still want the mutations coming through the wire to go to a
+    // memtable staging area.  This has two major advantages:
+    //
+    // first, it will allow us to properly order the partitions. They are
+    // hopefuly sent in order but we can't really guarantee that without
+    // sacrificing sender-side parallelism.
+    //
+    // second and more important, we will be able to coalesce writes from
+    // multiple plan_id's and even multiple senders, as well as automatically
+    // tapping into the dirty memory throttling mechanism, guaranteeing we will
+    // not overload the server.
+    //
+    // In older incarnations, we simply commited the mutations to memtables.
+    // However, doing that makes it harder for us to provide QoS within the
+    // disk subsystem. Keeping them in separate memtables allow us to properly
+    // classify those streams into its own class
+    lw_shared_ptr<memtable_list> _streaming_memtables;
+
     // generation -> sstable. Ordered by key so we can easily get the most recent.
     lw_shared_ptr<sstable_list> _sstables;
     // There are situations in which we need to stop writing sstables. Flushers will take
@@ -227,7 +246,8 @@ private:
     void update_stats_for_new_sstable(uint64_t new_sstable_data_size);
     void add_sstable(sstables::sstable&& sstable);
     void add_sstable(lw_shared_ptr<sstables::sstable> sstable);
-    void add_memtable();
+    void add_memtable(lw_shared_ptr<memtable_list> mt_list);
+    void add_memtable() { add_memtable(_memtables); }
     future<stop_iteration> try_flush_memtable_to_sstable(lw_shared_ptr<memtable> memt);
     future<> update_cache(memtable&, lw_shared_ptr<sstable_list> old_sstables);
     struct merge_comparator;
@@ -276,7 +296,9 @@ public:
     // FIXME: in case a query is satisfied from a single memtable, avoid a copy
     using const_mutation_partition_ptr = std::unique_ptr<const mutation_partition>;
     using const_row_ptr = std::unique_ptr<const row>;
-    memtable& active_memtable() { return *_memtables->back(); }
+    memtable& active_memtable(lw_shared_ptr<memtable_list> mt_list) { return *mt_list->back(); }
+    memtable& active_memtable() { return active_memtable(_memtables); }
+
     const row_cache& get_row_cache() const {
         return _cache;
     }
@@ -301,6 +323,7 @@ public:
     // The mutation is always upgraded to current schema.
     void apply(const frozen_mutation& m, const schema_ptr& m_schema, const db::replay_position& = db::replay_position());
     void apply(const mutation& m, const db::replay_position& = db::replay_position());
+    void apply_streaming_mutation(schema_ptr, frozen_mutation&&);
 
     // Returns at most "cmd.limit" rows
     future<lw_shared_ptr<query::result>> query(schema_ptr,
@@ -313,6 +336,8 @@ public:
     future<> stop();
     future<> flush();
     future<> flush(const db::replay_position&);
+    future<> flush_streaming_mutation();
+
     void clear(); // discards memtable(s) without flushing them to disk.
     future<db::replay_position> discard_sstables(db_clock::time_point);
 
@@ -434,6 +459,8 @@ private:
     // one are also complete
     future<> seal_active_memtable();
 
+    future<> seal_active_streaming_memtable();
+
     // filter manifest.json files out
     static bool manifest_json_filter(const sstring& fname);
 
@@ -445,7 +472,8 @@ private:
     template <typename Func>
     future<bool> for_all_partitions(schema_ptr, Func&& func) const;
     future<sstables::entry_descriptor> probe_file(sstring sstdir, sstring fname);
-    void seal_on_overflow();
+    void seal_on_overflow(lw_shared_ptr<memtable_list> mt_list);
+    void seal_on_overflow() { seal_on_overflow(_memtables); }
     void check_valid_rp(const db::replay_position&) const;
 public:
     // Iterate over all partitions.  Protocol is the same as std::all_of(),
@@ -702,7 +730,7 @@ public:
     future<lw_shared_ptr<query::result>> query(schema_ptr, const query::read_command& cmd, const std::vector<query::partition_range>& ranges);
     future<reconcilable_result> query_mutations(schema_ptr, const query::read_command& cmd, const query::partition_range& range);
     future<> apply(schema_ptr, const frozen_mutation&);
-    future<> apply_streamed_mutation(schema_ptr, frozen_mutation&&);
+    future<> apply_streaming_mutation(schema_ptr, frozen_mutation&&);
     keyspace::config make_keyspace_config(const keyspace_metadata& ksm);
     const sstring& get_snitch_name() const;
     future<> clear_snapshot(sstring tag, std::vector<sstring> keyspace_names);
