@@ -142,7 +142,15 @@ void stream_session::init_messaging_service_handler() {
         const auto& from = cinfo.retrieve_auxiliary<gms::inet_address>("baddr");
         return smp::submit_to(dst_cpu_id, [plan_id, from, dst_cpu_id] () mutable {
             auto session = get_session(plan_id, from, "COMPLETE_MESSAGE");
-            session->complete();
+            return session->get_db().invoke_on_all([session] (database& db) {
+                auto info = session->get_session_info();
+                return parallel_for_each(info.receiving_summaries.begin(), info.receiving_summaries.end(), [&db] (auto& summary) {
+                    auto& cf = db.find_column_family(summary.cf_id);
+                    return cf.flush_streaming_mutation();
+                }); 
+            }).finally([session] {
+                session->complete();
+            });
         });
     });
 }

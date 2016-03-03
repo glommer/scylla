@@ -825,7 +825,7 @@ future<>
 storage_proxy::mutate_streamed_mutation(const schema_ptr& s, frozen_mutation&& m) {
     auto shard = _db.local().shard_of(m);
     return _db.invoke_on(shard, [m = std::move(m), gs = global_schema_ptr(s)] (database& db) mutable -> future<> {
-        return db.apply_streamed_mutation(gs, std::move(m));
+        return db.apply_streaming_mutation(gs, std::move(m));
     });
 }
 

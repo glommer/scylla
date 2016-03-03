@@ -86,6 +86,7 @@ column_family::column_family(schema_ptr schema, config config, db::commitlog& cl
     : _schema(std::move(schema))
     , _config(std::move(config))
     , _memtables(make_lw_shared<memtable_list>([this] { return seal_active_memtable(); }))
+    , _streaming_memtables(make_lw_shared<memtable_list>([this] { return seal_active_streaming_memtable(); }))
     , _sstables(make_lw_shared<sstable_list>())
     , _cache(_schema, sstables_as_mutation_source(), sstables_as_key_source(), global_cache_tracker())
     , _commitlog(&cl)
@@ -93,6 +94,7 @@ column_family::column_family(schema_ptr schema, config config, db::commitlog& cl
     , _flush_queue(std::make_unique<memtable_flush_queue>())
 {
     add_memtable();
+    add_memtable(_streaming_memtables);
     if (!_config.enable_disk_writes) {
         dblog.warn("Writes disabled, column family no durable.");
     }
@@ -102,6 +104,7 @@ column_family::column_family(schema_ptr schema, config config, no_commitlog cl, 
     : _schema(std::move(schema))
     , _config(std::move(config))
     , _memtables(make_lw_shared<memtable_list>([this] { return seal_active_memtable(); }))
+    , _streaming_memtables(make_lw_shared<memtable_list>([this] { return seal_active_streaming_memtable(); }))
     , _sstables(make_lw_shared<sstable_list>())
     , _cache(_schema, sstables_as_mutation_source(), sstables_as_key_source(), global_cache_tracker())
     , _commitlog(nullptr)
@@ -109,6 +112,7 @@ column_family::column_family(schema_ptr schema, config config, no_commitlog cl, 
     , _flush_queue(std::make_unique<memtable_flush_queue>())
 {
     add_memtable();
+    add_memtable(_streaming_memtables);
     if (!_config.enable_disk_writes) {
         dblog.warn("Writes disabled, column family no durable.");
     }
@@ -291,7 +295,7 @@ column_family::make_reader(schema_ptr s, const query::partition_range& range, co
     }
 
     std::vector<mutation_reader> readers;
-    readers.reserve(_memtables->size() + _sstables->size());
+    readers.reserve(_memtables->size() + _streaming_memtables->size() + _sstables->size());
 
     // We're assuming that cache and memtables are both read atomically
     // for single-key queries, so we don't need to special case memtable
@@ -314,6 +318,10 @@ column_family::make_reader(schema_ptr s, const query::partition_range& range, co
     // https://github.com/scylladb/scylla/issues/185
 
     for (auto&& mt : *_memtables) {
+        readers.emplace_back(mt->make_reader(s, range, pc));
+    }
+
+    for (auto&& mt : *_streaming_memtables) {
         readers.emplace_back(mt->make_reader(s, range, pc));
     }
 
@@ -533,8 +541,8 @@ void column_family::add_sstable(lw_shared_ptr<sstables::sstable> sstable) {
     _sstables->emplace(generation, std::move(sstable));
 }
 
-void column_family::add_memtable() {
-    _memtables->emplace_back(make_lw_shared<memtable>(_schema, _config.dirty_memory_region_group));
+void column_family::add_memtable(lw_shared_ptr<memtable_list> mt_list) {
+    mt_list->emplace_back(make_lw_shared<memtable>(_schema, _config.dirty_memory_region_group));
 }
 
 future<>
@@ -546,6 +554,58 @@ column_family::update_cache(memtable& m, lw_shared_ptr<sstable_list> old_sstable
     } else {
        return make_ready_future<>();
     }
+}
+
+future<>
+column_family::seal_active_streaming_memtable() {
+    if (!_config.enable_disk_writes) {
+       return make_ready_future<>();
+    }
+
+    auto old = _streaming_memtables->back();
+    if (old->empty()) {
+        dblog.debug("Memtable is empty");
+        return make_ready_future<>();
+    }
+
+    printf("Flushing, has %ld partitions\n", old->partition_count());
+    add_memtable(_streaming_memtables);
+
+    auto newtab = make_lw_shared<sstables::sstable>(_schema->ks_name(), _schema->cf_name(),
+        _config.datadir, get_new_sstable_generation(),
+        sstables::sstable::version_types::ka,
+        sstables::sstable::format_types::big);
+
+    newtab->set_unshared();
+
+    auto&& priority = service::get_local_mutation_stream_priority();
+    return newtab->write_components(*old, incremental_backups_enabled(), priority).then([this, newtab, old] {
+        return newtab->open_data();
+    }).then_wrapped([this, old, newtab] (future<> ret) {
+        try {
+            ret.get();
+
+            auto old_sstables = _sstables;
+            add_sstable(newtab);
+            trigger_compaction();
+
+            return update_cache(*old, std::move(old_sstables)).then_wrapped([this, old] (future<> f) {
+                try {
+                    f.get();
+                } catch(...) {
+                    dblog.error("failed to move streaming memtable to cache: {}", std::current_exception());
+                }
+                // FIXME: Instead of updating cache, just invalidate the entries.
+                _streaming_memtables->erase(old);
+            });
+//            return make_ready_future<>();
+        } catch (...) {
+            dblog.error("failed to write sstable: {}", std::current_exception());
+            throw;;
+        }
+        return make_ready_future<>();
+        // FIXME: memtable main code sleeps here. Should we?
+    });
 }
 
 future<>
@@ -1712,12 +1772,17 @@ column_family::apply(const frozen_mutation& m, const schema_ptr& m_schema, const
     }
 }
 
+void column_family::apply_streaming_mutation(schema_ptr m_schema, frozen_mutation&& m) {
+    active_memtable(_streaming_memtables).apply(m, m_schema);
+    seal_on_overflow(_streaming_memtables);
+}
+
 void
-column_family::seal_on_overflow() {
-    if (active_memtable().occupancy().total_space() >= _config.max_memtable_size) {
+column_family::seal_on_overflow(lw_shared_ptr<memtable_list> mt_list) {
+    if (active_memtable(mt_list).occupancy().total_space() >= _config.max_memtable_size) {
         // FIXME: if sparse, do some in-memory compaction first
         // FIXME: maybe merge with other in-memory memtables
-        _memtables->seal_active_memtable();
+        mt_list->seal_active_memtable();
     }
 }
 
@@ -1807,10 +1872,19 @@ future<> database::apply(schema_ptr s, const frozen_mutation& m) {
     });
 }
 
-future<> database::apply_streamed_mutation(schema_ptr s, frozen_mutation&& m) {
-    return do_with(std::move(m), [this, s] (const frozen_mutation& m) {
-        return apply(s, m);
-    });
+future<> database::apply_streaming_mutation(schema_ptr s, frozen_mutation&& m) {
+    // I'm doing a nullcheck here since the init code path for db etc
+    // is a little in flux and commitlog is created only when db is
+    // initied from datadir.
+    auto uuid = m.column_family_id();
+    auto& cf = find_column_family(uuid);
+    if (!s->is_synced()) {
+        throw std::runtime_error(sprint("attempted to mutate using not synced schema of %s.%s, version=%s",
+                                 s->ks_name(), s->cf_name(), s->version()));
+    }
+
+    cf.apply_streaming_mutation(s, std::move(m));
+    return make_ready_future<>();
 }
 
 keyspace::config
@@ -2269,6 +2343,11 @@ future<> column_family::flush() {
     });
 }
 
+future<> column_family::flush_streaming_mutation() {
+    // FIXME: Will have to use a gate for the complete message
+    return _streaming_memtables->seal_active_memtable();
+}
+
 future<> column_family::flush(const db::replay_position& pos) {
     // Technically possible if we've already issued the
     // sstable write, but it is not done yet.
@@ -2359,6 +2438,10 @@ void column_family::set_schema(schema_ptr s) {
                 _schema->ks_name(), _schema->cf_name(), _schema->id(), _schema->version(), s->version());
 
     for (auto& m : *_memtables) {
+        m->set_schema(s);
+    }
+
+    for (auto& m : *_streaming_memtables) {
         m->set_schema(s);
     }
 
