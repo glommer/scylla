@@ -103,9 +103,12 @@ class memtable_list {
     using shared_memtable = lw_shared_ptr<memtable>;
     std::vector<shared_memtable> _memtables;
     std::function<future<> ()> _seal_fn;
+    std::function<shared_memtable ()> _new_memtable;
 public:
-    memtable_list(std::function<future<> ()> seal_fn) : _memtables({}), _seal_fn(seal_fn) {}
-    memtable_list(const memtable_list& mt_list) : _memtables(mt_list._memtables), _seal_fn(mt_list._seal_fn) {}
+    memtable_list(std::function<future<> ()> seal_fn, std::function<shared_memtable()> new_mt) : _memtables({}), _seal_fn(seal_fn), _new_memtable(new_mt) {
+        add_memtable();
+    }
+
     shared_memtable& back() {
         return _memtables.back();
     }
@@ -122,10 +125,6 @@ public:
 
     future<> seal_active_memtable() {
         return _seal_fn();
-    }
-
-    void emplace_back(shared_memtable mt) {
-        _memtables.emplace_back(std::move(mt));
     }
 
     auto begin() noexcept {
@@ -146,6 +145,10 @@ public:
 
     memtable& active_memtable() {
         return *_memtables.back();
+    }
+
+    void add_memtable() {
+        _memtables.emplace_back(_new_memtable());
     }
 };
 
@@ -231,7 +234,7 @@ private:
     void update_stats_for_new_sstable(uint64_t disk_space_used_by_sstable);
     void add_sstable(sstables::sstable&& sstable);
     void add_sstable(lw_shared_ptr<sstables::sstable> sstable);
-    void add_memtable();
+    lw_shared_ptr<memtable> new_memtable();
     future<stop_iteration> try_flush_memtable_to_sstable(lw_shared_ptr<memtable> memt);
     future<> update_cache(memtable&, lw_shared_ptr<sstable_list> old_sstables);
     struct merge_comparator;
