@@ -568,6 +568,7 @@ column_family::seal_active_streaming_memtable() {
         return make_ready_future<>();
     }
     _streaming_memtables->add_memtable();
+    _streaming_memtables->erase(old);
     return with_gate(_streaming_flush_gate, [this, old] {
         return with_lock(_sstables_lock.for_read(), [this, old] {
             auto newtab = make_lw_shared<sstables::sstable>(_schema->ks_name(), _schema->cf_name(),
@@ -596,18 +597,12 @@ column_family::seal_active_streaming_memtable() {
             }).then_wrapped([this, old, newtab] (future<> ret) {
                 try {
                     ret.get();
-
-                    auto old_sstables = _sstables;
                     add_sstable(newtab);
-                    old->mark_flushed(newtab);
-
                     trigger_compaction();
                 } catch (...) {
                     dblog.error("failed to write streamed sstable: {}", std::current_exception());
                     throw;
                 }
-            }).finally([this, old] {
-                _streaming_memtables->erase(old);
             });
         });
     });
