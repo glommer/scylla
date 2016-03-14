@@ -557,8 +557,31 @@ column_family::update_cache(memtable& m, lw_shared_ptr<sstable_list> old_sstable
     }
 }
 
+void
+column_family::finish_streaming_delayed_flushes() {
+    if (_waiting_streaming_flushes.empty()) {
+        return;
+    }
+    _delayed_streaming_flush.cancel();
+
+    auto current_waiters = std::vector<promise<>>();
+    _waiting_streaming_flushes.swap(current_waiters);
+    seal_active_streaming_memtable(flush_behavior::immediate).then_wrapped([this, current_waiters = std::move(current_waiters)] (future <> f) mutable {
+        std::function<void (promise<>&)> handle_pr;
+        if (f.failed()) {
+            // get_exception will call the state's move constructor, so we can only do it once.
+            // If we call this twice on the same future the second one will crash. Initializing it
+            // at the lambda capture list is a great way to make sure that we're okay.
+            handle_pr = [ep = f.get_exception()] (auto& waiter) { waiter.set_exception(ep); };
+        } else {
+            handle_pr = [] (auto& waiter) { waiter.set_value(); };
+        }
+        std::for_each(current_waiters.begin(), current_waiters.end(), handle_pr);
+    });
+}
+
 future<>
-column_family::seal_active_streaming_memtable() {
+column_family::seal_active_streaming_memtable(column_family::flush_behavior behavior) {
     if (!_config.enable_disk_writes) {
        return make_ready_future<>();
     }
@@ -567,6 +590,18 @@ column_family::seal_active_streaming_memtable() {
     if (old->empty()) {
         return make_ready_future<>();
     }
+
+    if (behavior == flush_behavior::delayed) {
+        if (!_streaming_memtables->should_flush()) {
+            auto is_first = _waiting_streaming_flushes.empty();
+            _waiting_streaming_flushes.push_back(promise<>());
+            if (is_first) {
+                _delayed_streaming_flush.arm(1000ms);
+            }
+            return _waiting_streaming_flushes.back().get_future();
+        }
+    }
+
     _streaming_memtables->add_memtable();
     _streaming_memtables->erase(old);
     return with_gate(_streaming_flush_gate, [this, old] {
@@ -1792,7 +1827,9 @@ column_family::apply(const frozen_mutation& m, const schema_ptr& m_schema, const
 
 void column_family::apply_streaming_mutation(schema_ptr m_schema, const frozen_mutation& m) {
     _streaming_memtables->active_memtable().apply(m, m_schema);
-    _streaming_memtables->seal_on_overflow();
+    if (_streaming_memtables->should_flush()) {
+        finish_streaming_delayed_flushes();
+    }
 }
 
 void
@@ -2363,7 +2400,7 @@ future<> column_family::flush() {
         _stats.memtable_switch_count++;
         return make_ready_future<>();
     });
-    return when_all(std::move(memtable_flush), flush_streaming_mutations()).discard_result();
+    return when_all(std::move(memtable_flush), seal_active_streaming_memtable(flush_behavior::immediate)).discard_result();
 }
 
 future<> column_family::flush(const db::replay_position& pos) {
@@ -2380,7 +2417,7 @@ future<> column_family::flush(const db::replay_position& pos) {
     // We ignore this for now and just say that if we're asked for
     // a CF and it exists, we pretty much have to have data that needs
     // flushing. Let's do it.
-    return when_all(std::move(memtable_flush), flush_streaming_mutations()).discard_result();
+    return when_all(std::move(memtable_flush), seal_active_streaming_memtable(flush_behavior::immediate)).discard_result();
 }
 
 // FIXME: We can do much better than this in terms of cache management. Right

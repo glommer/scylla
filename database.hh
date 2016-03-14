@@ -175,8 +175,13 @@ public:
     void add_memtable() {
         _memtables.emplace_back(_new_memtable());
     }
+
+    bool should_flush() {
+        return active_memtable().occupancy().total_space() >= _max_memtable_size;
+    }
+
     void seal_on_overflow() {
-        if (active_memtable().occupancy().total_space() >= _max_memtable_size) {
+        if (should_flush()) {
             // FIXME: if sparse, do some in-memory compaction first
             // FIXME: maybe merge with other in-memory memtables
             _seal_fn();
@@ -522,7 +527,32 @@ private:
     // waiting on this future. This is useful in situations where we want to
     // synchronously flush data to disk.
     future<> seal_active_memtable();
-    future<> seal_active_streaming_memtable();
+
+    // I am assuming here that the repair process will potentially send ranges containing
+    // few mutations, definitely not enough to fill a memtable. It wants to know whether or
+    // not each of those ranges individually succeeded or failed, so we need a future for
+    // each.
+    //
+    // One of the ways to fix that, is changing the repair itself to send more mutations at
+    // a single batch. But relying on that is a bad idea for two reasons:
+    //
+    // First, the goals of the SSTable writer and the repair sender are at odds. The SSTable
+    // writer wants to write as few SSTables as possible, while the repair sender wants to
+    // break down the range in pieces as small as it can and checksum them individually, so
+    // it doesn't have to send a lot of mutations for no reason.
+    //
+    // Second, even if the repair process wants to process larger ranges at once, some ranges
+    // themselves may be small. So while most ranges would be large, we would still have
+    // potentially some fairly small SSTables lying around.
+    //
+    // The best course of action in this case is to coalesce the incoming streams write-side.
+    // repair can now choose whatever strategy - small or big ranges - it wants, resting assure
+    // that the incoming memtables will be coalesced together.
+    enum class flush_behavior { delayed, immediate };
+    std::vector<promise<>> _waiting_streaming_flushes;
+    timer<> _delayed_streaming_flush{[this] { finish_streaming_delayed_flushes(); }};
+    future<> seal_active_streaming_memtable(flush_behavior behavior = flush_behavior::delayed);
+    void finish_streaming_delayed_flushes();
 
     // filter manifest.json files out
     static bool manifest_json_filter(const sstring& fname);
