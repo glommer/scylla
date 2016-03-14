@@ -563,12 +563,50 @@ column_family::update_cache(memtable& m, lw_shared_ptr<sstable_list> old_sstable
     }
 }
 
+// FIXME: because we are coalescing, it could be that mutations belonging to the same
+// range end up in two different tables. Technically, we should wait for both. However,
+// the only way we have to make this happen now is to wait on all previous writes. This
+// certainly is an overkill, so we won't do it. We can fix this longer term by looking
+// at the PREPARE messages, and then noting what is the minimum future we should be
+// waiting for.
 future<>
-column_family::seal_active_streaming_memtable() {
+column_family::finish_streaming_delayed_flushes() {
+    _delayed_streaming_flush.cancel();
+
+    auto current_waiters = std::move(_waiting_streaming_flushes);
+    _waiting_streaming_flushes = make_lw_shared<shared_promise<>>();
+
+    return seal_active_streaming_memtable(flush_behavior::immediate).then_wrapped([this, current_waiters = std::move(current_waiters)] (future <> f) mutable {
+        if (f.failed()) {
+            current_waiters->set_exception(f.get_exception());
+        } else {
+            current_waiters->set_value();
+        }
+    });
+}
+
+future<>
+column_family::seal_active_streaming_memtable(column_family::flush_behavior behavior) {
     auto old = _streaming_memtables->back();
     if (old->empty()) {
         return make_ready_future<>();
     }
+
+    if (behavior == flush_behavior::delayed) {
+        if (!_streaming_memtables->should_flush()) {
+            if (!_waiting_streaming_flushes) {
+                _waiting_streaming_flushes = make_lw_shared<shared_promise<>>();
+                _delayed_streaming_flush.arm(2s);
+            }
+            return _waiting_streaming_flushes->get_shared_future().finally([spr = _waiting_streaming_flushes] {});
+        } else {
+            // We will recurse here, but only once. The second call will be
+            // guaranteed to have immediate flush behavior. We need to do that
+            // so we flush the existing queue.
+            return finish_streaming_delayed_flushes();
+        }
+    }
+
     _streaming_memtables->add_memtable();
     _streaming_memtables->erase(old);
     return with_gate(_streaming_flush_gate, [this, old] {
@@ -1819,7 +1857,9 @@ column_family::apply(const frozen_mutation& m, const schema_ptr& m_schema, const
 
 void column_family::apply_streaming_mutation(schema_ptr m_schema, const frozen_mutation& m) {
     _streaming_memtables->active_memtable().apply(m, m_schema);
-    _streaming_memtables->seal_on_overflow();
+    if (_streaming_memtables->should_flush()) {
+        finish_streaming_delayed_flushes();
+    }
 }
 
 void
