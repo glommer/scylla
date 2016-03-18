@@ -415,6 +415,16 @@ static void split_and_add(std::vector<::range<dht::token>>& ranges,
     ranges.push_back(halves.first);
     ranges.push_back(halves.second);
 }
+// We don't need to wait for one checksum to finish before we start the
+// next, but doing too many of these operations in parallel also doesn't
+// make sense, so we limit the number of concurrent ongoing checksum
+// requests with a semaphore.
+//
+// FIXME: We shouldn't use a magic number here, but rather bind it to
+// some resource. Otherwise we'll be doing too little in some machines,
+// and too much in others.
+constexpr int parallelism = 10;
+static thread_local semaphore parallelism_semaphore(parallelism);
 
 // Repair a single cf in a single local range.
 // Comparable to RepairJob in Origin.
@@ -461,21 +471,12 @@ static future<> repair_cf_range(seastar::sharded<database>& db,
         split_and_add(ranges, range, estimated_partitions, 100);
     }
 
-    // We don't need to wait for one checksum to finish before we start the
-    // next, but doing too many of these operations in parallel also doesn't
-    // make sense, so we limit the number of concurrent ongoing checksum
-    // requests with a semaphore.
-    //
-    // FIXME: We shouldn't use a magic number here, but rather bind it to
-    // some resource. Otherwise we'll be doing too little in some machines,
-    // and too much in others.
-    constexpr int parallelism = 10;
-    return do_with(semaphore(parallelism), true, std::move(keyspace), std::move(cf), std::move(ranges),
-        [&db, &neighbors, parallelism] (auto& sem, auto& success, const auto& keyspace, const auto& cf, const auto& ranges) {
-        return do_for_each(ranges, [&sem, &success, &db, &neighbors, &keyspace, &cf]
+    return do_with(true, std::move(keyspace), std::move(cf), std::move(ranges),
+        [&db, &neighbors] (auto& success, const auto& keyspace, const auto& cf, const auto& ranges) {
+        return do_for_each(ranges, [&success, &db, &neighbors, &keyspace, &cf]
                            (const auto& range) {
             check_in_shutdown();
-            return sem.wait(1).then([&sem, &success, &db, &neighbors, &keyspace, &cf, &range] {
+            return parallelism_semaphore.wait(1).then([&success, &db, &neighbors, &keyspace, &cf, &range] {
                 // Ask this node, and all neighbors, to calculate checksums in
                 // this range. When all are done, compare the results, and if
                 // there are any differences, sync the content of this range.
@@ -532,13 +533,11 @@ static future<> repair_cf_range(seastar::sharded<database>& db,
                     // tell the caller.
                     success = false;
                     logger.warn("Failed sync of range {}: {}", range, eptr);
-                }).finally([&sem] { sem.signal(1); });
+                }).finally([] { parallelism_semaphore.signal(1); });
             });
-        }).finally([&sem, &success, parallelism] {
-            return sem.wait(parallelism).then([&success] {
-                return success ? make_ready_future<>() :
-                        make_exception_future<>(std::runtime_error("Checksum or sync of partial range failed"));
-            });
+        }).finally([&success] {
+            return success ? make_ready_future<>() :
+                    make_exception_future<>(std::runtime_error("Checksum or sync of partial range failed"));
         });
     });
 }
