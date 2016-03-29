@@ -249,6 +249,107 @@ class mp_row_consumer : public row_consumer {
             _pending_collection = {};
         }
     }
+
+    // Treating range tombstones: we still don't have proper support for range tombstones,
+    // because CQL won't generate them in the 2.x series. (CASSANDRA-6237 describes that in detail).
+    // However, in some situations (still not clear which), Cassandra can split a full clustering
+    // key tombstone into multiple ranges.
+    //
+    // Running sstable2json in those files, we'll find something along those lines:
+    //
+    // {"key": <key>,
+    //  "cells": [["CL1","CL1:CL2.1:!",<marked_for_delete>,"t",<local_deletion>],
+    //            ["CL1:CL2.1:!","CL1:CL2.2:!",<marked_for_delete>,"t",<local_deletion>],
+    //            ["CL1:CL2.2:!","CL1:!",<marked_for_delete>,"t",<local_deletion>],
+    //
+    // Looking at this output, we can see that this is pretty much just CL1:_ -> CL1:!, but split.
+    // The key difference between that and a true range tombstone, is the fact that the end of the
+    // last range is CL1:!, and not a different clustering key.
+    //
+    // In cases like that, instead of failing to read the imported SSTables we can just try to merge
+    // the ranges. We must be extra careful so that we'll not falsely merge things that are real range
+    // tombstones.
+    //
+    // When we gain support for proper range tombstones, we will have the option of keeping this code
+    // or ditching it altogether.
+    class range_tombstone_merger {
+        bytes start_col;
+        bytes current_end;
+        range_tombstone_merger(bytes&& start, bytes&& end)
+            : start_col(std::move(start)), current_end(std::move(end)) {}
+    public:
+        range_tombstone_merger(bytes_view start, bytes_view end)
+            : range_tombstone_merger(to_bytes(start), to_bytes(end)) {}
+
+        ~range_tombstone_merger() {
+            // This check is crucial to our goal of not falsely reporting a real range tombstone as a
+            // merger.
+            if (start_col.size() || current_end.size()) {
+                throw malformed_sstable_exception(
+                    sstring("RANGE DELETE not implemented. Tried to merge, but row finished before we could finish the merge. Current start is: ")
+                    + to_hex(start_col)
+                    + sstring(" and end: ")
+                    + to_hex(current_end)
+                );
+            }
+        }
+
+        // This assumes we'll be getting the various ranges in order.
+        // If this function find that the end is equal to the original start,
+        // then it will close the range and consider the merge a success.
+        //
+        // We can't forget to add a start marker back to start, since the callers will always
+        // expect one to be present.
+        bytes update_end(bytes_view start, bytes_view end) {
+            if (current_end != start) {
+                throw malformed_sstable_exception(
+                    sstring("RANGE DELETE not implemented. Tried to merge, but failed. Expected start = ")
+                    + to_hex(current_end)
+                    + sstring(" but found ")
+                    + to_hex(start)
+                );
+            }
+            current_end = to_bytes(end);
+            bytes ret = {};
+            if (start_col == current_end) {
+                auto marker = bytes::value_type(composite_marker::start_range);
+                ret = start_col += bytes(&marker, 1);
+                start_col.reset();
+                current_end.reset();
+            }
+            return ret;
+        }
+
+    };
+    std::experimental::optional<range_tombstone_merger> _current_range_tombstone_merger = {};
+
+    bool has_range_tombstone_merger() {
+        return bool(_current_range_tombstone_merger);
+    }
+
+    void reset_range_tombstone_merger() {
+        // Will throw if there is a current merger that hasn't finished.
+        // This will be called at the start and end of any row.
+        _current_range_tombstone_merger = {};
+    }
+
+    bytes update_range_tombstone_merger(bytes_view start, bytes_view end) {
+        // We need to store the ranges without their suffixes so that the comparisons
+        // make any sense. We'll add it back in the end for start.
+        start.remove_suffix(1);
+        end.remove_suffix(1);
+
+        bytes ret = {};
+        if (!_current_range_tombstone_merger) {
+            _current_range_tombstone_merger.emplace(start, end);
+        } else {
+            ret = _current_range_tombstone_merger->update_end(start, end);
+            if (!ret.empty()) {
+                _current_range_tombstone_merger = {};
+            }
+        }
+        return ret;
+    }
 public:
     mutation_opt mut;
 
@@ -274,6 +375,8 @@ public:
     mp_row_consumer() {}
 
     virtual void consume_row_start(sstables::key_view key, sstables::deletion_time deltime) override {
+        reset_range_tombstone_merger();
+
         if (_key.empty()) {
             mut = mutation(partition_key::from_exploded(*_schema, key.explode(*_schema)), _schema);
         } else if (key != _key) {
@@ -366,6 +469,7 @@ public:
         }
     }
     virtual proceed consume_row_end() override {
+        reset_range_tombstone_merger();
         if (mut) {
             flush_pending_collection(*_schema, *mut);
         }
@@ -378,7 +482,15 @@ public:
         // Some versions of Cassandra will write a 0 to mark the start of the range.
         // CASSANDRA-7593 discusses that.
         check_marker(end_col, composite_marker::end_range, composite_marker::none);
-        check_marker(start_col, composite_marker::start_range, composite_marker::none);
+
+        // FIXME: For split range tombstones, the range starts with the end marker.
+        // If we can guarantee that this is always the case, we could check.
+        // But can we?
+        if (!has_range_tombstone_merger()) {
+            // Some versions of Cassandra will write a 0 to mark the start of the range.
+            // CASSANDRA-7593 discusses that.
+            check_marker(start_col, composite_marker::start_range, composite_marker::none);
+        }
 
         // FIXME: CASSANDRA-6237 says support will be added to things like this.
         //
@@ -388,17 +500,40 @@ public:
         // key. This is basically because one can't (yet) write delete
         // statements in which the WHERE clause looks like WHERE clustering_key >= x.
         //
-        // We don't really have it in our model ATM, so let's just mark this unimplemented.
-        //
-        // The only expected difference between them, is the final marker. We
-        // will remove it from end_col to ease the comparison, but will leave
+        // There are cases in which we'll see range tombstones, but they are in reality
+        // just the simple case that is split. We'll try to see if this is the case, but
+        // bail if it is not. See the range_tombstone_merger for details.
+        // Note that remove the marker from end_col to ease the comparison, but will leave
         // start_col untouched to make sure explode() still works.
-        end_col.remove_suffix(1);
-        if (start_col.compare(0, end_col.size(), end_col)) {
-            fail(unimplemented::cause::RANGE_DELETES);
-        }
+        //
+        // If we are dealing with range_tombstone_merger, we'll see cases in which we'll have
+        // things like:
+        //    start = CL1:_
+        //    end   = CL1:CL2.1:!
+        //
+        // or conversely:
+        //
+        //    start = CL1:CL2.x:!
+        //    end   = CL1:!
+        //
+        // Because of that, the test for equality must not be bounded by start and end's sizes.
+        // If the sizes differ, we should treat it as a range delete.
+        auto is_range_delete = [] (bytes_view start, bytes_view end) {
+            start.remove_suffix(1);
+            end.remove_suffix(1);
+            return start.compare(end) != 0;
+        };
 
+        bytes new_start = {};
+        if (is_range_delete(start_col, end_col)) {
+            new_start = update_range_tombstone_merger(start_col, end_col);
+            if (new_start.empty()) {
+                return;
+            }
+            start_col = bytes_view(new_start);
+        }
         auto start = composite_view(column::fix_static_name(start_col)).explode();
+
         // Note how this is slightly different from the check in is_collection. Collection tombstones
         // do not have extra data.
         //
