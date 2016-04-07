@@ -231,34 +231,24 @@ compact_sstables(std::vector<shared_sstable> sstables, column_family& cf, std::f
 
     auto start_time = db_clock::now();
 
-    // We use a fixed-sized pipe between the producer fiber (which reads the
-    // individual sstables and merges them) and the consumer fiber (which
-    // only writes to the sstable). Things would have worked without this
-    // pipe (the writing fiber would have also performed the reads), but we
-    // prefer to do less work in the writer (which is a seastar::thread),
-    // and also want the extra buffer to ensure we do fewer context switches
-    // to that seastar::thread.
-    // TODO: better tuning for the size of the pipe. Perhaps should take into
-    // account the size of the individual mutations?
     seastar::pipe<mutation> output{16};
     auto output_reader = make_lw_shared<seastar::pipe_reader<mutation>>(std::move(output.reader));
     auto output_writer = make_lw_shared<seastar::pipe_writer<mutation>>(std::move(output.writer));
 
-    future<> read_done = repeat([output_writer, reader = std::move(reader), info] () mutable {
+    future<> read_done = seastar::async([output_writer, reader = std::move(reader), info] () mutable {
         if (info->is_stop_requested()) {
             // Compaction manager will catch this exception and re-schedule the compaction.
             throw compaction_stop_exception(info->ks, info->cf, info->stop_requested);
         }
-        return reader().then([output_writer, info] (auto mopt) {
-            if (mopt) {
-                info->total_keys_written++;
-                return output_writer->write(std::move(*mopt)).then([] {
-                    return make_ready_future<stop_iteration>(stop_iteration::no);
-                });
-            } else {
-                return make_ready_future<stop_iteration>(stop_iteration::yes);
+        while (true) {
+            auto mopt = reader().get0();
+            if (!mopt) {
+                return;
             }
-        });
+            seastar::thread::yield();
+            info->total_keys_written++;
+            output_writer->write(std::move(*mopt)).get();
+        }
     }).then([output_writer] {});
 
     struct queue_reader final : public ::mutation_reader::impl {
@@ -274,12 +264,12 @@ compact_sstables(std::vector<shared_sstable> sstables, column_family& cf, std::f
     bool backup = cf.incremental_backups_enabled();
     // If there is a maximum size for a sstable, it's possible that more than
     // one sstable will be generated for all partitions to be written.
-    future<> write_done = repeat([creator, ancestors, rp, max_sstable_size, sstable_level, output_reader, info, partitions_per_sstable, schema, backup] {
-        return output_reader->read().then(
-                [creator, ancestors, rp, max_sstable_size, sstable_level, output_reader, info, partitions_per_sstable, schema, backup] (auto mut) {
+    future<> write_done = seastar::async([creator, ancestors, rp, max_sstable_size, sstable_level, output_reader, info, partitions_per_sstable, schema, backup] {
+        while (true) {
+            auto mut = output_reader->read().get0();
             // Check if mutation is available from the pipe for a new sstable to be written. If not, just stop writing.
             if (!mut) {
-                return make_ready_future<stop_iteration>(stop_iteration::yes);
+                return;
             }
             // If a mutation is available, we must unread it for write_components to read it afterwards.
             output_reader->unread(std::move(*mut));
@@ -294,18 +284,17 @@ compact_sstables(std::vector<shared_sstable> sstables, column_family& cf, std::f
 
             ::mutation_reader mutation_queue_reader = make_mutation_reader<queue_reader>(output_reader);
 
-            auto&& priority = service::get_local_compaction_priority();
-            return newtab->write_components(std::move(mutation_queue_reader), partitions_per_sstable, schema, max_sstable_size, backup, priority).then([newtab, info] {
-                return newtab->open_data().then([newtab, info] {
-                    info->end_size += newtab->data_size();
-                    return make_ready_future<stop_iteration>(stop_iteration::no);
-                });
-            }).handle_exception([sst = newtab] (auto ep) {
+            try {
+                auto&& priority = service::get_local_compaction_priority();
+                newtab->write_components(std::move(mutation_queue_reader), partitions_per_sstable, schema, max_sstable_size, backup, priority);
+                newtab->open_data().get();
+                info->end_size += newtab->data_size();
+            } catch (...) {
                 logger.error("Compaction found an exception when writing sstable {} : {}",
-                        sst->get_filename(), ep);
-                return make_exception_future<stop_iteration>(ep);
-            });
-        });
+                        newtab->get_filename(), std::current_exception());
+                throw;
+            }
+        }
     }).then([output_reader] {});
 
     // Wait for both read_done and write_done fibers to finish.

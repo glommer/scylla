@@ -48,6 +48,8 @@
 #include "query-request.hh"
 #include "key_reader.hh"
 
+class column_family;
+
 namespace sstables {
 
 // data_consume_context is an object returned by sstable::data_consume_rows()
@@ -108,8 +110,11 @@ public:
 };
 
 class key;
+class sstable;
 
 using index_list = std::vector<index_entry>;
+using shared_sstable = lw_shared_ptr<sstable>;
+using sstable_list = std::map<int64_t, shared_sstable>;
 
 class sstable {
 public:
@@ -227,10 +232,6 @@ public:
     future<> write_components(memtable& mt, bool backup = false,
                               const io_priority_class& pc = default_priority_class());
 
-    future<> write_components(::mutation_reader mr,
-            uint64_t estimated_partitions, schema_ptr schema, uint64_t max_sstable_size, bool backup = false,
-            const io_priority_class& pc = default_priority_class());
-
     uint64_t get_estimated_key_count() const {
         return ((uint64_t)_summary.header.size_at_full_sampling + 1) *
                 _summary.header.min_index_interval;
@@ -334,6 +335,15 @@ private:
     { }
 
     size_t sstable_buffer_size = 128*1024;
+
+    // This must be called from inside a seastar::thread only. Used by compaction
+    void write_components(::mutation_reader mr,
+            uint64_t estimated_partitions, schema_ptr schema, uint64_t max_sstable_size, bool backup = false,
+            const io_priority_class& pc = default_priority_class());
+
+    friend future<std::vector<shared_sstable>>
+    compact_sstables(std::vector<shared_sstable> sstables, column_family& cf, std::function<shared_sstable()> creator,
+                     uint64_t max_sstable_size, uint32_t sstable_level, bool cleanup);
 
     void do_write_components(::mutation_reader mr,
             uint64_t estimated_partitions, schema_ptr schema, uint64_t max_sstable_size,
@@ -553,9 +563,6 @@ public:
 
     friend class key_reader;
 };
-
-using shared_sstable = lw_shared_ptr<sstable>;
-using sstable_list = std::map<int64_t, shared_sstable>;
 
 ::key_reader make_key_reader(schema_ptr s, shared_sstable sst, const query::partition_range& range,
                              const io_priority_class& pc = default_priority_class());
