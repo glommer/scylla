@@ -100,6 +100,30 @@ void make(database& db, bool durable, bool volatile_testing_only);
 
 class replay_position_reordered_exception : public std::exception {};
 
+class throttle_state {
+    size_t _max_space;
+    logalloc::region_group& _region_group;
+    throttle_state* _parent;
+
+    circular_buffer<promise<>> _throttled_requests;
+    timer<> _throttling_timer{[this] { unthrottle(); }};
+    void unthrottle();
+    bool should_throttle() const {
+        if (_region_group.memory_used() > _max_space) {
+            return true;
+        }
+        if (_parent) {
+            return _parent->should_throttle();
+        }
+        return false;
+    }
+public:
+    throttle_state(size_t max_space, logalloc::region_group& region);
+    throttle_state(size_t max_space, logalloc::region_group& region, throttle_state& parent);
+    future<> throttle();
+};
+
+class column_family;
 // We could just add all memtables, regardless of types, to a single list, and
 // then filter them out when we read them. Here's why I have chosen not to do
 // it:
@@ -123,17 +147,32 @@ class memtable_list {
     std::vector<shared_memtable> _memtables;
     std::function<future<> ()> _seal_fn;
     std::function<schema_ptr()> _current_schema;
+    throttle_state _throttle_state;
     size_t _max_memtable_size;
     logalloc::region_group* _dirty_memory_region_group = nullptr;
 
     lw_shared_ptr<memtable> new_memtable() {
         return make_lw_shared<memtable>(_current_schema(), _dirty_memory_region_group);
     }
+    friend class column_family;
 public:
-    memtable_list(std::function<future<> ()> seal_fn, std::function<schema_ptr()> cs, size_t max_memtable_size, logalloc::region_group* region_group)
+    memtable_list(std::function<future<> ()> seal_fn, std::function<schema_ptr()> cs, size_t max_memtable_size, size_t max_database_memtable_size,
+                  logalloc::region_group* region_group)
         : _memtables({})
         , _seal_fn(seal_fn)
         , _current_schema(cs)
+        , _throttle_state(max_database_memtable_size, *region_group)
+        , _max_memtable_size(max_memtable_size)
+        , _dirty_memory_region_group(region_group) {
+        add_memtable();
+    }
+
+    memtable_list(std::function<future<> ()> seal_fn, std::function<schema_ptr()> cs, size_t max_memtable_size, size_t max_database_memtable_size,
+                  logalloc::region_group* region_group, throttle_state& parent_throttler)
+        : _memtables({})
+        , _seal_fn(seal_fn)
+        , _current_schema(cs)
+        , _throttle_state(max_database_memtable_size, *region_group, parent_throttler)
         , _max_memtable_size(max_memtable_size)
         , _dirty_memory_region_group(region_group) {
         add_memtable();
@@ -194,6 +233,10 @@ public:
             _seal_fn();
         }
     }
+
+    future<> throttle() {
+        return _throttle_state.throttle();
+    }
 };
 
 using sstable_list = sstables::sstable_list;
@@ -218,6 +261,7 @@ public:
         bool enable_commitlog = true;
         bool enable_incremental_backups = false;
         size_t max_memtable_size = 5'000'000;
+        size_t memtable_total_space = 500 << 20;
         logalloc::region_group* dirty_memory_region_group = nullptr;
         logalloc::region_group* streaming_dirty_memory_region_group = nullptr;
         ::cf_stats* cf_stats = nullptr;
@@ -341,6 +385,13 @@ private:
     std::chrono::steady_clock::time_point _sstable_writes_disabled_at;
     void do_trigger_compaction();
 public:
+    future<> memtables_throttle() {
+        return _memtables->throttle();
+    }
+
+    future<> streaming_memtables_throttle() {
+        return _streaming_memtables->throttle();
+    }
 
     // This function should be called when this column family is ready for writes, IOW,
     // to produce SSTables. Extensive details about why this is important can be found
@@ -681,6 +732,7 @@ public:
         bool enable_cache = true;
         bool enable_incremental_backups = false;
         size_t max_memtable_size = 5'000'000;
+        size_t memtable_total_space = 500 << 20;
         logalloc::region_group* dirty_memory_region_group = nullptr;
         logalloc::region_group* streaming_dirty_memory_region_group = nullptr;
         ::cf_stats* cf_stats = nullptr;
@@ -769,32 +821,6 @@ private:
     void create_in_memory_keyspace(const lw_shared_ptr<keyspace_metadata>& ksm);
     friend void db::system_keyspace::make(database& db, bool durable, bool volatile_testing_only);
     void setup_collectd();
-
-    class throttle_state {
-        size_t _max_space;
-        logalloc::region_group& _region_group;
-        throttle_state* _parent;
-
-        circular_buffer<promise<>> _throttled_requests;
-        timer<> _throttling_timer{[this] { unthrottle(); }};
-        void unthrottle();
-        bool should_throttle() const {
-            if (_region_group.memory_used() > _max_space) {
-                return true;
-            }
-            if (_parent) {
-                return _parent->should_throttle();
-            }
-            return false;
-        }
-    public:
-        throttle_state(size_t max_space, logalloc::region_group& region);
-        throttle_state(size_t max_space, logalloc::region_group& region, throttle_state& parent);
-        future<> throttle();
-    };
-
-    throttle_state _memtables_throttler;
-    throttle_state _streaming_throttler;
 
     future<> do_apply(schema_ptr, const frozen_mutation&);
 public:

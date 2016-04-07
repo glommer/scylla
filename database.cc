@@ -89,14 +89,18 @@ lw_shared_ptr<memtable_list>
 column_family::make_memtable_list() {
     return make_lw_shared<memtable_list>(
             [this] { return seal_active_memtable(); }, [this] { return schema(); }
-            , _config.max_memtable_size, _config.dirty_memory_region_group);
+            , _config.max_memtable_size, _config.memtable_total_space, _config.dirty_memory_region_group);
 }
 
 lw_shared_ptr<memtable_list>
 column_family::make_streaming_memtable_list() {
+    // We have to be careful here not to set the streaming limit for less than
+    // a memtable maximum size. Allow up to 25 % to be used up by streaming memtables
+    // in the common case
+    size_t total_streaming_size = std::min(_config.memtable_total_space / 4, _config.max_memtable_size);
     return make_lw_shared<memtable_list>(
             [this] { return seal_active_streaming_memtable_delayed(); }, [this] { return schema(); }
-            , _config.max_memtable_size, _config.streaming_dirty_memory_region_group);
+            , _config.max_memtable_size, total_streaming_size, _config.streaming_dirty_memory_region_group, _memtables->_throttle_state);
 }
 
 column_family::column_family(schema_ptr schema, config config, db::commitlog& cl, compaction_manager& compaction_manager)
@@ -1162,14 +1166,7 @@ database::database(const db::config& cfg)
         return memtable_total_space;
     }())
     , _version(empty_version)
-    , _enable_incremental_backups(cfg.incremental_backups())
-    , _memtables_throttler(_memtable_total_space, _dirty_memory_region_group)
-    // We have to be careful here not to set the streaming limit for less than
-    // a memtable maximum size. Allow up to 25 % to be used up by streaming memtables
-    // in the common case
-    , _streaming_throttler(_memtable_total_space * std::min(0.25, cfg.memtable_cleanup_threshold()),
-                           _streaming_dirty_memory_region_group, _memtables_throttler)
-{
+    , _enable_incremental_backups(cfg.incremental_backups()) {
     // Start compaction manager with two tasks for handling compaction jobs.
     _compaction_manager.start(2);
     setup_collectd();
@@ -1557,6 +1554,7 @@ keyspace::make_column_family_config(const schema& s) const {
     cfg.enable_disk_writes = _config.enable_disk_writes;
     cfg.enable_commitlog = _config.enable_commitlog;
     cfg.enable_cache = _config.enable_cache;
+    cfg.memtable_total_space = _config.memtable_total_space;
     cfg.max_memtable_size = _config.max_memtable_size;
     cfg.dirty_memory_region_group = _config.dirty_memory_region_group;
     cfg.streaming_dirty_memory_region_group = _config.streaming_dirty_memory_region_group;
@@ -1919,19 +1917,19 @@ future<> database::do_apply(schema_ptr s, const frozen_mutation& m) {
     return apply_in_memory(m, s, db::replay_position());
 }
 
-database::throttle_state::throttle_state(size_t max_space, logalloc::region_group& rg)
+throttle_state::throttle_state(size_t max_space, logalloc::region_group& rg)
     : _max_space(max_space)
     , _region_group(rg)
     , _parent(nullptr)
 {}
 
-database::throttle_state::throttle_state(size_t max_space, logalloc::region_group& rg, throttle_state& parent)
+throttle_state::throttle_state(size_t max_space, logalloc::region_group& rg, throttle_state& parent)
     : _max_space(max_space)
     , _region_group(rg)
     , _parent(&parent)
 {}
 
-future<> database::throttle_state::throttle() {
+future<> throttle_state::throttle() {
     if (!should_throttle() && _throttled_requests.empty()) {
         // All is well, go ahead
         return make_ready_future<>();
@@ -1944,7 +1942,7 @@ future<> database::throttle_state::throttle() {
     return _throttled_requests.back().get_future();
 }
 
-void database::throttle_state::unthrottle() {
+void throttle_state::unthrottle() {
     // Release one request per free 1MB we have
     // FIXME: improve this
     if (should_throttle()) {
@@ -1965,7 +1963,9 @@ future<> database::apply(schema_ptr s, const frozen_mutation& m) {
     if (dblog.is_enabled(logging::log_level::trace)) {
         dblog.trace("apply {}", m.pretty_printer(s));
     }
-    return _memtables_throttler.throttle().then([this, &m, s = std::move(s)] {
+    auto uuid = m.column_family_id();
+    auto& cf = find_column_family(uuid);
+    return cf.memtables_throttle().then([this, &m, s = std::move(s)] {
         return do_apply(std::move(s), m);
     });
 }
@@ -1991,7 +1991,10 @@ future<> database::apply_streaming_mutation(schema_ptr s, const frozen_mutation&
     // is the best solution, we can just change the memtable creation method so
     // that each kind of memtable creates from a different region group - and then
     // update the throttle conditions accordingly.
-    return _streaming_throttler.throttle().then([this, &m, s = std::move(s)] {
+    auto uuid = m.column_family_id();
+    auto& cf = find_column_family(uuid);
+    return cf.streaming_memtables_throttle().then([this, &m, s = std::move(s), &cf] {
+        // We repeat this here to make sure the CF still exist after we unthrottle.
         auto uuid = m.column_family_id();
         auto& cf = find_column_family(uuid);
         cf.apply_streaming_mutation(s, std::move(m));
@@ -2008,6 +2011,7 @@ database::make_keyspace_config(const keyspace_metadata& ksm) {
         cfg.enable_disk_reads = true; // we allways read from disk
         cfg.enable_commitlog = ksm.durable_writes() && _cfg->enable_commitlog() && !_cfg->enable_in_memory_data_store();
         cfg.enable_cache = _cfg->enable_cache();
+        cfg.memtable_total_space = _memtable_total_space;
         cfg.max_memtable_size = _memtable_total_space * _cfg->memtable_cleanup_threshold();
     } else {
         cfg.datadir = "";
@@ -2015,6 +2019,7 @@ database::make_keyspace_config(const keyspace_metadata& ksm) {
         cfg.enable_disk_reads = false;
         cfg.enable_commitlog = false;
         cfg.enable_cache = false;
+        cfg.memtable_total_space = std::numeric_limits<size_t>::max();
         cfg.max_memtable_size = std::numeric_limits<size_t>::max();
     }
     cfg.dirty_memory_region_group = &_dirty_memory_region_group;
