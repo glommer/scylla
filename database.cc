@@ -1163,13 +1163,16 @@ database::database(const db::config& cfg)
     }())
     , _version(empty_version)
     , _enable_incremental_backups(cfg.incremental_backups())
-    , _memtables_throttler(throttle_state::throttle_type::memtables, _memtable_total_space, _dirty_memory_region_group)
+    , _memtables_throttler(throttle_state::throttle_type::memtables, _memtable_total_space, _dirty_memory_region_group, [this] { return free_dirty_memtables(); })
     // We have to be careful here not to set the streaming limit for less than
     // a memtable maximum size. Allow up to 25 % to be used up by streaming memtables
     // in the common case
     , _streaming_throttler(throttle_state::throttle_type::streaming_memtables,
                            _memtable_total_space * std::min(0.25, cfg.memtable_cleanup_threshold()),
-                           _streaming_dirty_memory_region_group, &_memtables_throttler)
+                           _streaming_dirty_memory_region_group,
+                           [this] { return free_dirty_streaming_memtables(); },
+                           &_memtables_throttler
+    )
 {
     // Start compaction manager with two tasks for handling compaction jobs.
     _compaction_manager.start(2);
@@ -1915,11 +1918,73 @@ future<> database::do_apply(schema_ptr s, const frozen_mutation& m) {
     return apply_in_memory(m, s, db::replay_position());
 }
 
+// FIXME: the throttler can pass a threshold condition and we would then keep
+// flushing. We need to be a bit careful, though, because if we are throttling
+// due to a slow disk, by keep flushing we're actually making the problem
+// worse. So if we change the throttling algorithm to keep flushing in a loop
+// until we're below the throttling point, we need to also look into the
+// flushes already initiated by processes other than the throttler.
+template <typename Candidate>
+future<>
+database::do_free_dirty_memtables(std::experimental::optional<shared_promise<>>& pending_flush, Candidate&& candidate) {
+    auto fut = make_ready_future<>();
+    if (pending_flush) {
+        fut = pending_flush->get_shared_future();
+    } else {
+        // We can't combine this with the case above because this future can
+        // return immediately in some cases, in which case _pending_flush would
+        // be empty again.
+        pending_flush = shared_promise<>();
+        fut = pending_flush->get_shared_future();
+
+        size_t max_size = 0;
+        lw_shared_ptr<memtable_list> mtlist = {};
+        for (auto& cfp: get_column_families()) {
+            auto curr = candidate(*(cfp.second));
+            if (curr->back()->occupancy().total_space() < max_size) {
+                continue;
+            }
+            mtlist = curr;
+            max_size = mtlist->back()->occupancy().total_space();
+        }
+        auto flush = make_ready_future<>();
+        if (mtlist) {
+            flush = mtlist->seal_active_memtable();
+        }
+        flush.then_wrapped([&pending_flush] (future<> f) {
+            if (f.failed()) {
+                pending_flush->set_exception(f.get_exception());
+            } else {
+                pending_flush->set_value();
+            }
+            pending_flush = {};
+        });
+    }
+    return fut;
+}
+
+future<> database::free_dirty_memtables() {
+    static thread_local std::experimental::optional<shared_promise<>> pending_flush;
+    return do_free_dirty_memtables(pending_flush, [this] (column_family& cf) {
+        return cf.get_memtable_list();
+    });
+}
+
+future<> database::free_dirty_streaming_memtables() {
+    static thread_local std::experimental::optional<shared_promise<>> pending_flush;
+    return do_free_dirty_memtables(pending_flush, [this] (column_family& cf) {
+        return cf.get_streaming_memtable_list();
+    });
+}
+
 future<> throttle_state::throttle() {
     if (!should_throttle() && _throttled_requests.empty()) {
         // All is well, go ahead
         return make_ready_future<>();
     }
+
+    _reclaim();
+
     // We must throttle, wait a bit
     if (_throttled_requests.empty()) {
         _throttling_timer.arm_periodic(10ms);

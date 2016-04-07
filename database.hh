@@ -105,6 +105,7 @@ private:
     throttle_type _type;
     size_t _max_space;
     logalloc::region_group& _region_group;
+    std::function<future<> ()> _reclaim;
     throttle_state* _parent;
 
     circular_buffer<promise<>> _throttled_requests;
@@ -120,10 +121,11 @@ private:
         return false;
     }
 public:
-    throttle_state(throttle_type type, size_t max_space, logalloc::region_group& region, throttle_state* parent = nullptr)
+    throttle_state(throttle_type type, size_t max_space, logalloc::region_group& region, std::function<future<> ()> reclaim, throttle_state* parent = nullptr)
         : _type(type)
         , _max_space(max_space)
         , _region_group(region)
+        , _reclaim(reclaim)
         , _parent(parent)
     {}
 
@@ -303,6 +305,7 @@ private:
     // memory throttling mechanism, guaranteeing we will not overload the
     // server.
     lw_shared_ptr<memtable_list> _streaming_memtables;
+    friend database;
 
     lw_shared_ptr<memtable_list> make_memtable_list();
     lw_shared_ptr<memtable_list> make_streaming_memtable_list();
@@ -415,6 +418,10 @@ public:
     using const_mutation_partition_ptr = std::unique_ptr<const mutation_partition>;
     using const_row_ptr = std::unique_ptr<const row>;
     memtable& active_memtable() { return _memtables->active_memtable(); }
+
+    lw_shared_ptr<memtable_list> get_memtable_list() { return _memtables; }
+    lw_shared_ptr<memtable_list> get_streaming_memtable_list() { return _streaming_memtables; }
+
     const row_cache& get_row_cache() const {
         return _cache;
     }
@@ -802,6 +809,12 @@ private:
     void create_in_memory_keyspace(const lw_shared_ptr<keyspace_metadata>& ksm);
     friend void db::system_keyspace::make(database& db, bool durable, bool volatile_testing_only);
     void setup_collectd();
+
+    template <typename Candidate>
+    future<> do_free_dirty_memtables(std::experimental::optional<shared_promise<>>& pending_flush, Candidate&& candidate);
+
+    future<> free_dirty_memtables();
+    future<> free_dirty_streaming_memtables();
 
     throttle_state _memtables_throttler;
     throttle_state _streaming_throttler;
