@@ -2024,21 +2024,6 @@ future<> database::apply_streaming_mutation(schema_ptr s, const frozen_mutation&
                                  s->ks_name(), s->cf_name(), s->version()));
     }
 
-    // TODO (maybe): This will use the same memory region group as memtables, so when
-    // one of them throttles, both will.
-    //
-    // It would be possible to provide further QoS for CQL originated memtables
-    // by keeping the streaming memtables into a different region group, with its own
-    // separate limit.
-    //
-    // Because, however, there are many other limits in play that may kick in,
-    // I am not convinced that this will ever be a problem.
-    //
-    // If we do find ourselves in the situation that we are throttling incoming
-    // writes due to high level of streaming writes, and we are sure that this
-    // is the best solution, we can just change the memtable creation method so
-    // that each kind of memtable creates from a different region group - and then
-    // update the throttle conditions accordingly.
     return _streaming_throttler.throttle().then([this, &m, s = std::move(s)] {
         auto uuid = m.column_family_id();
         auto& cf = find_column_family(uuid);
