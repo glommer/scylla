@@ -98,6 +98,9 @@ void make(database& db, bool durable, bool volatile_testing_only);
 }
 }
 
+class memtable_list;
+class database;
+
 class throttle_state {
 public:
     enum class throttle_type { memtables, streaming_memtables };
@@ -110,6 +113,7 @@ private:
 
     circular_buffer<promise<>> _throttled_requests;
     timer<> _throttling_timer{[this] { unthrottle(); }};
+    void update_flush_candidate(column_family& cf, lw_shared_ptr<memtable_list>& current, size_t& max_size);
     void unthrottle();
     bool should_throttle() const {
         if (_region_group.memory_used() > _max_space) {
@@ -128,7 +132,7 @@ public:
         , _parent(parent)
     {}
 
-    future<> throttle();
+    future<> throttle(database& db);
 };
 
 
@@ -228,6 +232,7 @@ private:
     lw_shared_ptr<memtable> new_memtable() {
         return make_lw_shared<memtable>(_current_schema(), _dirty_memory_region_group);
     }
+    friend throttle_state;
 };
 
 using sstable_list = sstables::sstable_list;
@@ -304,6 +309,8 @@ private:
     // memory throttling mechanism, guaranteeing we will not overload the
     // server.
     lw_shared_ptr<memtable_list> _streaming_memtables;
+    // we don't really want access to the memtable lists to be public, so allow it just for the throttler.
+    friend class throttle_state;
 
     lw_shared_ptr<memtable_list> make_memtable_list();
     lw_shared_ptr<memtable_list> make_streaming_memtable_list();

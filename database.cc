@@ -1911,11 +1911,47 @@ future<> database::do_apply(schema_ptr s, const frozen_mutation& m) {
     return apply_in_memory(m, s, db::replay_position());
 }
 
-future<> throttle_state::throttle() {
+void
+throttle_state::update_flush_candidate(column_family& cf, lw_shared_ptr<memtable_list>& current, size_t& max_size) {
+    lw_shared_ptr<memtable_list> mtlist = {};
+    if (_type == throttle_type::memtables) {
+        mtlist = cf._memtables;
+    } else if (_type == throttle_type::streaming_memtables) {
+        mtlist = cf._streaming_memtables;
+    } else {
+        // All throttlers need to know which throttler they are operating at.
+        assert(0);
+    }
+    if (mtlist->_memtables.size() != 1) {
+        return;
+    }
+    if (mtlist->back()->occupancy().total_space() < max_size) {
+        return;
+    }
+    max_size = mtlist->back()->occupancy().total_space();
+    current = mtlist;
+}
+
+future<> throttle_state::throttle(database& db) {
     if (!should_throttle() && _throttled_requests.empty()) {
         // All is well, go ahead
         return make_ready_future<>();
     }
+
+    if (!_flush_in_progress) {
+        size_t max_size = 0;
+        lw_shared_ptr<memtable_list> mtlist = {};
+        for (auto& cfp: db.get_column_families()) {
+            update_flush_candidate(*(cfp.second), mtlist, max_size);
+        }
+        if (mtlist) {
+            _flush_in_progress = true;
+            mtlist->seal_active_memtable().finally([this] {
+                _flush_in_progress = false;
+            });
+         }
+    }
+
     // We must throttle, wait a bit
     if (_throttled_requests.empty()) {
         _throttling_timer.arm_periodic(10ms);
@@ -1945,7 +1981,7 @@ future<> database::apply(schema_ptr s, const frozen_mutation& m) {
     if (dblog.is_enabled(logging::log_level::trace)) {
         dblog.trace("apply {}", m.pretty_printer(s));
     }
-    return _memtables_throttler.throttle().then([this, &m, s = std::move(s)] {
+    return _memtables_throttler.throttle(*this).then([this, &m, s = std::move(s)] {
         return do_apply(std::move(s), m);
     });
 }
@@ -1971,7 +2007,7 @@ future<> database::apply_streaming_mutation(schema_ptr s, const frozen_mutation&
     // is the best solution, we can just change the memtable creation method so
     // that each kind of memtable creates from a different region group - and then
     // update the throttle conditions accordingly.
-    return _streaming_throttler.throttle().then([this, &m, s = std::move(s)] {
+    return _streaming_throttler.throttle(*this).then([this, &m, s = std::move(s)] {
         auto uuid = m.column_family_id();
         auto& cf = find_column_family(uuid);
         cf.apply_streaming_mutation(s, std::move(m));
