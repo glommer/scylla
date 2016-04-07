@@ -162,7 +162,9 @@ public:
         , _seal_fn(seal_fn)
         , _current_schema(cs)
         , _throttle_state(max_database_memtable_size, *region_group)
-        , _max_memtable_size(max_memtable_size)
+        // We should guarantee that at least two memtable are available, otherwise after flush, adding another memtable would
+        // easily take us into throttling until the first one is flushed.
+        , _max_memtable_size(std::min(max_memtable_size, (max_database_memtable_size / 2)))
         , _dirty_memory_region_group(region_group) {
         add_memtable();
     }
