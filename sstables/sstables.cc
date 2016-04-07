@@ -1480,30 +1480,33 @@ void sstable::prepare_write_components(::mutation_reader mr, uint64_t estimated_
 
 future<> sstable::write_components(memtable& mt, bool backup, const io_priority_class& pc) {
     _collector.set_replay_position(mt.replay_position());
-    return write_components(mt.make_reader(mt.schema()),
-            mt.partition_count(), mt.schema(), std::numeric_limits<uint64_t>::max(), backup, pc);
+    return seastar::async([this, &mt, backup, &pc] () mutable {
+        write_components(mt.make_reader(mt.schema()),
+               mt.partition_count(), mt.schema(), std::numeric_limits<uint64_t>::max(), backup, pc);
+    });
 }
 
-future<> sstable::write_components(::mutation_reader mr,
+void sstable::write_components(::mutation_reader mr,
         uint64_t estimated_partitions, schema_ptr schema, uint64_t max_sstable_size, bool backup, const io_priority_class& pc) {
-    return seastar::async([this, mr = std::move(mr), estimated_partitions, schema = std::move(schema), max_sstable_size, backup, &pc] () mutable {
-        generate_toc(schema->get_compressor_params().get_compressor(), schema->bloom_filter_fp_chance());
-        write_toc(pc);
-        create_data().get();
-        prepare_write_components(std::move(mr), estimated_partitions, std::move(schema), max_sstable_size, pc);
-        write_summary(pc);
-        write_filter(pc);
-        write_statistics(pc);
-        // NOTE: write_compression means maybe_write_compression.
-        write_compression(pc);
-        seal_sstable();
+    auto thread = seastar::thread_impl::get();
+    assert(thread);
 
-        if (backup) {
-            auto dir = get_dir() + "/backups/";
-            sstable_write_io_check(touch_directory, dir).get();
-            create_links(dir).get();
-        }
-    });
+    generate_toc(schema->get_compressor_params().get_compressor(), schema->bloom_filter_fp_chance());
+    write_toc(pc);
+    create_data().get();
+    prepare_write_components(std::move(mr), estimated_partitions, std::move(schema), max_sstable_size, pc);
+    write_summary(pc);
+    write_filter(pc);
+    write_statistics(pc);
+    // NOTE: write_compression means maybe_write_compression.
+    write_compression(pc);
+    seal_sstable();
+
+    if (backup) {
+        auto dir = get_dir() + "/backups/";
+        sstable_write_io_check(touch_directory, dir).get();
+        create_links(dir).get();
+    }
 }
 
 future<> sstable::generate_summary(const io_priority_class& pc) {
