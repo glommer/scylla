@@ -237,7 +237,27 @@ public:
     }
 
     future<> throttle() {
-        return _throttle_state.throttle();
+        auto fut = _throttle_state.throttle();
+        if (!fut.available()) {
+            // Throttling happens when the overall shard-wise memory goes over a limit.
+            // However, because the memtables are flushed only when a specific column family's
+            // memtable reach the limit, we can deadlock the database if many CFs are being actively
+            // written to when we reach the global limit.
+            //
+            // Imagine the following example: max_memtable_size is 128MB, and memtable_total_space is
+            // 512MB. Now, if only one CF is actively written to this will never be a problem. But if we
+            // have 10 CFs under active writes, we can reach 512MB by having each of the 10 CFs at 64MB.
+            // In that case, none of them will flush.
+            //
+            // So our criteria here will be to call flush ourselves if only one memtable is found. This
+            // indicates that nothing else is pending, and won't harm any other case. If, for instance,
+            // another request arrives right after we call this flush for the same shard, then size() will
+            // already be 2 and we won't flush another small table for no reason.
+            if (_memtables.size() == 1) {
+                _seal_fn();
+            }
+        }
+        return fut;
     }
 };
 
