@@ -677,8 +677,18 @@ column_family::seal_active_memtable() {
     return _flush_queue->run_cf_flush(old->replay_position(), [old, this] {
         return repeat([this, old] {
             return with_lock(_sstables_lock.for_read(), [this, old] {
-                _flush_queue->check_open_gate();
-                return try_flush_memtable_to_sstable(old);
+                promise<stop_iteration> pr;
+                auto fut = pr.get_future();
+                schedule(make_task([pr = std::move(pr), this, old] () mutable {
+                    try {
+                        this->_flush_queue->check_open_gate();
+                    } catch (...) {
+                        pr.set_exception(std::current_exception());
+                        return;
+                    }
+                    this->try_flush_memtable_to_sstable(old).forward_to(std::move(pr));
+                }));
+                return fut;
             });
         });
     }, [old, this] {
