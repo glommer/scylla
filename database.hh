@@ -257,6 +257,7 @@ public:
         bool enable_commitlog = true;
         bool enable_incremental_backups = false;
         size_t max_memtable_size = 5'000'000;
+        size_t max_streaming_memtable_size = 5'000'000;
         logalloc::region_group* dirty_memory_region_group = nullptr;
         logalloc::region_group* streaming_dirty_memory_region_group = nullptr;
         ::cf_stats* cf_stats = nullptr;
@@ -722,6 +723,7 @@ public:
         bool enable_cache = true;
         bool enable_incremental_backups = false;
         size_t max_memtable_size = 5'000'000;
+        size_t max_streaming_memtable_size = 5'000'000;
         logalloc::region_group* dirty_memory_region_group = nullptr;
         logalloc::region_group* streaming_dirty_memory_region_group = nullptr;
         ::cf_stats* cf_stats = nullptr;
