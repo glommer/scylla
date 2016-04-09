@@ -1911,7 +1911,7 @@ future<> database::do_apply(schema_ptr s, const frozen_mutation& m) {
     return apply_in_memory(m, s, db::replay_position());
 }
 
-future<> database::throttle_state::throttle() {
+future<> throttle_state::throttle() {
     if (!should_throttle() && _throttled_requests.empty()) {
         // All is well, go ahead
         return make_ready_future<>();
@@ -1924,7 +1924,7 @@ future<> database::throttle_state::throttle() {
     return _throttled_requests.back().get_future();
 }
 
-void database::throttle_state::unthrottle() {
+void throttle_state::unthrottle() {
     // Release one request per free 1MB we have
     // FIXME: improve this
     if (should_throttle()) {
