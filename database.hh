@@ -771,6 +771,10 @@ private:
     void setup_collectd();
 
     class throttle_state {
+    public:
+        enum class throttle_type { memtables, streaming_memtables };
+    private:
+        throttle_type _type;
         size_t _max_space;
         logalloc::region_group& _region_group;
         throttle_state* _parent;
@@ -788,8 +792,13 @@ private:
             return false;
         }
     public:
-        throttle_state(size_t max_space, logalloc::region_group& region);
-        throttle_state(size_t max_space, logalloc::region_group& region, throttle_state& parent);
+        throttle_state(throttle_type type, size_t max_space, logalloc::region_group& region, throttle_state* parent = nullptr)
+            : _type(type)
+            , _max_space(max_space)
+            , _region_group(region)
+            , _parent(parent)
+        {}
+
         future<> throttle();
     };
 

@@ -1163,12 +1163,13 @@ database::database(const db::config& cfg)
     }())
     , _version(empty_version)
     , _enable_incremental_backups(cfg.incremental_backups())
-    , _memtables_throttler(_memtable_total_space, _dirty_memory_region_group)
+    , _memtables_throttler(throttle_state::throttle_type::memtables, _memtable_total_space, _dirty_memory_region_group)
     // We have to be careful here not to set the streaming limit for less than
     // a memtable maximum size. Allow up to 25 % to be used up by streaming memtables
     // in the common case
-    , _streaming_throttler(_memtable_total_space * std::min(0.25, cfg.memtable_cleanup_threshold()),
-                           _streaming_dirty_memory_region_group, _memtables_throttler)
+    , _streaming_throttler(throttle_state::throttle_type::streaming_memtables,
+                           _memtable_total_space * std::min(0.25, cfg.memtable_cleanup_threshold()),
+                           _streaming_dirty_memory_region_group, &_memtables_throttler)
 {
     // Start compaction manager with two tasks for handling compaction jobs.
     _compaction_manager.start(2);
@@ -1909,18 +1910,6 @@ future<> database::do_apply(schema_ptr s, const frozen_mutation& m) {
     }
     return apply_in_memory(m, s, db::replay_position());
 }
-
-database::throttle_state::throttle_state(size_t max_space, logalloc::region_group& rg)
-    : _max_space(max_space)
-    , _region_group(rg)
-    , _parent(nullptr)
-{}
-
-database::throttle_state::throttle_state(size_t max_space, logalloc::region_group& rg, throttle_state& parent)
-    : _max_space(max_space)
-    , _region_group(rg)
-    , _parent(&parent)
-{}
 
 future<> database::throttle_state::throttle() {
     if (!should_throttle() && _throttled_requests.empty()) {
