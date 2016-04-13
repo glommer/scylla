@@ -1385,6 +1385,7 @@ void sstable::do_write_components(::mutation_reader mr,
         if (!mut) {
             break;
         }
+        seastar::thread::yield();
 
         // Set current index of data to later compute row size.
         _c_stats.start_offset = out.offset();
@@ -1496,9 +1497,17 @@ void sstable::prepare_write_components(::mutation_reader mr, uint64_t estimated_
     }
 }
 
+static seastar::thread_scheduling_group* scheduling_group() {
+    static thread_local seastar::thread_scheduling_group scheduling_group(std::chrono::microseconds(500), 0.05);
+    return &scheduling_group;
+}
+
 future<> sstable::write_components(memtable& mt, bool backup, const io_priority_class& pc) {
     _collector.set_replay_position(mt.replay_position());
-    return seastar::async([this, &mt, backup, &pc] () mutable {
+
+    seastar::thread_attributes attr;
+    attr.scheduling_group = scheduling_group();
+    return seastar::async(std::move(attr), [this, &mt, backup, &pc] () mutable {
         write_components(mt.make_reader(mt.schema()),
                mt.partition_count(), mt.schema(), std::numeric_limits<uint64_t>::max(), backup, pc);
     });

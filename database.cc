@@ -111,6 +111,7 @@ column_family::column_family(schema_ptr schema, config config, db::commitlog* cl
     , _commitlog(cl)
     , _compaction_manager(compaction_manager)
     , _flush_queue(std::make_unique<memtable_flush_queue>())
+    , _compaction_scheduling_group(std::chrono::microseconds(500), 0.05)
 {
     if (!_config.enable_disk_writes) {
         dblog.warn("Writes disabled, column family no durable.");

@@ -47,6 +47,7 @@
 #include "mutation_reader.hh"
 #include "query-request.hh"
 #include "key_reader.hh"
+#include <seastar/core/thread.hh>
 
 class column_family;
 

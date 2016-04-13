@@ -72,6 +72,7 @@
 #include "key_reader.hh"
 #include <seastar/core/rwlock.hh>
 #include <seastar/core/shared_future.hh>
+#include <seastar/core/thread.hh>
 
 class frozen_mutation;
 class reconcilable_result;
@@ -376,7 +377,11 @@ private:
     partition_presence_checker make_partition_presence_checker(lw_shared_ptr<sstable_list> old_sstables);
     std::chrono::steady_clock::time_point _sstable_writes_disabled_at;
     void do_trigger_compaction();
+    seastar::thread_scheduling_group _compaction_scheduling_group;
 public:
+    seastar::thread_scheduling_group* compaction_scheduling_group() {
+        return &_compaction_scheduling_group;
+    };
 
     // This function should be called when this column family is ready for writes, IOW,
     // to produce SSTables. Extensive details about why this is important can be found

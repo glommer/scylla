@@ -235,7 +235,10 @@ compact_sstables(std::vector<shared_sstable> sstables, column_family& cf, std::f
     auto output_reader = make_lw_shared<seastar::pipe_reader<mutation>>(std::move(output.reader));
     auto output_writer = make_lw_shared<seastar::pipe_writer<mutation>>(std::move(output.writer));
 
-    future<> read_done = seastar::async([output_writer, reader = std::move(reader), info] () mutable {
+    seastar::thread_attributes attr;
+    attr.scheduling_group = cf.compaction_scheduling_group();
+
+    future<> read_done = seastar::async(attr, [output_writer, reader = std::move(reader), info] () mutable {
         if (info->is_stop_requested()) {
             // Compaction manager will catch this exception and re-schedule the compaction.
             throw compaction_stop_exception(info->ks, info->cf, info->stop_requested);
@@ -262,9 +265,10 @@ compact_sstables(std::vector<shared_sstable> sstables, column_family& cf, std::f
     };
 
     bool backup = cf.incremental_backups_enabled();
+
     // If there is a maximum size for a sstable, it's possible that more than
     // one sstable will be generated for all partitions to be written.
-    future<> write_done = seastar::async([creator, ancestors, rp, max_sstable_size, sstable_level, output_reader, info, partitions_per_sstable, schema, backup] {
+    future<> write_done = seastar::async(attr, [creator, ancestors, rp, max_sstable_size, sstable_level, output_reader, info, partitions_per_sstable, schema, backup] {
         while (true) {
             auto mut = output_reader->read().get0();
             // Check if mutation is available from the pipe for a new sstable to be written. If not, just stop writing.
