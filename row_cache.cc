@@ -35,7 +35,7 @@ namespace stdx = std::experimental;
 
 static logging::logger logger("cache");
 
-thread_local seastar::thread_scheduling_group row_cache::_update_thread_scheduling_group(1ms, 0.2);
+thread_local seastar::thread_scheduling_group row_cache::_update_thread_scheduling_group(1ms, 0.05);
 
 
 cache_tracker& global_cache_tracker() {
