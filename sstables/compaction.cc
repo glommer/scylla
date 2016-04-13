@@ -257,9 +257,13 @@ compact_sstables(std::vector<shared_sstable> sstables, column_family& cf, std::f
     auto start_time = db_clock::now();
 
     bool backup = cf.incremental_backups_enabled();
+    seastar::thread_attributes attr;
+    attr.scheduling_group = cf.compaction_scheduling_group();
+
     // If there is a maximum size for a sstable, it's possible that more than
     // one sstable will be generated for all partitions to be written.
-    return seastar::async([creator, ancestors, rp, max_sstable_size, sstable_level, partitions_per_sstable, schema, backup, info, reader = std::move(reader)] () mutable {
+    return seastar::async(std::move(attr),
+                          [creator, ancestors, rp, max_sstable_size, sstable_level, partitions_per_sstable, schema, backup, info, reader = std::move(reader), &cf] () mutable {
         while (true) {
             if (info->is_stop_requested()) {
                 // Compaction manager will catch this exception and re-schedule the compaction.
