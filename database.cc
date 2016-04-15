@@ -85,7 +85,7 @@ public:
     }
 };
 
-column_family::column_family(schema_ptr schema, config config, db::commitlog& cl, compaction_manager& compaction_manager)
+column_family::column_family(schema_ptr schema, config config, db::commitlog* cl, compaction_manager& compaction_manager)
     : _schema(std::move(schema))
     , _config(std::move(config))
     , _memtables(make_lw_shared<memtable_list>([this] { return seal_active_memtable(); }, [this] { return new_memtable(); }, _config.max_memtable_size))
@@ -94,25 +94,7 @@ column_family::column_family(schema_ptr schema, config config, db::commitlog& cl
         make_lw_shared<memtable_list>([this] { return seal_active_memtable(); }, [this] { return new_memtable(); }, _config.max_memtable_size))
     , _sstables(make_lw_shared<sstable_list>())
     , _cache(_schema, sstables_as_mutation_source(), sstables_as_key_source(), global_cache_tracker())
-    , _commitlog(&cl)
-    , _compaction_manager(compaction_manager)
-    , _flush_queue(std::make_unique<memtable_flush_queue>())
-{
-    if (!_config.enable_disk_writes) {
-        dblog.warn("Writes disabled, column family no durable.");
-    }
-}
-
-column_family::column_family(schema_ptr schema, config config, no_commitlog cl, compaction_manager& compaction_manager)
-    : _schema(std::move(schema))
-    , _config(std::move(config))
-    , _memtables(make_lw_shared<memtable_list>([this] { return seal_active_memtable(); }, [this] { return new_memtable(); }, _config.max_memtable_size))
-    , _streaming_memtables(_config.enable_disk_writes ?
-        make_lw_shared<memtable_list>([this] { return seal_active_streaming_memtable_delayed(); }, [this] { return new_streaming_memtable(); }, _config.max_memtable_size) :
-        make_lw_shared<memtable_list>([this] { return seal_active_memtable(); }, [this] { return new_memtable(); }, _config.max_memtable_size))
-    , _sstables(make_lw_shared<sstable_list>())
-    , _cache(_schema, sstables_as_mutation_source(), sstables_as_key_source(), global_cache_tracker())
-    , _commitlog(nullptr)
+    , _commitlog(cl)
     , _compaction_manager(compaction_manager)
     , _flush_queue(std::make_unique<memtable_flush_queue>())
 {
