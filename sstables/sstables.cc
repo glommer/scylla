@@ -1497,9 +1497,27 @@ void sstable::prepare_write_components(::mutation_reader mr, uint64_t estimated_
     }
 }
 
+static thread_local unsigned pending_sstable_writes = 0;
+
 static seastar::thread_scheduling_group* scheduling_group() {
     static thread_local seastar::thread_scheduling_group scheduling_group(std::chrono::microseconds(500), 0.05);
     return &scheduling_group;
+}
+
+static void update_scheduling_group() {
+    auto* grp = scheduling_group();
+    auto new_usage = 0.05f * (((pending_sstable_writes - 1) >> 1) + 1);
+    grp->update_usage(new_usage);
+}
+
+static void begin_write_sstable() {
+    ++pending_sstable_writes;
+    update_scheduling_group();
+}
+
+static void end_write_sstable() {
+    --pending_sstable_writes;
+    update_scheduling_group();
 }
 
 future<> sstable::write_components(memtable& mt, bool backup, const io_priority_class& pc) {
@@ -1507,9 +1525,12 @@ future<> sstable::write_components(memtable& mt, bool backup, const io_priority_
 
     seastar::thread_attributes attr;
     attr.scheduling_group = scheduling_group();
+    begin_write_sstable();
     return seastar::async(std::move(attr), [this, &mt, backup, &pc] () mutable {
         write_components(mt.make_reader(mt.schema()),
                mt.partition_count(), mt.schema(), std::numeric_limits<uint64_t>::max(), backup, pc);
+    }).finally([] {
+        end_write_sstable();
     });
 }
 
