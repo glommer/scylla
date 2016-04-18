@@ -97,6 +97,7 @@ column_family::column_family(schema_ptr schema, config config, db::commitlog* cl
     , _commitlog(cl)
     , _compaction_manager(compaction_manager)
     , _flush_queue(std::make_unique<memtable_flush_queue>())
+    , _compaction_scheduling_group(std::chrono::microseconds(500), 0.05)
 {
     if (!_config.enable_disk_writes) {
         dblog.warn("Writes disabled, column family no durable.");
@@ -513,6 +514,13 @@ void column_family::update_stats_for_new_sstable(uint64_t disk_space_used_by_sst
     _stats.live_sstable_count++;
 }
 
+void column_family::update_compaction_scheduling_group() {
+    auto backlog = (_sstables->size() - _total_compacting_sstables) / 32;
+    //printf("Size of backlog: %ld\n", backlog);
+    auto new_usage = 0.05f * (1 + backlog);
+    _compaction_scheduling_group.update_usage(new_usage);
+}
+
 void column_family::add_sstable(sstables::sstable&& sstable) {
     add_sstable(make_lw_shared(std::move(sstable)));
 }
@@ -523,6 +531,12 @@ void column_family::add_sstable(lw_shared_ptr<sstables::sstable> sstable) {
     _sstables = make_lw_shared<sstable_list>(*_sstables);
     update_stats_for_new_sstable(sstable->bytes_on_disk());
     _sstables->emplace(generation, std::move(sstable));
+    update_compaction_scheduling_group();
+#if 0
+    printf("Adding SSTABLE. State of CONFIG %ld, compacted %ld\n",
+            _sstables->size(),
+            _total_compacting_sstables);
+#endif
 }
 
 lw_shared_ptr<memtable> column_family::new_memtable() {
@@ -978,11 +992,17 @@ void column_family::do_trigger_compaction() {
 
 future<> column_family::run_compaction(sstables::compaction_descriptor descriptor) {
     assert(_stats.pending_compactions > 0);
+    auto compacting_sstables = descriptor.sstables.size();
+    _total_compacting_sstables += compacting_sstables;
+    update_compaction_scheduling_group();
     return compact_sstables(std::move(descriptor)).then([this] {
         // only do this on success. (no exceptions)
         // in that case, we rely on it being still set
         // for reqeueuing
         _stats.pending_compactions--;
+    }).finally([this, compacting_sstables] {
+        _total_compacting_sstables -= compacting_sstables;
+        update_compaction_scheduling_group();
     });
 }
 
@@ -2490,6 +2510,8 @@ void column_family::clear() {
 future<db::replay_position> column_family::discard_sstables(db_clock::time_point truncated_at) {
     assert(_compaction_disabled > 0);
     assert(!compaction_manager_queued());
+
+    // FIXME: account sstables
 
     return with_lock(_sstables_lock.for_read(), [this, truncated_at] {
         db::replay_position rp;

@@ -44,6 +44,8 @@ public:
         int64_t pending_tasks = 0;
         int64_t completed_tasks = 0;
         uint64_t active_tasks = 0; // Number of compaction going on.
+        int64_t total_sstables = 0;
+        int64_t total_compacting_sstables = 0;
     };
 private:
     struct task {

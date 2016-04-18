@@ -1481,29 +1481,29 @@ void sstable::prepare_write_components(::mutation_reader mr, uint64_t estimated_
 
 static thread_local unsigned pending_sstable_writes = 0;
 
-seastar::thread_scheduling_group* scheduling_group() {
+static seastar::thread_scheduling_group* scheduling_group() {
     static thread_local seastar::thread_scheduling_group scheduling_group(std::chrono::microseconds(500), 0.05);
     return &scheduling_group;
 }
 
-void update_scheduling_group() {
+static void update_scheduling_group() {
     auto* grp = scheduling_group();
     auto new_usage = 0.05f * (((pending_sstable_writes - 1) >> 1) + 1);
     grp->update_usage(new_usage);
 }
 
-void sstable::begin_write_sstable() {
+static void begin_write_sstable() {
     ++pending_sstable_writes;
     update_scheduling_group();
 }
 
-void sstable::end_write_sstable() {
+static void end_write_sstable() {
     --pending_sstable_writes;
     update_scheduling_group();
 }
 
-seastar::thread_attributes
-sstable::thread_attributes() {
+static seastar::thread_attributes
+thread_attributes() {
     seastar::thread_attributes attr;
     attr.scheduling_group = scheduling_group();
     return attr;
@@ -1512,12 +1512,12 @@ sstable::thread_attributes() {
 future<> sstable::write_components(memtable& mt, bool backup, const io_priority_class& pc) {
     _collector.set_replay_position(mt.replay_position());
 
-    sstable::begin_write_sstable();
-    return seastar::async(sstable::thread_attributes(), [this, &mt, backup, &pc] () mutable {
+    begin_write_sstable();
+    return seastar::async(thread_attributes(), [this, &mt, backup, &pc] () mutable {
         write_components(mt.make_reader(mt.schema()),
                mt.partition_count(), mt.schema(), std::numeric_limits<uint64_t>::max(), backup, pc);
     }).finally([] {
-        sstable::end_write_sstable();
+        end_write_sstable();
     });
 }
 

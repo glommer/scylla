@@ -72,6 +72,7 @@
 #include "key_reader.hh"
 #include <seastar/core/rwlock.hh>
 #include <seastar/core/shared_future.hh>
+#include <seastar/core/thread.hh>
 
 class frozen_mutation;
 class reconcilable_result;
@@ -281,6 +282,9 @@ private:
     // Whether or not a cf is queued by its compaction manager.
     bool _compaction_manager_queued = false;
     int _compaction_disabled = 0;
+
+    int64_t _total_compacting_sstables = 0;
+
     class memtable_flush_queue;
     std::unique_ptr<memtable_flush_queue> _flush_queue;
     // Because streaming mutations bypass the commitlog, there is
@@ -331,7 +335,12 @@ private:
     partition_presence_checker make_partition_presence_checker(lw_shared_ptr<sstable_list> old_sstables);
     std::chrono::steady_clock::time_point _sstable_writes_disabled_at;
     void do_trigger_compaction();
+    void update_compaction_scheduling_group();
+    seastar::thread_scheduling_group _compaction_scheduling_group;
 public:
+    seastar::thread_scheduling_group* compaction_scheduling_group() {
+        return &_compaction_scheduling_group;
+    };
 
     // This function should be called when this column family is ready for writes, IOW,
     // to produce SSTables. Extensive details about why this is important can be found

@@ -259,10 +259,13 @@ compact_sstables(std::vector<shared_sstable> sstables, column_family& cf, std::f
     auto start_time = db_clock::now();
 
     bool backup = cf.incremental_backups_enabled();
+    seastar::thread_attributes attr;
+    attr.scheduling_group = cf.compaction_scheduling_group();
+
     // If there is a maximum size for a sstable, it's possible that more than
     // one sstable will be generated for all partitions to be written.
-    return seastar::async(sstable::thread_attributes(),
-                          [creator, ancestors, rp, max_sstable_size, sstable_level, partitions_per_sstable, schema, backup, info, reader = std::move(reader)] () mutable {
+    return seastar::async(std::move(attr),
+                          [creator, ancestors, rp, max_sstable_size, sstable_level, partitions_per_sstable, schema, backup, info, reader = std::move(reader), &cf] () mutable {
         while (true) {
             if (info->is_stop_requested()) {
                 // Compaction manager will catch this exception and re-schedule the compaction.
@@ -284,11 +287,7 @@ compact_sstables(std::vector<shared_sstable> sstables, column_family& cf, std::f
             ::mutation_reader mutation_queue_reader = make_mutation_reader<queue_reader>(reader, info, std::move(mut));
             auto&& priority = service::get_local_compaction_priority();
 
-            {
-                sstable::begin_write_sstable();
-                auto account = defer([] { sstable::end_write_sstable(); });
-                newtab->write_components(std::move(mutation_queue_reader), partitions_per_sstable, schema, max_sstable_size, backup, priority);
-            }
+            newtab->write_components(std::move(mutation_queue_reader), partitions_per_sstable, schema, max_sstable_size, backup, priority);
             newtab->open_data().get();
             info->end_size += newtab->data_size();
         }
