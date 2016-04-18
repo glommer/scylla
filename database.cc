@@ -528,6 +528,14 @@ void column_family::update_stats_for_new_sstable(uint64_t disk_space_used_by_sst
     _stats.live_sstable_count++;
 }
 
+void column_family::update_compaction_scheduling_group() {
+    // FIXME: We should be consulting the strategy to determine how many is too
+    // many. For now, 32 will serve as a magic number. Do better.
+    auto backlog = (_sstables->size() - _total_compacting_sstables) / 32;
+    auto new_usage = 0.05f * (1 + backlog);
+    _compaction_scheduling_group.update_usage(new_usage);
+}
+
 void column_family::add_sstable(sstables::sstable&& sstable) {
     add_sstable(make_lw_shared(std::move(sstable)));
 }
@@ -538,6 +546,7 @@ void column_family::add_sstable(lw_shared_ptr<sstables::sstable> sstable) {
     _sstables = make_lw_shared<sstable_list>(*_sstables);
     update_stats_for_new_sstable(sstable->bytes_on_disk());
     _sstables->emplace(generation, std::move(sstable));
+    update_compaction_scheduling_group();
 }
 
 future<>
@@ -1010,11 +1019,17 @@ void column_family::do_trigger_compaction() {
 
 future<> column_family::run_compaction(sstables::compaction_descriptor descriptor) {
     assert(_stats.pending_compactions > 0);
+    auto compacting_sstables = descriptor.sstables.size();
+    _total_compacting_sstables += compacting_sstables;
+    update_compaction_scheduling_group();
     return compact_sstables(std::move(descriptor)).then([this] {
         // only do this on success. (no exceptions)
         // in that case, we rely on it being still set
         // for reqeueuing
         _stats.pending_compactions--;
+    }).finally([this, compacting_sstables] {
+        _total_compacting_sstables -= compacting_sstables;
+        update_compaction_scheduling_group();
     });
 }
 
