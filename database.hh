@@ -107,7 +107,6 @@ class throttle_state {
     friend class memtable_list;
 
     circular_buffer<promise<>> _throttled_requests;
-    timer<> _throttling_timer{[this] { unthrottle(); }};
     void unthrottle();
     bool should_throttle() const {
         if (_region_group.memory_used() > _max_space) {
@@ -125,7 +124,7 @@ public:
         , _parent(parent)
     {}
 
-    future<> throttle();
+    future<> throttle(std::function<future<>()> func);
 };
 
 
@@ -183,7 +182,9 @@ public:
     }
 
     future<> seal_active_memtable() {
-        return _seal_fn();
+        return _seal_fn().then([this] {
+            _throttler->unthrottle();
+        });
     }
 
     auto begin() noexcept {

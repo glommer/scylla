@@ -1992,33 +1992,32 @@ future<> database::do_apply(schema_ptr s, const frozen_mutation& m) {
     return apply_in_memory(m, s, db::replay_position());
 }
 
-future<> throttle_state::throttle() {
+future<> throttle_state::throttle(std::function<future<>()> func) {
     if (!should_throttle() && _throttled_requests.empty()) {
-        // All is well, go ahead
-        return make_ready_future<>();
+        return func();
     }
-    // We must throttle, wait a bit
-    if (_throttled_requests.empty()) {
-        _throttling_timer.arm_periodic(10ms);
-    }
+
     _throttled_requests.emplace_back();
-    return _throttled_requests.back().get_future();
+    return _throttled_requests.back().get_future().then([this, func = std::move(func)] {
+        return do_until([this] { return !should_throttle(); }, [this] {
+            _throttled_requests.emplace_front();
+            return _throttled_requests.front().get_future();
+        }).then([this, func = std::move(func)] {
+            return func();
+        });
+    }).then([this] {
+        unthrottle();
+    });
 }
 
 void throttle_state::unthrottle() {
-    // Release one request per free 1MB we have
-    // FIXME: improve this
-    if (should_throttle()) {
+    if (_throttled_requests.empty()) {
         return;
     }
-    size_t avail = std::max((_max_space - _region_group.memory_used()) >> 20, size_t(1));
-    avail = std::min(_throttled_requests.size(), avail);
-    for (size_t i = 0; i < avail; ++i) {
+
+    if (!should_throttle()) {
         _throttled_requests.front().set_value();
         _throttled_requests.pop_front();
-    }
-    if (_throttled_requests.empty()) {
-        _throttling_timer.cancel();
     }
 }
 
@@ -2026,7 +2025,7 @@ future<> database::apply(schema_ptr s, const frozen_mutation& m) {
     if (dblog.is_enabled(logging::log_level::trace)) {
         dblog.trace("apply {}", m.pretty_printer(s));
     }
-    return _memtables_throttler.throttle().then([this, &m, s = std::move(s)] {
+    return _memtables_throttler.throttle([this, &m, s = std::move(s)] {
         return do_apply(std::move(s), m);
     }).then([this, s = _stats] {
         ++s->total_writes;
@@ -2038,26 +2037,11 @@ future<> database::apply_streaming_mutation(schema_ptr s, const frozen_mutation&
         throw std::runtime_error(sprint("attempted to mutate using not synced schema of %s.%s, version=%s",
                                  s->ks_name(), s->cf_name(), s->version()));
     }
-
-    // TODO (maybe): This will use the same memory region group as memtables, so when
-    // one of them throttles, both will.
-    //
-    // It would be possible to provide further QoS for CQL originated memtables
-    // by keeping the streaming memtables into a different region group, with its own
-    // separate limit.
-    //
-    // Because, however, there are many other limits in play that may kick in,
-    // I am not convinced that this will ever be a problem.
-    //
-    // If we do find ourselves in the situation that we are throttling incoming
-    // writes due to high level of streaming writes, and we are sure that this
-    // is the best solution, we can just change the memtable creation method so
-    // that each kind of memtable creates from a different region group - and then
-    // update the throttle conditions accordingly.
-    return _streaming_throttler.throttle().then([this, &m, s = std::move(s)] {
+    return _streaming_throttler.throttle([this, &m, s = std::move(s)] {
         auto uuid = m.column_family_id();
         auto& cf = find_column_family(uuid);
         cf.apply_streaming_mutation(s, std::move(m));
+        return make_ready_future<>();
     });
 }
 
