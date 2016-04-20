@@ -98,10 +98,13 @@ void make(database& db, bool durable, bool volatile_testing_only);
 }
 }
 
+class memtable_list;
+
 class throttle_state {
     size_t _max_space;
     logalloc::region_group& _region_group;
     throttle_state* _parent;
+    friend class memtable_list;
 
     circular_buffer<promise<>> _throttled_requests;
     timer<> _throttling_timer{[this] { unthrottle(); }};
@@ -152,14 +155,14 @@ class memtable_list {
     std::function<future<> ()> _seal_fn;
     std::function<schema_ptr()> _current_schema;
     size_t _max_memtable_size;
-    logalloc::region_group* _dirty_memory_region_group;
+    throttle_state* _throttler;
 public:
-    memtable_list(std::function<future<> ()> seal_fn, std::function<schema_ptr()> cs, size_t max_memtable_size, logalloc::region_group* region_group)
+    memtable_list(std::function<future<> ()> seal_fn, std::function<schema_ptr()> cs, size_t max_memtable_size, throttle_state* throttler)
         : _memtables({})
         , _seal_fn(seal_fn)
         , _current_schema(cs)
         , _max_memtable_size(max_memtable_size)
-        , _dirty_memory_region_group(region_group) {
+        , _throttler(throttler) {
         add_memtable();
     }
 
@@ -220,7 +223,7 @@ public:
     }
 private:
     lw_shared_ptr<memtable> new_memtable() {
-        return make_lw_shared<memtable>(_current_schema(), _dirty_memory_region_group);
+        return make_lw_shared<memtable>(_current_schema(), &_throttler->_region_group);
     }
 };
 
@@ -247,8 +250,8 @@ public:
         bool enable_incremental_backups = false;
         size_t max_memtable_size = 5'000'000;
         size_t max_streaming_memtable_size = 5'000'000;
-        logalloc::region_group* dirty_memory_region_group = nullptr;
-        logalloc::region_group* streaming_dirty_memory_region_group = nullptr;
+        throttle_state* memtables_throttler = nullptr;
+        throttle_state* streaming_throttler = nullptr;
         ::cf_stats* cf_stats = nullptr;
     };
     struct no_commitlog {};
@@ -725,8 +728,8 @@ public:
         bool enable_incremental_backups = false;
         size_t max_memtable_size = 5'000'000;
         size_t max_streaming_memtable_size = 5'000'000;
-        logalloc::region_group* dirty_memory_region_group = nullptr;
-        logalloc::region_group* streaming_dirty_memory_region_group = nullptr;
+        throttle_state* memtables_throttler = nullptr;
+        throttle_state* streaming_throttler = nullptr;
         ::cf_stats* cf_stats = nullptr;
     };
 private:

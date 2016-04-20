@@ -91,14 +91,14 @@ lw_shared_ptr<memtable_list>
 column_family::make_memtable_list() {
     auto seal = [this] { return seal_active_memtable(); };
     auto get_schema = [this] { return schema(); };
-    return make_lw_shared<memtable_list>(std::move(seal), std::move(get_schema), _config.max_memtable_size, _config.dirty_memory_region_group);
+    return make_lw_shared<memtable_list>(std::move(seal), std::move(get_schema), _config.max_memtable_size, _config.memtables_throttler);
 }
 
 lw_shared_ptr<memtable_list>
 column_family::make_streaming_memtable_list() {
     auto seal = [this] { return seal_active_streaming_memtable_delayed(); };
     auto get_schema =  [this] { return schema(); };
-    return make_lw_shared<memtable_list>(std::move(seal), std::move(get_schema), _config.max_streaming_memtable_size, _config.streaming_dirty_memory_region_group);
+    return make_lw_shared<memtable_list>(std::move(seal), std::move(get_schema), _config.max_streaming_memtable_size, _config.streaming_throttler);
 }
 
 column_family::column_family(schema_ptr schema, config config, db::commitlog& cl, compaction_manager& compaction_manager)
@@ -1634,8 +1634,8 @@ keyspace::make_column_family_config(const schema& s) const {
     cfg.enable_cache = _config.enable_cache;
     cfg.max_memtable_size = _config.max_memtable_size;
     cfg.max_streaming_memtable_size = _config.max_streaming_memtable_size;
-    cfg.dirty_memory_region_group = _config.dirty_memory_region_group;
-    cfg.streaming_dirty_memory_region_group = _config.streaming_dirty_memory_region_group;
+    cfg.memtables_throttler = _config.memtables_throttler;
+    cfg.streaming_throttler = _config.streaming_throttler;
     cfg.cf_stats = _config.cf_stats;
     cfg.enable_incremental_backups = _config.enable_incremental_backups;
 
@@ -2086,8 +2086,8 @@ database::make_keyspace_config(const keyspace_metadata& ksm) {
         // All writes should go to the main memtable list if we're not durable
         cfg.max_streaming_memtable_size = 0;
     }
-    cfg.dirty_memory_region_group = &_dirty_memory_region_group;
-    cfg.streaming_dirty_memory_region_group = &_streaming_dirty_memory_region_group;
+    cfg.memtables_throttler = &_memtables_throttler;
+    cfg.streaming_throttler = &_streaming_throttler;
     cfg.cf_stats = &_cf_stats;
     cfg.enable_incremental_backups = _enable_incremental_backups;
     return cfg;
