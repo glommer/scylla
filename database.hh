@@ -104,10 +104,18 @@ class throttle_state {
     size_t _max_space;
     logalloc::region_group& _region_group;
     throttle_state* _parent;
+    std::unordered_set<memtable_list*> _memtable_lists;
     friend class memtable_list;
 
     circular_buffer<promise<>> _throttled_requests;
+    future<> add_throttled_request();
+    future<> reinsert_throttled_request();
+    bool _forced_flush_happening = false;
     void unthrottle();
+    void notify_flush() {
+        _forced_flush_happening = false;
+        unthrottle();
+    }
     bool should_throttle() const {
         if (_region_group.memory_used() > _max_space) {
             return true;
@@ -163,6 +171,7 @@ public:
         , _max_memtable_size(max_memtable_size)
         , _throttler(throttler) {
         add_memtable();
+        _throttler->_memtable_lists.insert(this);
     }
 
     shared_memtable back() {
@@ -183,8 +192,13 @@ public:
 
     future<> seal_active_memtable() {
         return _seal_fn().then([this] {
-            _throttler->unthrottle();
+            _throttler->notify_flush();
         });
+    }
+
+    future<> close() {
+        _throttler->_memtable_lists.erase(this);
+        return make_ready_future<>();
     }
 
     auto begin() noexcept {

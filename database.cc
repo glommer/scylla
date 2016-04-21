@@ -771,7 +771,11 @@ column_family::stop() {
     return _compaction_manager.remove(this).then([this] {
         // Nest, instead of using when_all, so we don't lose any exceptions.
         return _flush_queue->close().then([this] {
-            return _streaming_flush_gate.close();
+            return _memtables->close();
+        }).then([this] {
+            return _streaming_flush_gate.close().then([this] {
+                return _streaming_memtables->close();
+            });
         });
     }).then([this] {
         return _sstable_deletion_gate.close();
@@ -1992,16 +1996,30 @@ future<> database::do_apply(schema_ptr s, const frozen_mutation& m) {
     return apply_in_memory(m, s, db::replay_position());
 }
 
+future<> throttle_state::add_throttled_request() {
+    _throttled_requests.emplace_back();
+    if (_throttled_requests.size() == 1) {
+        unthrottle();
+    }
+    return _throttled_requests.back().get_future();
+}
+
+future<> throttle_state::reinsert_throttled_request() {
+    _throttled_requests.emplace_front();
+    if (_throttled_requests.size() == 1) {
+        unthrottle();
+    }
+    return _throttled_requests.front().get_future();
+}
+
 future<> throttle_state::throttle(std::function<future<>()> func) {
     if (!should_throttle() && _throttled_requests.empty()) {
         return func();
     }
 
-    _throttled_requests.emplace_back();
-    return _throttled_requests.back().get_future().then([this, func = std::move(func)] {
+    return add_throttled_request().then([this, func = std::move(func)] {
         return do_until([this] { return !should_throttle(); }, [this] {
-            _throttled_requests.emplace_front();
-            return _throttled_requests.front().get_future();
+            return reinsert_throttled_request();
         }).then([this, func = std::move(func)] {
             return func();
         });
@@ -2018,6 +2036,23 @@ void throttle_state::unthrottle() {
     if (!should_throttle()) {
         _throttled_requests.front().set_value();
         _throttled_requests.pop_front();
+    } else if (!_forced_flush_happening) {
+        memtable_list* mt = {};
+        size_t max_size = 0;
+        for (auto& mtl : _memtable_lists) {
+            if (mtl->back()->occupancy().total_space() > max_size) {
+                mt = mtl;
+            }
+        }
+        if (mt) {
+            _forced_flush_happening = true;
+            mt->seal_active_memtable();
+        } else {
+            // We'll reach this if there are no registered memtables. Shouldn't happen, but
+            // if it does there is no need to crash the database. An explicit flush(), for
+            // instance, could fix this. But we want to know that this is going on.
+            dblog.warn("Under throttling state, and yet there seems to be no memory to free!");
+        }
     }
 }
 
