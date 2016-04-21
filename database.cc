@@ -580,7 +580,7 @@ column_family::seal_active_streaming_memtable_delayed() {
     }
 
     if (_streaming_memtables->should_flush()) {
-        return seal_active_streaming_memtable();
+        return _streaming_memtables->seal_active_memtable();
     }
 
     if (!_delayed_streaming_flush.armed()) {
@@ -766,8 +766,8 @@ column_family::start() {
 
 future<>
 column_family::stop() {
-    seal_active_memtable();
-    seal_active_streaming_memtable();
+    _memtables->seal_active_memtable();
+    _streaming_memtables->seal_active_memtable();
     return _compaction_manager.remove(this).then([this] {
         // Nest, instead of using when_all, so we don't lose any exceptions.
         return _flush_queue->close().then([this] {
@@ -2515,7 +2515,7 @@ future<> column_family::flush() {
     // FIXME: this will synchronously wait for this write to finish, but doesn't guarantee
     // anything about previous writes.
     _stats.pending_flushes++;
-    return seal_active_memtable().finally([this]() mutable {
+    return _memtables->seal_active_memtable().finally([this]() mutable {
         _stats.pending_flushes--;
         // In origin memtable_switch_count is incremented inside
         // ColumnFamilyMeetrics Flush.run
@@ -2537,7 +2537,7 @@ future<> column_family::flush(const db::replay_position& pos) {
     // We ignore this for now and just say that if we're asked for
     // a CF and it exists, we pretty much have to have data that needs
     // flushing. Let's do it.
-    return seal_active_memtable();
+    return _memtables->seal_active_memtable();
 }
 
 // FIXME: We can do much better than this in terms of cache management. Right
