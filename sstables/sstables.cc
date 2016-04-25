@@ -927,6 +927,7 @@ void sstable::write_simple(T& component, const io_priority_class& pc) {
     file_output_stream_options options;
     options.buffer_size = sstable_buffer_size;
     options.io_priority_class = pc;
+    options.write_behind = sstable_write_behind;
     auto w = file_writer(std::move(f), std::move(options));
     write(w, component);
     w.flush().get();
@@ -1356,6 +1357,7 @@ void sstable::do_write_components(::mutation_reader mr,
     file_output_stream_options options;
     options.buffer_size = sstable_buffer_size;
     options.io_priority_class = pc;
+    options.write_behind = sstable_write_behind;
     auto index = make_shared<file_writer>(_index_file, std::move(options));
 
     auto filter_fp_chance = schema->bloom_filter_fp_chance();
@@ -1470,10 +1472,12 @@ void sstable::prepare_write_components(::mutation_reader mr, uint64_t estimated_
     // CRC component must only be present when compression isn't enabled.
     bool checksum_file = has_component(sstable::component_type::CRC);
 
+    file_output_stream_options options;
+    options.io_priority_class = pc;
+    options.write_behind = sstable_write_behind;
+
     if (checksum_file) {
-        file_output_stream_options options;
         options.buffer_size = sstable_buffer_size;
-        options.io_priority_class = pc;
 
         auto w = make_shared<checksummed_file_writer>(_data_file, std::move(options), checksum_file);
         this->do_write_components(std::move(mr), estimated_partitions, std::move(schema), max_sstable_size, *w, pc);
@@ -1483,9 +1487,6 @@ void sstable::prepare_write_components(::mutation_reader mr, uint64_t estimated_
         write_digest(filename(sstable::component_type::Digest), w->full_checksum());
         write_crc(filename(sstable::component_type::CRC), w->finalize_checksum());
     } else {
-        file_output_stream_options options;
-        options.io_priority_class = pc;
-
         prepare_compression(_compression, *schema);
         auto w = make_shared<file_writer>(make_compressed_file_output_stream(_data_file, std::move(options), &_compression));
         this->do_write_components(std::move(mr), estimated_partitions, std::move(schema), max_sstable_size, *w, pc);

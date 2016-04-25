@@ -335,6 +335,8 @@ private:
 
     size_t sstable_buffer_size = 128*1024;
 
+    static constexpr unsigned sstable_write_behind = 4;
+
     void do_write_components(::mutation_reader mr,
             uint64_t estimated_partitions, schema_ptr schema, uint64_t max_sstable_size,
             file_writer& out, const io_priority_class& pc);
