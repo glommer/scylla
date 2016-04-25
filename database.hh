@@ -121,13 +121,16 @@ class replay_position_reordered_exception : public std::exception {};
 class memtable_list {
     using shared_memtable = lw_shared_ptr<memtable>;
     std::vector<shared_memtable> _memtables;
-    std::function<future<> ()> _seal_fn;
+    std::function<shared_memtable()> _prepare_seal_fn;
+    std::function<future<> (shared_memtable)> _seal_fn;
     std::function<schema_ptr()> _current_schema;
     size_t _max_memtable_size;
     logalloc::region_group* _dirty_memory_region_group;
+    semaphore _flush_semaphore;
 public:
-    memtable_list(std::function<future<> ()> seal_fn, std::function<schema_ptr()> cs, size_t max_memtable_size, logalloc::region_group* region_group)
+    memtable_list(std::function<shared_memtable ()> prepare_fn, std::function<future<> (shared_memtable)> seal_fn, std::function<schema_ptr()> cs, size_t max_memtable_size, logalloc::region_group* region_group)
         : _memtables({})
+        , _prepare_seal_fn(prepare_fn)
         , _seal_fn(seal_fn)
         , _current_schema(cs)
         , _max_memtable_size(max_memtable_size)
@@ -152,7 +155,16 @@ public:
     }
 
     future<> seal_active_memtable() {
-        return _seal_fn();
+        if (back()->empty()) {
+            return make_ready_future<>();
+        }
+
+        auto mt = _prepare_seal_fn();
+        return _flush_semaphore.wait().then([this, mt] {
+            return _seal_fn(mt);
+        }).finally([this] {
+            _flush_semaphore.signal();
+        });
     }
 
     auto begin() noexcept {
@@ -187,7 +199,7 @@ public:
         if (should_flush()) {
             // FIXME: if sparse, do some in-memory compaction first
             // FIXME: maybe merge with other in-memory memtables
-            _seal_fn();
+            seal_active_memtable();
         }
     }
 private:
@@ -557,7 +569,8 @@ private:
     // But it is possible to synchronously wait for the seal to complete by
     // waiting on this future. This is useful in situations where we want to
     // synchronously flush data to disk.
-    future<> seal_active_memtable();
+    future<> seal_active_memtable(lw_shared_ptr<memtable> mt);
+    lw_shared_ptr<memtable> prepare_seal_active_memtable();
 
     // I am assuming here that the repair process will potentially send ranges containing
     // few mutations, definitely not enough to fill a memtable. It wants to know whether or
@@ -580,9 +593,13 @@ private:
     // repair can now choose whatever strategy - small or big ranges - it wants, resting assure
     // that the incoming memtables will be coalesced together.
     shared_promise<> _waiting_streaming_flushes;
-    timer<> _delayed_streaming_flush{[this] { seal_active_streaming_memtable(); }};
-    future<> seal_active_streaming_memtable();
-    future<> seal_active_streaming_memtable_delayed();
+    timer<> _delayed_streaming_flush{[this] {
+        auto old = prepare_seal_active_streaming_memtable(true);
+        seal_active_streaming_memtable(old);
+    }};
+    future<> seal_active_streaming_memtable(lw_shared_ptr<memtable> mt);
+    future<> seal_active_streaming_memtable_delayed(lw_shared_ptr<memtable> mt);
+    lw_shared_ptr<memtable> prepare_seal_active_streaming_memtable(bool force = false);
 
     // filter manifest.json files out
     static bool manifest_json_filter(const sstring& fname);

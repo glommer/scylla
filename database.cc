@@ -89,23 +89,26 @@ public:
 
 lw_shared_ptr<memtable_list>
 column_family::make_memory_only_memtable_list() {
-    auto seal = [this] { return make_ready_future<>(); };
+    auto prepare = [this] { return _memtables->back(); };
+    auto seal = [this] (auto mt) { return make_ready_future<>(); };
     auto get_schema = [this] { return schema(); };
-    return make_lw_shared<memtable_list>(std::move(seal), std::move(get_schema), _config.max_memtable_size, _config.dirty_memory_region_group);
+    return make_lw_shared<memtable_list>(std::move(prepare), std::move(seal), std::move(get_schema), _config.max_memtable_size, _config.dirty_memory_region_group);
 }
 
 lw_shared_ptr<memtable_list>
 column_family::make_memtable_list() {
-    auto seal = [this] { return seal_active_memtable(); };
+    auto prepare = [this] { return prepare_seal_active_memtable(); };
+    auto seal = [this] (auto mt) { return this->seal_active_memtable(mt); };
     auto get_schema = [this] { return schema(); };
-    return make_lw_shared<memtable_list>(std::move(seal), std::move(get_schema), _config.max_memtable_size, _config.dirty_memory_region_group);
+    return make_lw_shared<memtable_list>(std::move(prepare), std::move(seal), std::move(get_schema), _config.max_memtable_size, _config.dirty_memory_region_group);
 }
 
 lw_shared_ptr<memtable_list>
 column_family::make_streaming_memtable_list() {
-    auto seal = [this] { return seal_active_streaming_memtable_delayed(); };
+    auto prepare = [this] { return prepare_seal_active_streaming_memtable(); };
+    auto seal = [this] (auto mt) { return this->seal_active_streaming_memtable_delayed(mt); };
     auto get_schema =  [this] { return schema(); };
-    return make_lw_shared<memtable_list>(std::move(seal), std::move(get_schema), _config.max_streaming_memtable_size, _config.streaming_dirty_memory_region_group);
+    return make_lw_shared<memtable_list>(std::move(prepare), std::move(seal), std::move(get_schema), _config.max_streaming_memtable_size, _config.streaming_dirty_memory_region_group);
 }
 
 column_family::column_family(schema_ptr schema, config config, db::commitlog* cl, compaction_manager& compaction_manager)
@@ -557,6 +560,15 @@ column_family::update_cache(memtable& m, lw_shared_ptr<sstable_list> old_sstable
     }
 }
 
+lw_shared_ptr<memtable>
+column_family::prepare_seal_active_streaming_memtable(bool force) {
+    auto old = _streaming_memtables->back();
+    if (force || _streaming_memtables->should_flush()) {
+        _streaming_memtables->add_memtable();
+    }
+    return old;
+}
+
 // FIXME: because we are coalescing, it could be that mutations belonging to the same
 // range end up in two different tables. Technically, we should wait for both. However,
 // the only way we have to make this happen now is to wait on all previous writes. This
@@ -564,14 +576,9 @@ column_family::update_cache(memtable& m, lw_shared_ptr<sstable_list> old_sstable
 // at the PREPARE messages, and then noting what is the minimum future we should be
 // waiting for.
 future<>
-column_family::seal_active_streaming_memtable_delayed() {
-    auto old = _streaming_memtables->back();
-    if (old->empty()) {
-        return make_ready_future<>();
-    }
-
+column_family::seal_active_streaming_memtable_delayed(lw_shared_ptr<memtable> old) {
     if (_streaming_memtables->should_flush()) {
-        return seal_active_streaming_memtable();
+        return seal_active_streaming_memtable(old);
     }
 
     if (!_delayed_streaming_flush.armed()) {
@@ -590,13 +597,9 @@ column_family::seal_active_streaming_memtable_delayed() {
 }
 
 future<>
-column_family::seal_active_streaming_memtable() {
-    auto old = _streaming_memtables->back();
-    if (old->empty()) {
-        return make_ready_future<>();
-    }
-    _streaming_memtables->add_memtable();
+column_family::seal_active_streaming_memtable(lw_shared_ptr<memtable> old) {
     _streaming_memtables->erase(old);
+
     return with_gate(_streaming_flush_gate, [this, old] {
         _delayed_streaming_flush.cancel();
 
@@ -648,23 +651,21 @@ column_family::seal_active_streaming_memtable() {
     });
 }
 
-
-future<>
-column_family::seal_active_memtable() {
+lw_shared_ptr<memtable>
+column_family::prepare_seal_active_memtable() {
     auto old = _memtables->back();
     dblog.debug("Sealing active memtable, partitions: {}, occupancy: {}", old->partition_count(), old->occupancy());
-
-    if (old->empty()) {
-        dblog.debug("Memtable is empty");
-        return make_ready_future<>();
-    }
     _memtables->add_memtable();
 
     assert(_highest_flushed_rp < old->replay_position()
     || (_highest_flushed_rp == db::replay_position() && old->replay_position() == db::replay_position())
     );
     _highest_flushed_rp = old->replay_position();
+    return old;
+}
 
+future<>
+column_family::seal_active_memtable(lw_shared_ptr<memtable> old) {
     return _flush_queue->run_cf_flush(old->replay_position(), [old, this] {
         return repeat([this, old] {
             return with_lock(_sstables_lock.for_read(), [this, old] {
