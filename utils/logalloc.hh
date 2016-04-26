@@ -21,10 +21,15 @@
 
 #pragma once
 
+#include <unordered_set>
 #include <bits/unique_ptr.h>
 #include <seastar/core/scollectd.hh>
 #include <seastar/core/memory.hh>
 #include <seastar/core/shared_ptr.hh>
+#include <seastar/core/circular_buffer.hh>
+#include <seastar/core/future.hh>
+#include <seastar/core/future-util.hh>
+#include <seastar/util/defer.hh>
 #include "allocation_strategy.hh"
 
 namespace logalloc {
@@ -53,7 +58,37 @@ class region_group {
     size_t _throttle_threshold = std::numeric_limits<size_t>::max();
     std::vector<region_group*> _subgroups;
     std::vector<region_impl*> _regions;
+
+    // It is a more common idiom to just hold the promises in the circular buffer and make them
+    // ready. However, in the time between the promise being made ready and the function execution,
+    // it could be that our memory usage went up again. To protect against that, we have to recheck
+    // if memory is still available after the future resolves.
+    //
+    // But we can greatly simplify it if we store the function itself in the circular_buffer, and
+    // execute it synchronously in release_requests() when we are sure memory is available.
+    //
+    // This allows us to easily provide strong execution guarantees while keeping all re-check
+    // complication in release_requests and keep the main request execution path simpler.
+    circular_buffer<std::function<void()>> _blocked_requests;
+
+    // All requests waiting for execution are kept in _blocked_requests (explained above) in the
+    // region_group they were executed against. However, it could be that they are blocked not due
+    // to their region group but to an ancestor. To handle these cases we will keep a list of
+    // foreign (descendent) region_groups that have requests that are waiting on us.
+    //
+    // Please note that what we keep here are not requests, and can be thought as just messages. The
+    // requests themselves are kept in the region_group in which they originated. When we see that
+    // there are region_groups waiting on us, we broadcast these messages to the waiters and they
+    // will then decide whether they can now run or if they have to wait on us again (or potentially
+    // a different ancestor)
+    circular_buffer<promise<>> _foreign_blocked_requests;
+    region_group* _waiting_on_ancestor = nullptr;
 public:
+    // When creating a region_group, one can specify an optional throttle_threshold parameter. This
+    // parameter won't affect normal allocations, but an API is provided, through the region_group's
+    // method run_when_memory_available(), to make sure that a given function is only executed when
+    // the total memory for the region group (and all of its parents) is lower or equal to the
+    // region_group's throttle_treshold (and respectively for its parents).
     region_group(size_t throttle_threshold = std::numeric_limits<size_t>::max()) : region_group(nullptr, throttle_threshold) {}
     region_group(region_group* parent, size_t throttle_threshold = std::numeric_limits<size_t>::max()) : _parent(parent), _throttle_threshold(throttle_threshold) {
         if (_parent) {
@@ -73,9 +108,80 @@ public:
         return _total_memory;
     }
     void update(ssize_t delta) {
-        do_for_each_parent(this, [delta] (auto rg) { rg->_total_memory += delta; return true; });
+        do_for_each_parent(this, [delta] (auto rg) mutable {
+            rg->_total_memory += delta;
+            // It is okay to call release_requests for a region_group that can't allow execution.
+            // But that can generate various spurious messages to groups waiting on us that will be
+            // then woken up just so they can go to wait again. So let's filter that.
+            if (rg->execution_permitted()) {
+                rg->release_requests();
+            }
+            return true;
+        });
+    }
+
+    //
+    // Make sure that the function specified by the parameter func only runs when this region_group,
+    // as well as each of its ancestors have a memory_used() amount of memory that is lesser or
+    // equal the throttle_threshold, as specified in the region_group's constructor.
+    //
+    // region_groups that did not specify a throttle_threshold will always allow for execution.
+    //
+    // In case current memory_used() is over the threshold, a non-ready future is returned and it
+    // will be made ready at some point in the future, at which memory usage in the offending
+    // region_group (either this or an ancestor) falls below the threshold.
+    //
+    // Requests that are not allowed for execution are queued and released in FIFO order within the
+    // same region_group, but no guarantees are made regarding release ordering across different
+    // region_groups.
+    template <typename Func>
+    futurize_t<std::result_of_t<Func()>> run_when_memory_available(Func&& func) {
+        // We disallow future-returning functions here, because otherwise memory may be available
+        // when we start executing it, but no longer available in the middle of the execution.
+        static_assert(!is_future<std::result_of_t<Func()>>::value, "future-returning functions are not permitted.");
+        using futurator = futurize<std::result_of_t<Func()>>;
+
+        auto blocked_at = do_for_each_parent(this, [] (auto rg) {
+            return (rg->_blocked_requests.empty() && rg->execution_permitted());
+        });
+
+        if (!blocked_at) {
+            return futurator::apply(func);
+        }
+        subscribe_for_ancestor_available_memory_notification(blocked_at);
+
+        // It is unfortunate that we need to use a pointer here. But otherwise can't create the
+        // std::function we need in emplace_back because promise is not copyable
+        auto pr = make_lw_shared<typename futurator::promise_type>();
+        auto ret = pr->get_future();
+        _blocked_requests.emplace_back([pr = std::move(pr), func] () mutable {
+            futurator::apply(func).forward_to(std::move(*pr));
+        });
+        return ret;
     }
 private:
+    // make sure we get a notification and can call release_requests when one of our ancestors that
+    // used to block us is no longer under memory pressure.
+    void subscribe_for_ancestor_available_memory_notification(region_group *ancestor) {
+        if ((this == ancestor) || (_waiting_on_ancestor)) {
+            return; // already subscribed, or no need to
+        }
+
+        _waiting_on_ancestor = ancestor;
+        do_until([this] { return _waiting_on_ancestor == nullptr; }, [this] {
+            _waiting_on_ancestor->_foreign_blocked_requests.emplace_back();
+            return _waiting_on_ancestor->_foreign_blocked_requests.back().get_future().then([this] {
+                auto new_blocking_point = do_for_each_parent(this, [] (auto rg) {
+                    return (rg->execution_permitted());
+                });
+                if (!new_blocking_point) {
+                    release_requests();
+                }
+                _waiting_on_ancestor = (new_blocking_point == this) ? nullptr : new_blocking_point;
+                return make_ready_future<>();
+            });
+        });
+    }
     // Executes the function func for each region_group upwards in the hierarchy, starting
     // with the parameter node. Stops when func returns false or when the root of the hierarchy
     // is reached.
@@ -90,6 +196,19 @@ private:
         }
         return nullptr;
     }
+    inline bool execution_permitted() const {
+        return _total_memory <= _throttle_threshold;
+    }
+
+    void release_requests() {
+        while (!_foreign_blocked_requests.empty()) {
+            _foreign_blocked_requests.front().set_value();
+            _foreign_blocked_requests.pop_front();
+        }
+        do_release_requests();
+    }
+    void do_release_requests();
+
     void add(region_group* child);
     void del(region_group* child);
     void add(region_impl* child);
