@@ -1887,6 +1887,23 @@ region_group::region_group(region_group&& o) noexcept
     }
 }
 
+bool region_group::execution_permitted() {
+    if ((_total_memory > _max_memory) || !_blocked_requests.empty()) {
+        return false;
+    }
+    if (_parent) {
+        return _parent->execution_permitted();
+    }
+    return true;
+}
+
+void region_group::release_requests() {
+    if ((_total_memory < _max_memory) && !_blocked_requests.empty()) {
+        _blocked_requests.front().set_value();
+        _blocked_requests.pop_front();
+    }
+}
+
 void
 region_group::add(region_group* child) {
     _subgroups.push_back(child);

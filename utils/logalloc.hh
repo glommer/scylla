@@ -25,6 +25,8 @@
 #include <seastar/core/scollectd.hh>
 #include <seastar/core/memory.hh>
 #include <seastar/core/shared_ptr.hh>
+#include <seastar/core/circular_buffer.hh>
+#include <seastar/core/future.hh>
 #include "allocation_strategy.hh"
 
 namespace logalloc {
@@ -53,6 +55,7 @@ class region_group {
     size_t _max_memory = std::numeric_limits<size_t>::max();
     std::vector<region_group*> _subgroups;
     std::vector<region_impl*> _regions;
+    circular_buffer<promise<>> _blocked_requests;
 public:
     region_group(size_t max_memory = std::numeric_limits<size_t>::max()) : region_group(nullptr, max_memory) {}
     region_group(region_group* parent, size_t max_memory = std::numeric_limits<size_t>::max()) : _parent(parent), _max_memory(max_memory) {
@@ -76,10 +79,26 @@ public:
         auto rg = this;
         while (rg) {
             rg->_total_memory += delta;
+            rg->release_requests();
             rg = rg->_parent;
         }
     }
+
+    template <typename Func>
+    future<> run_when_memory_available(Func&& func) {
+        if (execution_permitted()) {
+            return futurize<void>::apply(func);
+        }
+        _blocked_requests.emplace_back();
+        return _blocked_requests.back().get_future().then([this, func] {
+            return futurize<void>::apply(func);
+        }).then([this] {
+            release_requests();
+        });
+    }
 private:
+    void release_requests();
+    bool execution_permitted();
     void add(region_group* child);
     void del(region_group* child);
     void add(region_impl* child);
