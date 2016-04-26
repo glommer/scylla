@@ -1871,13 +1871,14 @@ void tracker::impl::register_collectd_metrics() {
 }
 
 region_group::region_group(region_group&& o) noexcept
-        : _parent(o._parent), _total_memory(o._total_memory)
+        : _parent(o._parent), _total_memory(o._total_memory), _max_memory(o._max_memory)
         , _subgroups(std::move(o._subgroups)), _regions(std::move(o._regions)) {
     if (_parent) {
         _parent->del(&o);
         _parent->add(this);
     }
     o._total_memory = 0;
+    o._max_memory = 0;
     for (auto&& sg : _subgroups) {
         sg->_parent = this;
     }

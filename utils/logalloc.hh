@@ -50,11 +50,12 @@ using eviction_fn = std::function<memory::reclaiming_result()>;
 class region_group {
     region_group* _parent = nullptr;
     size_t _total_memory = 0;
+    size_t _max_memory = std::numeric_limits<size_t>::max();
     std::vector<region_group*> _subgroups;
     std::vector<region_impl*> _regions;
 public:
-    region_group() = default;
-    region_group(region_group* parent) : _parent(parent) {
+    region_group(size_t max_memory = std::numeric_limits<size_t>::max()) : region_group(nullptr, max_memory) {}
+    region_group(region_group* parent, size_t max_memory = std::numeric_limits<size_t>::max()) : _parent(parent), _max_memory(max_memory) {
         if (_parent) {
             _parent->add(this);
         }
