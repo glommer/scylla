@@ -1887,6 +1887,44 @@ region_group::region_group(region_group&& o) noexcept
     }
 }
 
+void region_group::release_requests() {
+    assert(_parent == nullptr);
+
+    // Alternatively to this, we could keep a list containing just the subgroups where execution is
+    // already possible. This is difficult, however, because for the case of a generic tree, freeing
+    // memory in one node can unlock execution for pretty much any other node in the tree.
+    //
+    // Take the following subtree as an example:
+    //
+    //       A
+    //   B       C
+    // D   E   F   G
+    //
+    // it is possible that we have a request waiting in G, that couldn't proceed because it was
+    // blocked in A. When D releases memory, A now goes under the threshold and the requests in G
+    // are now ok to proceed.
+    //
+    // While we can easily propagate information for the nodes above us, to propagate that
+    // information to the nodes in different subtrees we'd have to scan every node during update().
+    // The update() method is called all the time, regardless of whether or not we have blocking
+    // requests anywhere. So it's better to transverse everybody here, than to transverse everybody
+    // during update().
+    for (auto it = _blocked_subgroups.begin(); it != _blocked_subgroups.end(); ++it) {
+        bool memory_ok = do_for_each_parent((*it), [] (auto rg) { return rg->execution_permitted(); });
+
+        if (memory_ok) {
+            _blocked_subgroups.erase(it);
+            (*it)->_blocked_requests.front().set_value();
+            (*it)->_blocked_requests.pop_front();
+            (*it)->_last_released = ++_root_release_stamps;
+            if (!(*it)->_blocked_requests.empty()) {
+                _blocked_subgroups.insert(_blocked_subgroups.end(), *it);
+            }
+            break;
+        }
+    }
+}
+
 void
 region_group::add(region_group* child) {
     _subgroups.push_back(child);

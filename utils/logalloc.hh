@@ -21,10 +21,13 @@
 
 #pragma once
 
+#include <unordered_set>
 #include <bits/unique_ptr.h>
 #include <seastar/core/scollectd.hh>
 #include <seastar/core/memory.hh>
 #include <seastar/core/shared_ptr.hh>
+#include <seastar/core/circular_buffer.hh>
+#include <seastar/core/future.hh>
 #include "allocation_strategy.hh"
 
 namespace logalloc {
@@ -49,15 +52,48 @@ using eviction_fn = std::function<memory::reclaiming_result()>;
 // Groups regions for the purpose of statistics.  Can be nested.
 class region_group {
     region_group* _parent = nullptr;
+    region_group* _root = nullptr;
     size_t _total_memory = 0;
     size_t _throttle_threshold = std::numeric_limits<size_t>::max();
+
     std::vector<region_group*> _subgroups;
     std::vector<region_impl*> _regions;
+
+    // See the comments in release_requests() for an explanation of this, specially on why we
+    // shouldn't just try keep a list of region_groups in which requests can be released after
+    // update().
+    struct subgroup_fairness_comparator;
+    friend class subgroup_fairness_comparator;
+    struct subgroup_fairness_comparator {
+        bool operator()(region_group* rg1, region_group* rg2) {
+            if (rg1->_last_released < rg2->_last_released) {
+                return true;
+            } else if (rg1->_last_released == rg2->_last_released) {
+                return rg1 < rg2;
+            }
+            return false;
+        }
+    };
+
+    circular_buffer<promise<>> _blocked_requests;
+    uint64_t _last_released = 0;
+
+    // Following fields are expected in the root only
+    std::set<region_group*, subgroup_fairness_comparator> _blocked_subgroups;
+    uint64_t _root_release_stamps = 0;
 public:
+    // When creating a region_group, one can specify an optional throttle_threshold parameter. This
+    // parameter won't affect normal allocations, but an API is provided, through the region_group's
+    // method run_when_memory_available(), to make sure that a given function is only executed when
+    // the total memory for the region group (and all of its parents) is lower or equal to the
+    // region_group's throttle_treshold (and respectively for its parents).
     region_group(size_t throttle_threshold = std::numeric_limits<size_t>::max()) : region_group(nullptr, throttle_threshold) {}
     region_group(region_group* parent, size_t throttle_threshold = std::numeric_limits<size_t>::max()) : _parent(parent), _throttle_threshold(throttle_threshold) {
         if (_parent) {
             _parent->add(this);
+            _root = _parent->_root;
+        } else {
+            _root = this;
         }
     }
     region_group(region_group&& o) noexcept;
@@ -66,6 +102,7 @@ public:
         if (_parent) {
             _parent->del(this);
         }
+        _root->_blocked_subgroups.erase(this);
     }
     region_group& operator=(const region_group&) = delete;
     region_group& operator=(region_group&&) = delete;
@@ -73,7 +110,50 @@ public:
         return _total_memory;
     }
     void update(ssize_t delta) {
-        do_for_each_parent(this, [delta] (auto rg) { rg->_total_memory += delta; return true; });
+        // During normal update, we'll call release_requests for the root of the hierarchy
+        // only. So find it.
+        do_for_each_parent(this, [delta] (auto rg) mutable {
+            rg->_total_memory += delta;
+            return true;
+        });
+        _root->release_requests();
+    }
+
+    //
+    // Make sure that the function specified by the parameter func only runs when this region_group,
+    // as well as each of its ancestors have a memory_used() amount of memory that is lesser or
+    // equal the throttle_threshold, as specified in the region_group's constructor.
+    //
+    // region_groups that did not specify a throttle_threshold will always allow for execution.
+    //
+    // In case current memory_used() is over the threshold, a non-ready future is returned and it
+    // will be made ready at some point in the future, at which memory usage in the offending
+    // region_group (either this or an ancestor) falls below the threshold.
+    //
+    // Requests that are not allowed for execution are queued and released in FIFO order within the same
+    // region_group, but no guarantees are made regarding release ordering across different
+    // region_groups, although there will be a best effort attempt not to starve any waiter.
+    template <typename Func>
+    future<> run_when_memory_available(Func&& func) {
+        // We disallow future-returning functions here, because otherwise memory may be available
+        // when we start executing it, but no longer available in the middle of the execution.
+        static_assert(!is_future<std::result_of_t<Func()>>::value, "future-returning functions are not permitted.");
+        bool exec_ok = do_for_each_parent(this, [] (auto rg) {
+            return rg->_blocked_requests.empty() && rg->execution_permitted();
+        });
+
+        if (exec_ok) {
+            return futurize<void>::apply(func);
+        }
+
+        _blocked_requests.emplace_back();
+        _root->_blocked_subgroups.insert(this);
+        return _blocked_requests.back().get_future().then([this, func] {
+            return futurize<void>::apply(func);
+        }).finally([this] {
+            // re-evaluate root in case it changed, but likely it didn't.
+            _root->release_requests();
+        });
     }
 private:
     // Executes the function func for each region_group upwards in the hierarchy, starting
@@ -90,6 +170,11 @@ private:
         }
         return true;
     }
+    inline bool execution_permitted() const {
+        return _total_memory <= _throttle_threshold;
+    }
+
+    void release_requests();
     void add(region_group* child);
     void del(region_group* child);
     void add(region_impl* child);
