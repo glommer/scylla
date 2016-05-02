@@ -173,7 +173,10 @@ mutation_partition_view::accept(const column_mapping& cm, mutation_partition_vis
     read_and_visit_row(mpv.static_row(), cm, column_kind::static_column, static_row_cell_visitor{visitor});
 
     for (auto&& rt : mpv.range_tombstones()) {
-        visitor.accept_row_tombstone(rt.key(), rt.tomb());
+        auto start = rt.key();
+        auto end = rt.key();
+        auto range_t = range_tombstone(std::move(start), std::move(end), rt.tomb());
+        visitor.accept_row_tombstone(std::move(range_t));
     }
     
     for (auto&& cr : mpv.rows()) {
