@@ -926,6 +926,33 @@ segment::heap_handle() {
     return shard_segment_pool.descriptor(this)._heap_handle;
 }
 
+inline void
+region_group_binomial_group_sanity_check(auto& bh) {
+#ifdef DEBUG
+    bool failed = false;
+    size_t last =  std::numeric_limits<size_t>::max();
+    for (auto b = bh.ordered_begin(); b != bh.ordered_end(); b++) {
+        auto t = (*b)->evictable_occupancy().total_space();
+        if (!(t <= last)) {
+            failed = true;
+            break;
+        }
+        last = t;
+    }
+    if (!failed) {
+        return;
+    }
+
+    printf("Sanity checking FAILED, size %ld\n", bh.size());
+    for (auto b = bh.ordered_begin(); b != bh.ordered_end(); b++) {
+        auto r = (*b);
+        auto t = r->evictable_occupancy().total_space();
+        printf(" r = %p (id=%ld), occupancy = %ld\n",r, r->id(), t);
+    }
+    assert(0);
+#endif
+}
+
 //
 // For interface documentation see logalloc::region and allocation_strategy.
 //
@@ -1069,12 +1096,45 @@ private:
     segment_heap _segments; // Contains only closed segments
     occupancy_stats _closed_occupancy;
     occupancy_stats _non_lsa_occupancy;
+    // This helps us keeping track of the region_group* heap. That's because we call update before
+    // we have a chance to update the occupancy stats - mainly because at this point we don't know
+    // what will we do with the new segment.
+    occupancy_stats _temporary_occupancy;
+    enum class temporary_adjustment { increase, decrease };
+
+    template <temporary_adjustment AdjustmentType>
+    class adjust_temporary_occupancy {
+        region_impl* _region;
+    public:
+        adjust_temporary_occupancy(region_impl* region, size_t size) : _region(region) {
+            if (AdjustmentType == temporary_adjustment::increase) {
+                _region->_temporary_occupancy = occupancy_stats(size, size);
+            } else if (AdjustmentType == temporary_adjustment::decrease) {
+                _region->_temporary_occupancy = occupancy_stats(-size, -size);
+            } else {
+                assert(0);
+            }
+        }
+
+        ~adjust_temporary_occupancy() {
+            region_group_binomial_group_sanity_check(_region->_group->_regions);
+            _region->_temporary_occupancy = occupancy_stats();
+        }
+    };
+    template <temporary_adjustment AdjustmentType>
+    friend class adjust_temporary_occupancy;
+
+    using increase_temporary_occupancy = adjust_temporary_occupancy<temporary_adjustment::increase>;
+    using decrease_temporary_occupancy = adjust_temporary_occupancy<temporary_adjustment::decrease>;
+
     bool _reclaiming_enabled = true;
     bool _evictable = false;
     uint64_t _id;
     uint64_t _reclaim_counter = 0;
     eviction_fn _eviction_fn;
     async_eviction_fn _async_eviction_fn;
+
+    region_group::region_heap::handle_type _heap_handle;
 private:
     struct compaction_lock {
         region_impl& _region;
@@ -1155,14 +1215,16 @@ private:
     void free_segment(segment* seg) noexcept {
         shard_segment_pool.free_segment(seg);
         if (_group) {
-            _group->update(-segment::size);
+            decrease_temporary_occupancy(this, segment::size);
+            _group->decrease_usage(_heap_handle, -segment::size);
         }
     }
 
     segment* new_segment() {
         segment* seg = shard_segment_pool.new_segment(this);
         if (_group) {
-            _group->update(segment::size);
+            increase_temporary_occupancy(this, segment::size);
+            _group->increase_usage(_heap_handle, segment::size);
         }
         return seg;
     }
@@ -1256,6 +1318,13 @@ public:
         return _closed_occupancy;
     }
 
+    occupancy_stats evictable_occupancy() const {
+        if (_async_eviction_fn) {
+            return occupancy();
+        } else {
+            return occupancy_stats() + _temporary_occupancy;
+        }
+    }
     //
     // Returns true if this region can be compacted and compact() will make forward progress,
     // so that this will eventually stop:
@@ -1286,7 +1355,8 @@ public:
             auto allocated_size = malloc_usable_size(ptr);
             _non_lsa_occupancy += occupancy_stats(0, allocated_size);
             if (_group) {
-                _group->update(allocated_size);
+                increase_temporary_occupancy(this, allocated_size);
+                _group->increase_usage(_heap_handle, allocated_size);
             }
             shard_segment_pool.update_non_lsa_memory_in_use(allocated_size);
             return ptr;
@@ -1303,7 +1373,8 @@ public:
             auto allocated_size = malloc_usable_size(obj);
             _non_lsa_occupancy -= occupancy_stats(0, allocated_size);
             if (_group) {
-                _group->update(-allocated_size);
+                decrease_temporary_occupancy(this, allocated_size);
+                _group->decrease_usage(_heap_handle, allocated_size);
             }
             shard_segment_pool.update_non_lsa_memory_in_use(-allocated_size);
             standard_allocator().free(obj);
@@ -1508,10 +1579,12 @@ public:
 
     void make_not_async_evictable() {
         _async_eviction_fn = {};
+        _group->decrease_usage(_heap_handle, 0);
     }
 
     void make_async_evictable(async_eviction_fn fn) {
         _async_eviction_fn = std::move(fn);
+        _group->increase_usage(_heap_handle, 0);
     }
 
     uint64_t reclaim_counter() const {
@@ -1519,7 +1592,13 @@ public:
     }
 
     friend class region_group;
+    friend class region_group::region_evictable_occupancy_ascending_less_comparator;
 };
+
+bool
+region_group::region_evictable_occupancy_ascending_less_comparator::operator()(region_impl* r1, region_impl* r2) const {
+    return r1->evictable_occupancy().total_space() < r2->evictable_occupancy().total_space();
+}
 
 region::region()
     : _impl(make_shared<impl>())
@@ -1550,6 +1629,15 @@ void region::full_compaction() {
 void region::make_evictable(eviction_fn fn) {
     _impl->make_evictable(std::move(fn));
 }
+
+void region::make_async_evictable(async_eviction_fn fn) {
+    _impl->make_async_evictable(std::move(fn));
+}
+
+void region::make_not_async_evictable() {
+    _impl->make_not_async_evictable();
+}
+
 
 allocation_strategy& region::allocator() {
     return *_impl;
@@ -1982,13 +2070,15 @@ region_group::del(region_group* child) {
 
 void
 region_group::add(region_impl* child) {
-    _regions.push_back(child);
+    child->_heap_handle = _regions.push(child);
+    region_group_binomial_group_sanity_check(_regions);
     update(child->occupancy().total_space());
 }
 
 void
 region_group::del(region_impl* child) {
-    _regions.erase(boost::range::remove(_regions, child), _regions.end());
+    _regions.erase(child->_heap_handle);
+    region_group_binomial_group_sanity_check(_regions);
     update(-child->occupancy().total_space());
 }
 
