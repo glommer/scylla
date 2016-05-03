@@ -25,10 +25,13 @@
 
 namespace stdx = std::experimental;
 
-memtable::memtable(schema_ptr schema, logalloc::region_group* dirty_memory_region_group)
+memtable::memtable(schema_ptr schema, memtable_region_group* rg)
         : _schema(std::move(schema))
-        , _region(dirty_memory_region_group ? logalloc::region(*dirty_memory_region_group) : logalloc::region())
+        , _region(rg ? logalloc::region(*rg->dirty_memory_region_group) : logalloc::region())
         , partitions(partition_entry::compare(_schema)) {
+        if (rg) {
+            _region.make_evictable(rg->reclaimer);
+        }
 }
 
 memtable::~memtable() {
@@ -284,6 +287,12 @@ partition_entry::partition_entry(partition_entry&& o) noexcept
 
 void memtable::mark_flushed(lw_shared_ptr<sstables::sstable> sst) {
     _sstable = std::move(sst);
+}
+
+void memtable::mark_flush_started(memtable_region_group *rg) {
+    if (rg) {
+        _region.make_not_evictable();
+    }
 }
 
 bool memtable::is_flushed() const {

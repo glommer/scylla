@@ -767,6 +767,28 @@ column_family::stop() {
     });
 }
 
+future<memory::reclaiming_result> memtable_list::force_flush_memtable() {
+    if (back()->empty()) {
+        return make_ready_future<memory::reclaiming_result>(memory::reclaiming_result::reclaimed_nothing);
+    }
+    // Only do something if there isn't already a flush in place. If there is, we'll wait for it to
+    // eventually end before we're able to trigger a new one. This avoids a freeing storm where too
+    // much is freed.
+    if (!_flush_semaphore.try_wait()) {
+        return make_ready_future<memory::reclaiming_result>(memory::reclaiming_result::reclaimed_nothing);
+    }
+
+    auto mt = _prepare_seal_fn();
+    mt->mark_flush_started(&_dirty_memory_region_group);
+    return _seal_fn(mt).then([] {
+        return make_ready_future<memory::reclaiming_result>(memory::reclaiming_result::reclaimed_something);
+    }).handle_exception([] (auto ep) {
+        dblog.error("Exception prevented asynchronous memtable reclaim: {} ", ep);
+        return make_ready_future<memory::reclaiming_result>(memory::reclaiming_result::reclaimed_nothing);
+    }).finally([this] {
+        _flush_semaphore.signal();
+    });
+}
 
 future<std::vector<sstables::entry_descriptor>>
 column_family::reshuffle_sstables(std::set<int64_t> all_generations, int64_t start) {

@@ -125,7 +125,7 @@ class memtable_list {
     std::function<future<> (shared_memtable)> _seal_fn;
     std::function<schema_ptr()> _current_schema;
     size_t _max_memtable_size;
-    logalloc::region_group* _dirty_memory_region_group;
+    memtable_region_group _dirty_memory_region_group;
     semaphore _flush_semaphore;
 public:
     memtable_list(std::function<shared_memtable ()> prepare_fn, std::function<future<> (shared_memtable)> seal_fn, std::function<schema_ptr()> cs, size_t max_memtable_size, logalloc::region_group* region_group)
@@ -134,7 +134,7 @@ public:
         , _seal_fn(seal_fn)
         , _current_schema(cs)
         , _max_memtable_size(max_memtable_size)
-        , _dirty_memory_region_group(region_group) {
+        , _dirty_memory_region_group({region_group, [this] { return force_flush_memtable(); }}) {
         add_memtable();
     }
 
@@ -160,6 +160,7 @@ public:
         }
 
         auto mt = _prepare_seal_fn();
+        mt->mark_flush_started(&_dirty_memory_region_group);
         return _flush_semaphore.wait().then([this, mt] {
             return _seal_fn(mt);
         }).finally([this] {
@@ -204,8 +205,10 @@ public:
     }
 private:
     lw_shared_ptr<memtable> new_memtable() {
-        return make_lw_shared<memtable>(_current_schema(), _dirty_memory_region_group);
+        return make_lw_shared<memtable>(_current_schema(), &_dirty_memory_region_group);
     }
+
+    future<memory::reclaiming_result> force_flush_memtable();
 };
 
 using sstable_list = sstables::sstable_list;

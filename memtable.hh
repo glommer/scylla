@@ -89,6 +89,12 @@ public:
     };
 };
 
+
+struct memtable_region_group {
+    logalloc::region_group* dirty_memory_region_group = nullptr;
+    std::function<future<memory::reclaiming_result> ()> reclaimer;
+};
+
 // Managed by lw_shared_ptr<>.
 class memtable final : public enable_lw_shared_from_this<memtable> {
 public:
@@ -111,7 +117,7 @@ private:
     mutation_partition& find_or_create_partition_slow(partition_key_view key);
     void upgrade_entry(partition_entry&);
 public:
-    explicit memtable(schema_ptr schema, logalloc::region_group* dirty_memory_region_group = nullptr);
+    explicit memtable(schema_ptr schema, memtable_region_group* region_group = nullptr);
     ~memtable();
     schema_ptr schema() const { return _schema; }
     void set_schema(schema_ptr) noexcept;
@@ -142,6 +148,7 @@ public:
     key_source as_key_source();
 
     bool empty() const { return partitions.empty(); }
+    void mark_flush_started(memtable_region_group* region_group = nullptr);
     void mark_flushed(lw_shared_ptr<sstables::sstable> sst);
     bool is_flushed() const;
 
