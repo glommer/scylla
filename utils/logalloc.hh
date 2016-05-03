@@ -108,6 +108,7 @@ class region_group {
     size_t _total_memory = 0;
     size_t _max_memory = std::numeric_limits<size_t>::max();
     std::vector<region_group*> _subgroups;
+    std::experimental::optional<future<memory::reclaiming_result>> _asynchronous_reclaim_ongoing = {};
     region_heap _regions;
     circular_buffer<promise<>> _blocked_requests;
 public:
@@ -144,6 +145,8 @@ public:
             return futurize<void>::apply(func);
         }
         _blocked_requests.emplace_back();
+        // The call to release requests here effectively forces a flush in case no flush is ongoing.
+        release_requests();
         return _blocked_requests.back().get_future().then([this, func] {
             return futurize<void>::apply(func);
         }).then([this] {

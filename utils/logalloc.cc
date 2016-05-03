@@ -1975,6 +1975,26 @@ void region_group::release_requests() {
     if ((_total_memory < _max_memory) && !_blocked_requests.empty()) {
         _blocked_requests.front().set_value();
         _blocked_requests.pop_front();
+    } else if (!_blocked_requests.empty() && !bool(_asynchronous_reclaim_ongoing)) {
+        // Reducing memory for a region_group will usually happen by ways of a region
+        // effectively being deleted.  If we end up freeing some memory, we will eventually
+        // enter release_requests again from the update() call upon memory free. To prevent
+        // deadlocks we will limit ourselves to calling the asynchronous reclaimer, and will exit
+        // the current call immediately. Note that which region sits at the top might have changed
+        // by then.
+        _asynchronous_reclaim_ongoing = later().then([this] {
+            if (_regions.top()->evictable_occupancy().total_space() != 0) {
+                return _regions.top()->asynchronously_evict_some();
+            } else {
+                return make_ready_future<memory::reclaiming_result>(memory::reclaiming_result::reclaimed_nothing);
+            }
+        }).finally([this] {
+            // There is no need to release requests from here, although we could. If memory
+            // was freed in the region_group, eventually update() will be called and
+            // release_requests will be called from there again.
+            _asynchronous_reclaim_ongoing = {};
+        });
+
     }
 }
 
