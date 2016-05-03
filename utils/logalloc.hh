@@ -28,6 +28,7 @@
 #include <seastar/core/circular_buffer.hh>
 #include <seastar/core/future.hh>
 #include "allocation_strategy.hh"
+#include <boost/heap/binomial_heap.hpp>
 
 namespace logalloc {
 
@@ -93,11 +94,21 @@ public:
 
 // Groups regions for the purpose of statistics.  Can be nested.
 class region_group {
+    struct region_occupancy_ascending_less_compare {
+        bool operator()(region_impl* r1, region_impl* r2) const;
+    };
+
+    using region_heap = boost::heap::binomial_heap<region_impl*,
+          boost::heap::compare<region_occupancy_ascending_less_compare>,
+          boost::heap::allocator<std::allocator<region_impl*>>,
+          //constant_time_size<true> causes corruption with boost < 1.60
+          boost::heap::constant_time_size<false>>;
+
     region_group* _parent = nullptr;
     size_t _total_memory = 0;
     size_t _max_memory = std::numeric_limits<size_t>::max();
     std::vector<region_group*> _subgroups;
-    std::vector<region_impl*> _regions;
+    region_heap _regions;
     circular_buffer<promise<>> _blocked_requests;
 public:
     region_group(size_t max_memory = std::numeric_limits<size_t>::max()) : region_group(nullptr, max_memory) {}

@@ -922,6 +922,33 @@ segment::heap_handle() {
     return shard_segment_pool.descriptor(this)._heap_handle;
 }
 
+inline void
+region_group_binomial_group_sanity_check(auto& bh) {
+#ifdef DEBUG
+    bool failed = false;
+    size_t last =  std::numeric_limits<size_t>::max();
+    for (auto b = bh.ordered_begin(); b != bh.ordered_end(); b++) {
+        auto t = (*b)->evictable_occupancy().total_space();
+        if (!(t <= last)) {
+            failed = true;
+            break;
+        }
+        last = t;
+    }
+    if (!failed) {
+        return;
+    }
+
+    printf("Sanity checking FAILED, size %ld\n", bh.size());
+    for (auto b = bh.ordered_begin(); b != bh.ordered_end(); b++) {
+        auto r = (*b);
+        auto t = r->evictable_occupancy().total_space();
+        printf(" r = %p (id=%ld), occupancy = %ld\n",r, r->id(), t);
+    }
+    assert(0);
+#endif
+}
+
 //
 // For interface documentation see logalloc::region and allocation_strategy.
 //
@@ -1064,10 +1091,25 @@ private:
     segment_heap _segments; // Contains only closed segments
     occupancy_stats _closed_occupancy;
     occupancy_stats _non_lsa_occupancy;
+    friend void region_group_binomial_group_sanity_check(const char *str, auto& bh);
     bool _reclaiming_enabled = true;
     uint64_t _id;
     uint64_t _reclaim_counter = 0;
     eviction_fn _eviction_fn;
+    region_group::region_heap::handle_type _heap_handle;
+    void region_group_heap_decrease() {
+        if (_group) {
+            _group->_regions.decrease(_heap_handle);
+            region_group_binomial_group_sanity_check(_group->_regions);
+        }
+
+    }
+    void region_group_heap_increase() {
+        if (_group) {
+            _group->_regions.increase(_heap_handle);
+            region_group_binomial_group_sanity_check(_group->_regions);
+        }
+    }
 private:
     struct compaction_lock {
         region_impl& _region;
@@ -1088,6 +1130,7 @@ private:
         if (!_active) {
             _active = new_segment();
             _active_offset = 0;
+            region_group_heap_increase();
         }
 
         size_t obj_offset = align_up(_active_offset + sizeof(object_descriptor), alignment);
@@ -1176,6 +1219,7 @@ private:
         close_active();
         _active = new_active;
         _active_offset = 0;
+        region_group_heap_increase();
     }
 
     static uint64_t next_id() {
@@ -1249,6 +1293,13 @@ public:
         return _closed_occupancy;
     }
 
+    occupancy_stats evictable_occupancy() const {
+        if (_eviction_fn.can_evict()) {
+            return occupancy();
+        } else {
+            return occupancy_stats();
+        }
+    }
     //
     // Returns true if this region can be compacted and compact() will make forward progress,
     // so that this will eventually stop:
@@ -1275,6 +1326,7 @@ public:
                 _group->update(allocated_size);
             }
             shard_segment_pool.update_non_lsa_memory_in_use(allocated_size);
+            region_group_heap_increase();
             return ptr;
         } else {
             return alloc_small(migrator, (segment::size_type) size, alignment);
@@ -1293,6 +1345,7 @@ public:
             }
             shard_segment_pool.update_non_lsa_memory_in_use(-allocated_size);
             standard_allocator().free(obj);
+            region_group_heap_decrease();
             return;
         }
 
@@ -1315,6 +1368,7 @@ public:
             } else {
                 _closed_occupancy += seg_desc.occupancy();
             }
+            region_group_heap_decrease();
         }
     }
 
@@ -1382,6 +1436,7 @@ public:
             _closed_occupancy -= seg->occupancy();
             compact(seg);
             shard_segment_pool.on_segment_compaction();
+            region_group_heap_decrease();
         }
     }
 
@@ -1438,6 +1493,7 @@ public:
             all.pop();
             compact(seg);
         }
+        region_group_heap_decrease();
         logger.debug("Done, {}", occupancy());
     }
 
@@ -1477,10 +1533,12 @@ public:
 
     void make_not_evictable() {
         _eviction_fn = {};
+        region_group_heap_decrease();
     }
 
     void make_evictable(eviction_fn fn) {
         _eviction_fn = std::move(fn);
+        region_group_heap_increase();
     }
 
     uint64_t reclaim_counter() const {
@@ -1488,7 +1546,13 @@ public:
     }
 
     friend class region_group;
+    friend class region_group::region_occupancy_ascending_less_compare;
 };
+
+bool
+region_group::region_occupancy_ascending_less_compare::operator()(region_impl* r1, region_impl* r2) const {
+    return r1->evictable_occupancy().total_space() < r2->evictable_occupancy().total_space();
+}
 
 region::region()
     : _impl(make_shared<impl>())
@@ -1917,24 +1981,32 @@ void region_group::release_requests() {
 void
 region_group::add(region_group* child) {
     _subgroups.push_back(child);
+    _regions.merge(child->_regions);
+    region_group_binomial_group_sanity_check(_regions);
     update(child->_total_memory);
 }
 
 void
 region_group::del(region_group* child) {
+    for (auto& ri: child->_regions) {
+        _regions.erase(ri->_heap_handle);
+    }
+    region_group_binomial_group_sanity_check(_regions);
     _subgroups.erase(boost::range::remove(_subgroups, child), _subgroups.end());
     update(-child->_total_memory);
 }
 
 void
 region_group::add(region_impl* child) {
-    _regions.push_back(child);
+    child->_heap_handle = _regions.push(child);
+    region_group_binomial_group_sanity_check(_regions);
     update(child->occupancy().total_space());
 }
 
 void
 region_group::del(region_impl* child) {
-    _regions.erase(boost::range::remove(_regions, child), _regions.end());
+    _regions.erase(child->_heap_handle);
+    region_group_binomial_group_sanity_check(_regions);
     update(-child->occupancy().total_space());
 }
 
