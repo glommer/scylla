@@ -42,11 +42,54 @@ constexpr size_t segment_size = 1 << segment_size_shift;
 //
 // Frees some amount of objects from the region to which it's attached.
 //
+// Freeing can happen synchronously or asynchronously. The caller is responsible
+// for letting the interface knows which method it can make available.
+//
+// the method can_evict_synchronously() tells us whether or not this object can
+// trigger synchronous eviction, which is then achieved by calling the "sync_evict"
+// method.
+//
 // This should eventually stop given no new objects are added:
 //
-//     while (eviction_fn() == memory::reclaiming_result::reclaimed_something) ;
+//     while (eviction_fn.sync_evict() == memory::reclaiming_result::reclaimed_something) ;
 //
-using eviction_fn = std::function<memory::reclaiming_result()>;
+// For asynchronous eviction, the pattern is a bit different, and if nothing else as added,
+// a similar pattern can be used to achieve the same result as synchronous eviction:
+//
+// return repeat(eviction_fn.async_evict(), [] (auto result) {
+//     if (result == memory::reclaiming_result::reclaimed_something) {
+//        return stop_iteration::no;
+//     } else {
+//        return stop_iteration::yes;
+//     }
+// })
+class eviction_fn {
+    std::function<memory::reclaiming_result()> _evict;
+    std::function<future<memory::reclaiming_result> ()> _async_evict;
+public:
+    eviction_fn(std::function<memory::reclaiming_result()> evict) : _evict(evict), _async_evict() {}
+    eviction_fn(std::function<future<memory::reclaiming_result> ()> evict) : _evict(), _async_evict(evict) {}
+    eviction_fn() : _evict(), _async_evict() {}
+    memory::reclaiming_result sync_evict() {
+        return _evict();
+    }
+
+    future<memory::reclaiming_result> async_evict() {
+        return _async_evict();
+    }
+
+    bool can_evict_synchronously() const {
+        return bool(_evict);
+    }
+
+    bool can_evict_asynchronously() const {
+        return bool(_async_evict);
+    }
+
+    bool can_evict() const {
+        return can_evict_synchronously() || can_evict_asynchronously();
+    }
+};
 
 // Groups regions for the purpose of statistics.  Can be nested.
 class region_group {
@@ -262,6 +305,14 @@ public:
     // when data from this region needs to be evicted in order to reclaim space.
     // The function should free some space from this region.
     void make_evictable(eviction_fn);
+
+    // Unfortunately not always lambdas are convertible to std::function, and we need to wrap
+    // them into eviction_fn explicitly. We'll provide a helper to make it easier for callers.
+    template <typename Func>
+    void make_evictable(Func&& fn) { make_evictable(eviction_fn(std::forward<Func>(fn))); }
+
+    // Make this region a non-evictable region.
+    void make_not_evictable();
 
     friend class region_group;
     friend class allocating_section;

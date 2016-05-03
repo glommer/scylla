@@ -32,6 +32,7 @@
 #include <seastar/core/memory.hh>
 #include <seastar/core/align.hh>
 #include <seastar/core/print.hh>
+#include <seastar/core/future-util.hh>
 
 #include "utils/logalloc.hh"
 #include "log.hh"
@@ -1064,7 +1065,6 @@ private:
     occupancy_stats _closed_occupancy;
     occupancy_stats _non_lsa_occupancy;
     bool _reclaiming_enabled = true;
-    bool _evictable = false;
     uint64_t _id;
     uint64_t _reclaim_counter = 0;
     eviction_fn _eviction_fn;
@@ -1457,23 +1457,29 @@ public:
         return _reclaiming_enabled;
     }
 
-    // Returns true if this pool is evictable, so that evict_some() can be called.
-    bool is_evictable() const {
-        return _evictable && _reclaiming_enabled;
+    // Returns true if this pool is synchronously evictable, so that synchronously_evict_some() can be called.
+    bool is_synchronously_evictable() const {
+        return _eviction_fn.can_evict_synchronously() && _reclaiming_enabled;
     }
 
-    memory::reclaiming_result evict_some() {
+    bool is_evictable() const {
+        return _eviction_fn.can_evict() && _reclaiming_enabled;
+    }
+
+    memory::reclaiming_result synchronously_evict_some() {
         ++_reclaim_counter;
-        return _eviction_fn();
+        return _eviction_fn.sync_evict();
+    }
+
+    future<memory::reclaiming_result> asynchronously_evict_some() {
+        return _eviction_fn.async_evict();
     }
 
     void make_not_evictable() {
-        _evictable = false;
         _eviction_fn = {};
     }
 
     void make_evictable(eviction_fn fn) {
-        _evictable = true;
         _eviction_fn = std::move(fn);
     }
 
@@ -1512,6 +1518,10 @@ void region::full_compaction() {
 
 void region::make_evictable(eviction_fn fn) {
     _impl->make_evictable(std::move(fn));
+}
+
+void region::make_not_evictable() {
+    _impl->make_not_evictable();
 }
 
 allocation_strategy& region::allocator() {
@@ -1587,7 +1597,7 @@ static void reclaim_from_evictable(region::impl& r, size_t target_mem_in_use) {
         auto used_target = used - std::min(used, deficit - std::min(deficit, occupancy.free_space()));
         logger.debug("Evicting {} bytes from region {}, occupancy={}", used - used_target, r.id(), r.occupancy());
         while (r.occupancy().used_space() > used_target || !r.is_compactible()) {
-            if (r.evict_some() == memory::reclaiming_result::reclaimed_nothing) {
+            if (r.synchronously_evict_some() == memory::reclaiming_result::reclaimed_nothing) {
                 logger.debug("Unable to evict more, evicted {} bytes", used - r.occupancy().used_space());
                 return;
             }
@@ -1727,7 +1737,7 @@ size_t tracker::impl::compact_and_evict(size_t memory_to_release) {
         logger.debug("Considering evictable regions.");
         // FIXME: Fair eviction
         for (region::impl* r : _regions) {
-            if (r->is_evictable()) {
+            if (r->is_synchronously_evictable()) {
                 reclaim_from_evictable(*r, target_mem);
                 if (shard_segment_pool.total_memory_in_use() <= target_mem) {
                     break;
