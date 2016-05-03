@@ -1074,6 +1074,7 @@ private:
     uint64_t _id;
     uint64_t _reclaim_counter = 0;
     eviction_fn _eviction_fn;
+    async_eviction_fn _async_eviction_fn;
 private:
     struct compaction_lock {
         region_impl& _region;
@@ -1490,6 +1491,11 @@ public:
         return _eviction_fn();
     }
 
+    future<memory::reclaiming_result> asynchronously_evict_some() {
+        ++_reclaim_counter;
+        return _async_eviction_fn();
+    }
+
     void make_not_evictable() {
         _evictable = false;
         _eviction_fn = {};
@@ -1498,6 +1504,14 @@ public:
     void make_evictable(eviction_fn fn) {
         _evictable = true;
         _eviction_fn = std::move(fn);
+    }
+
+    void make_not_async_evictable() {
+        _async_eviction_fn = {};
+    }
+
+    void make_async_evictable(async_eviction_fn fn) {
+        _async_eviction_fn = std::move(fn);
     }
 
     uint64_t reclaim_counter() const {

@@ -49,6 +49,12 @@ constexpr size_t segment_size = 1 << segment_size_shift;
 //
 using eviction_fn = std::function<memory::reclaiming_result()>;
 
+// Similar to the synchronous eviction function described above, but returns a future
+// that is resolved when the callee was able to either determine it can't free any memory,
+// in which case it returns memory::reclaiming_result::reclaimed_nothing, or free some memory,
+// in which case it returns memory::reclaiming_result::reclaimed_something.
+using async_eviction_fn = std::function<future<memory::reclaiming_result>()>;
+
 // Groups regions for the purpose of statistics.  Can be nested.
 class region_group {
     region_group* _parent = nullptr;
@@ -397,6 +403,10 @@ public:
     // when data from this region needs to be evicted in order to reclaim space.
     // The function should free some space from this region.
     void make_evictable(eviction_fn);
+
+    void make_async_evictable(async_eviction_fn);
+
+    void make_not_async_evictable();
 
     friend class region_group;
     friend class allocating_section;
