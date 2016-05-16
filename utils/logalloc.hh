@@ -73,13 +73,23 @@ public:
         return _total_memory;
     }
     void update(ssize_t delta) {
-        auto rg = this;
-        while (rg) {
-            rg->_total_memory += delta;
-            rg = rg->_parent;
-        }
+        do_for_each_parent(this, [delta] (auto rg) { rg->_total_memory += delta; return true; });
     }
 private:
+    // Executes the function func for each region_group upwards in the hierarchy, starting
+    // with the parameter node. Stops when func returns false or when the root of the hierarchy
+    // is reached.
+    template <typename Func>
+    bool do_for_each_parent(region_group *node, Func&& func) {
+        auto rg = node;
+        while (rg) {
+            if (!func(rg)) {
+                return false;
+            }
+            rg = rg->_parent;
+        }
+        return true;
+    }
     void add(region_group* child);
     void del(region_group* child);
     void add(region_impl* child);
