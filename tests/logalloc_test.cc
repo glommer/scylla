@@ -23,8 +23,11 @@
 
 #include <boost/test/unit_test.hpp>
 #include <algorithm>
+#include <chrono>
 
 #include <seastar/core/thread.hh>
+#include <seastar/core/timer.hh>
+#include <seastar/core/sleep.hh>
 #include <seastar/tests/test-utils.hh>
 #include <deque>
 
@@ -515,5 +518,333 @@ SEASTAR_TEST_CASE(test_region_groups) {
         four.reset();
         five.reset();
         BOOST_REQUIRE_EQUAL(all.memory_used(), 0);
+    });
+}
+
+using namespace std::chrono_literals;
+
+template <typename FutureType>
+inline void quiesce(FutureType&& fut) {
+    // Unfortunately seastar::thread::yield is not enough here, because the process of releasing
+    // a request may be broken into many continuations. While we could just yield many times, the
+    // exact amount needed to guarantee execution would be dependent on the internals of the
+    // implementation, we want to avoid that.
+    timer<> tmr;
+    tmr.set_callback([] { BOOST_FAIL("The future we were waiting for took too long to get ready"); });
+    tmr.arm(2s);
+    fut.get();
+    tmr.cancel();
+}
+
+SEASTAR_TEST_CASE(test_region_groups_basic_throttling) {
+    return seastar::async([] {
+        // singleton hierarchy, only one segment allowed
+        logalloc::region_group simple(logalloc::segment_size);
+        auto simple_region = std::make_unique<logalloc::region>(simple);
+        std::vector<managed_ref<uint64_t>> simple_objs;
+
+        auto alloc_one_obj = [&simple_region, &simple_objs] {
+            with_allocator(simple_region->allocator(), [&simple_objs] {
+                simple_objs.emplace_back(make_managed<uint64_t>());
+            });
+        };
+
+        // Expectation: after first allocation region will have one segment,
+        // memory_used() == throttle_threshold and we are good to go, future
+        // is ready immediately.
+        //
+        // The allocation of the first element won't change the memory usage inside
+        // the group and we'll be okay to do that a second time.
+        auto fut = simple.run_when_memory_available(alloc_one_obj);
+        BOOST_REQUIRE_EQUAL(simple.memory_used(), logalloc::segment_size);
+        BOOST_REQUIRE_EQUAL(fut.available(), true);
+
+        fut = simple.run_when_memory_available(alloc_one_obj);
+        BOOST_REQUIRE_EQUAL(simple.memory_used(), logalloc::segment_size);
+        BOOST_REQUIRE_EQUAL(fut.available(), true);
+
+        auto big_region = std::make_unique<logalloc::region>(simple);
+        // Allocate a big chunk, that will certainly get us over the threshold
+        std::vector<managed_bytes> big_alloc;
+        with_allocator(big_region->allocator(), [&] {
+            big_alloc.push_back(bytes(bytes::initialized_later(), logalloc::segment_size));
+        });
+
+        // We should not be permitted to go forward with a new allocation now...
+        fut = simple.run_when_memory_available(alloc_one_obj);
+        BOOST_REQUIRE_GT(simple.memory_used(), logalloc::segment_size);
+        BOOST_REQUIRE_EQUAL(fut.available(), false);
+
+        // But when we remove the big bytes allocator from the region, then we should.
+        // Internally, we can't guarantee that just freeing the object will give the segment back,
+        // that's up to the internal policies. So to make sure we need to remove the whole region.
+        with_allocator(big_region->allocator(), [&] {
+            big_alloc.clear();
+        });
+        big_region.reset();
+
+        quiesce(std::move(fut));
+
+        BOOST_REQUIRE_EQUAL(simple_objs.size(), size_t(3));
+
+        with_allocator(simple_region->allocator(), [&simple_objs] {
+            simple_objs.clear();
+        });
+    });
+}
+
+SEASTAR_TEST_CASE(test_region_groups_linear_hierarchy_throttling_child_alloc) {
+    return seastar::async([] {
+        logalloc::region_group parent(2 * logalloc::segment_size);
+        logalloc::region_group child(&parent, logalloc::segment_size);
+
+        auto child_region = std::make_unique<logalloc::region>(child);
+        auto parent_region = std::make_unique<logalloc::region>(parent);
+
+        // fill the child. Try allocating at parent level. Should be allowed.
+        std::vector<managed_bytes> big_alloc;
+        std::vector<managed_ref<uint64_t>> small_alloc;
+
+        with_allocator(child_region->allocator(), [&big_alloc] {
+            big_alloc.push_back(bytes(bytes::initialized_later(), logalloc::segment_size));
+        });
+        BOOST_REQUIRE_GE(parent.memory_used(), logalloc::segment_size);
+
+        auto fut = parent.run_when_memory_available([&parent_region, &small_alloc] {
+            with_allocator(parent_region->allocator(), [&small_alloc] {
+                small_alloc.emplace_back(make_managed<uint64_t>());
+            });
+        });
+        BOOST_REQUIRE_EQUAL(fut.available(), true);
+        BOOST_REQUIRE_GE(parent.memory_used(), 2 * logalloc::segment_size);
+
+        // This time child will use all parent's memory. Note that because the child's memory limit
+        // is lower than the parent's, for that to happen we need to allocate directly.
+        with_allocator(child_region->allocator(), [&big_alloc] {
+            big_alloc.push_back(bytes(bytes::initialized_later(), logalloc::segment_size));
+        });
+        BOOST_REQUIRE_GE(child.memory_used(), 2 * logalloc::segment_size);
+
+        fut = parent.run_when_memory_available([&parent_region, &small_alloc] {
+            with_allocator(parent_region->allocator(), [&small_alloc] {
+                small_alloc.emplace_back(make_managed<uint64_t>());
+            });
+        });
+        BOOST_REQUIRE_EQUAL(fut.available(), false);
+        BOOST_REQUIRE_GE(parent.memory_used(), 2 * logalloc::segment_size);
+
+        with_allocator(child_region->allocator(), [&big_alloc] {
+            big_alloc.clear();
+        });
+        child_region.reset();
+        quiesce(std::move(fut));
+
+        with_allocator(parent_region->allocator(), [&small_alloc] {
+            small_alloc.clear();
+        });
+        parent_region.reset();
+    });
+}
+
+SEASTAR_TEST_CASE(test_region_groups_linear_hierarchy_throttling_parent_alloc) {
+    return seastar::async([] {
+        logalloc::region_group parent(logalloc::segment_size);
+        logalloc::region_group child(&parent, logalloc::segment_size);
+
+        auto child_region = std::make_unique<logalloc::region>(child);
+        auto parent_region = std::make_unique<logalloc::region>(parent);
+
+        // fill the parent. Try allocating at child level. Should not be allowed.
+        std::vector<managed_bytes> big_alloc;
+        std::vector<managed_ref<uint64_t>> small_alloc;
+
+        with_allocator(parent_region->allocator(), [&big_alloc] {
+            big_alloc.push_back(bytes(bytes::initialized_later(), logalloc::segment_size));
+        });
+        BOOST_REQUIRE_GE(parent.memory_used(), logalloc::segment_size);
+
+        auto fut = child.run_when_memory_available([&child_region, &small_alloc] {
+            with_allocator(child_region->allocator(), [&small_alloc] {
+                small_alloc.emplace_back(make_managed<uint64_t>());
+            });
+        });
+        BOOST_REQUIRE_EQUAL(fut.available(), false);
+
+        with_allocator(parent_region->allocator(), [&big_alloc] {
+            big_alloc.clear();
+        });
+        parent_region.reset();
+        quiesce(std::move(fut));
+
+        with_allocator(child_region->allocator(), [&small_alloc] {
+            small_alloc.clear();
+        });
+        child_region.reset();
+    });
+}
+
+SEASTAR_TEST_CASE(test_region_groups_fifo_order) {
+    // tests that requests that are queued for later execution execute in FIFO order
+    return seastar::async([] {
+        logalloc::region_group rg(logalloc::segment_size);
+
+        auto region = std::make_unique<logalloc::region>(rg);
+
+        // fill the parent. Try allocating at child level. Should not be allowed.
+        std::vector<managed_bytes> big_alloc;
+        with_allocator(region->allocator(), [&big_alloc] {
+            big_alloc.push_back(bytes(bytes::initialized_later(), logalloc::segment_size));
+        });
+        BOOST_REQUIRE_GE(rg.memory_used(), logalloc::segment_size);
+
+        auto exec_cnt = make_lw_shared<int>(0);
+        std::vector<future<>> executions;
+
+        for (auto index = 0; index < 100; ++index) {
+            auto fut = rg.run_when_memory_available([exec_cnt, index] {
+                BOOST_REQUIRE_EQUAL(index, (*exec_cnt)++);
+            });
+            BOOST_REQUIRE_EQUAL(fut.available(), false);
+            executions.push_back(std::move(fut));
+        }
+
+        with_allocator(region->allocator(), [&big_alloc] {
+            big_alloc.clear();
+        });
+        region.reset();
+        quiesce(when_all(executions.begin(), executions.end()));
+    });
+}
+
+
+
+SEASTAR_TEST_CASE(test_region_groups_linear_hierarchy_throttling_moving_restriction) {
+    // Hierarchy here is A -> B -> C.
+    // We will fill B causing an execution in C to fail. We then fill A and free B.
+    //
+    // C should still be blocked.
+    return seastar::async([] {
+        logalloc::region_group root(logalloc::segment_size);
+        logalloc::region_group inner(&root, logalloc::segment_size);
+        logalloc::region_group child(&inner, logalloc::segment_size);
+
+        auto child_region = std::make_unique<logalloc::region>(child);
+        auto inner_region = std::make_unique<logalloc::region>(inner);
+        auto root_region = std::make_unique<logalloc::region>(root);
+
+        // fill the inner node. Try allocating at child level. Should not be allowed.
+        circular_buffer<managed_bytes> big_alloc;
+        std::vector<managed_ref<uint64_t>> small_alloc;
+
+        with_allocator(inner_region->allocator(), [&big_alloc] {
+            big_alloc.push_back(bytes(bytes::initialized_later(), logalloc::segment_size));
+        });
+        BOOST_REQUIRE_GE(inner.memory_used(), logalloc::segment_size);
+
+        auto fut = child.run_when_memory_available([&child_region, &small_alloc] {
+            with_allocator(child_region->allocator(), [&small_alloc] {
+                small_alloc.emplace_back(make_managed<uint64_t>());
+            });
+        });
+        BOOST_REQUIRE_EQUAL(fut.available(), false);
+
+        // Now fill the root...
+        with_allocator(root_region->allocator(), [&big_alloc] {
+            big_alloc.push_back(bytes(bytes::initialized_later(), logalloc::segment_size));
+        });
+        BOOST_REQUIRE_GE(root.memory_used(), logalloc::segment_size);
+
+        // And free the inner node. We will verify that
+        // 1) the notifications that the inner node sent the child when it was freed won't
+        //    erroneously cause it to execute
+        // 2) the child is still able to receive notifications from the root
+        with_allocator(inner_region->allocator(), [&big_alloc] {
+            big_alloc.pop_front();
+        });
+        inner_region.reset();
+
+        // Verifying (1)
+        // Can't quiesce because we don't want to wait on the futures.
+        sleep(10ms);
+        BOOST_REQUIRE_EQUAL(fut.available(), false);
+
+        // Verifying (2)
+        with_allocator(root_region->allocator(), [&big_alloc] {
+            big_alloc.pop_front();
+        });
+        root_region.reset();
+        quiesce(fut);
+
+        with_allocator(child_region->allocator(), [&small_alloc] {
+            small_alloc.clear();
+        });
+        child_region.reset();
+    });
+}
+
+SEASTAR_TEST_CASE(test_region_groups_tree_hierarchy_throttling_leaf_alloc) {
+    return seastar::async([] {
+        class leaf {
+            logalloc::region_group rg;
+            std::unique_ptr<logalloc::region> region;
+            std::vector<managed_bytes> allocs;
+        public:
+            leaf(logalloc::region_group& parent)
+                : rg(&parent, logalloc::segment_size)
+                , region(std::make_unique<logalloc::region>(rg))
+                {}
+
+            ~leaf() {
+                with_allocator(region->allocator(), [this] {
+                    allocs.clear();
+                });
+                region.reset();
+            }
+
+            void alloc(size_t size) {
+                with_allocator(region->allocator(), [this, size] {
+                    allocs.push_back(bytes(bytes::initialized_later(), size));
+                });
+            }
+            future<> try_alloc(size_t size) {
+                return rg.run_when_memory_available([this, size] {
+                    alloc(size);
+                });
+            }
+            void reset() {
+                with_allocator(region->allocator(), [this] {
+                    allocs.clear();
+                });
+                region.reset(new logalloc::region(rg));
+            }
+        };
+
+        logalloc::region_group parent(logalloc::segment_size);
+        leaf first_leaf(parent);
+        leaf second_leaf(parent);
+        leaf third_leaf(parent);
+
+        first_leaf.alloc(logalloc::segment_size);
+        second_leaf.alloc(logalloc::segment_size);
+        third_leaf.alloc(logalloc::segment_size);
+
+        auto fut_1 = first_leaf.try_alloc(sizeof(uint64_t));
+        auto fut_2 = second_leaf.try_alloc(sizeof(uint64_t));
+        auto fut_3 = third_leaf.try_alloc(sizeof(uint64_t));
+
+        BOOST_REQUIRE_EQUAL(fut_1.available() || fut_2.available() || fut_3.available(), false);
+
+        // Total memory is still 2 * segment_size, can't proceed
+        first_leaf.reset();
+        // Can't quiesce because we don't want to wait on the futures.
+        sleep(10ms);
+
+        BOOST_REQUIRE_EQUAL(fut_1.available() || fut_2.available() || fut_3.available(), false);
+
+        // Now all futures should resolve.
+        first_leaf.reset();
+        second_leaf.reset();
+        third_leaf.reset();
+        quiesce(when_all(std::move(fut_1), std::move(fut_2), std::move(fut_3)));
     });
 }
