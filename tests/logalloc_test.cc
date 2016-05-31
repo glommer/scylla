@@ -919,6 +919,50 @@ SEASTAR_TEST_CASE(test_region_groups_basic_throttling_simple_active_reclaim) {
     });
 }
 
+SEASTAR_TEST_CASE(test_region_groups_basic_throttling_active_reclaim_compaction_attempted) {
+    return seastar::async([] {
+        // A region group that has a throttle threshold of 0 can only execute a function when there
+        // is absolutely no memory pending. We will use this rather artificial scenario to make sure
+        // that compaction is properly called by the active reclaim process
+        logalloc::region_group simple(size_t(0));
+        auto simple_region = std::make_unique<logalloc::region>(simple);
+
+        std::vector<managed_ref<int>> allocated;
+
+        // Allocate many segments, and then free them. Some of them should still be lying around.
+        with_allocator(simple_region->allocator(), [&allocated] {
+            // Allocate some memory
+            for (size_t i = 0; i < logalloc::segment_size / sizeof(int); i++) {
+                allocated.push_back(make_managed<int>());
+            }
+            // Free 1/3 randomly
+            std::random_shuffle(allocated.begin(), allocated.end());
+            auto it = allocated.begin();
+            size_t nr_freed = (allocated.size()) / 2;
+            for (size_t i = 0; i < nr_freed; ++i) {
+                *it++ = {};
+            }
+        });
+
+        auto initial_size = simple.memory_used();
+        simple_region->make_async_evictable([&simple, initial_size] {
+            // Make sure some memory was compacted by the
+            BOOST_REQUIRE_GT(initial_size, simple.memory_used());
+            return make_ready_future<memory::reclaiming_result>(memory::reclaiming_result::reclaimed_nothing);
+        });
+
+        // Can't run this function until we have reclaimed something. This will force compaction
+        auto fut = simple.run_when_memory_available([] {});
+        BOOST_REQUIRE_EQUAL(fut.available(), false);
+
+        with_allocator(simple_region->allocator(), [&allocated] {
+            allocated.clear();
+        });
+        simple_region.reset();
+        quiesce(std::move(fut));
+    });
+}
+
 SEASTAR_TEST_CASE(test_region_groups_basic_throttling_active_reclaim_worst_offender) {
     return seastar::async([] {
         // allocate three regions with three different sizes (segment boundary must be used due to
