@@ -2069,6 +2069,22 @@ void region_group::try_to_async_evict_some() {
         return;
     }
 
+    auto start = std::chrono::steady_clock::now();
+    do {
+        // Try to compact a segment from the maximal region. If that's enough
+        // The maximal RG can change, so we don't loop over compacting a single region.
+        //
+        // Please note that in the same way as when asynchronous reclaim finishes, there is no need
+        // to do anything else here but bail. We'll eventually call update() and that will
+        // release_requests().
+        if (_maximal_rg->top_region_evictable_space() != 0) {
+            _maximal_rg->_regions.top()->compact();
+            if (execution_permitted()) {
+                return;
+            }
+        }
+    } while ((std::chrono::steady_clock::now() - start) < 250us);
+
     // Reducing memory for a region_group will usually happen by ways of a region
     // effectively being deleted.  If we end up freeing some memory, we will eventually
     // enter release_requests again from the update() call upon memory free. To prevent
