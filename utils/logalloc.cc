@@ -32,6 +32,7 @@
 #include <seastar/core/memory.hh>
 #include <seastar/core/align.hh>
 #include <seastar/core/print.hh>
+#include <seastar/core/sleep.hh>
 
 #include "utils/logalloc.hh"
 #include "log.hh"
@@ -2057,6 +2058,41 @@ void region_group::do_release_requests() noexcept {
             // be blocked on ourselves and now we are blocking on an ancestor
             subscribe_for_ancestor_available_memory_notification(blocked_at);
         }
+    });
+}
+
+void region_group::try_to_async_evict_some() {
+    using namespace std::chrono_literals;
+
+    // already reclaiming
+    if (_asynchronous_reclaim_ongoing) {
+        return;
+    }
+
+    // Reducing memory for a region_group will usually happen by ways of a region
+    // effectively being deleted.  If we end up freeing some memory, we will eventually
+    // enter release_requests again from the update() call upon memory free. To prevent
+    // deadlocks we will limit ourselves to calling the asynchronous reclaimer, and will exit
+    // the current call immediately. Note that which region sits at the top might have changed
+    // by then.
+    _asynchronous_reclaim_ongoing = later().then([this] {
+        return do_until([this] { return execution_permitted(); }, [this] {
+            auto reclaim_status = make_ready_future<memory::reclaiming_result>(memory::reclaiming_result::reclaimed_nothing);
+            if (_maximal_rg->top_region_evictable_space() != 0) {
+                reclaim_status = _maximal_rg->_regions.top()->asynchronously_evict_some();
+            }
+            return reclaim_status.then([] (auto status) {
+                if (status == memory::reclaiming_result::reclaimed_nothing) {
+                    return sleep(10ms);
+                }
+                return make_ready_future<>();
+            });
+        });
+    }).finally([this] {
+        // There is no need to release requests from here, although we could. If memory
+        // was freed in the region_group, eventually update() will be called and
+        // release_requests will be called from there again.
+        _asynchronous_reclaim_ongoing = {};
     });
 }
 

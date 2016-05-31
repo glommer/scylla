@@ -99,6 +99,7 @@ class region_group {
     size_t _total_memory = 0;
     size_t _throttle_threshold = std::numeric_limits<size_t>::max();
     subgroup_heap _subgroups;
+    std::experimental::optional<future<>> _asynchronous_reclaim_ongoing = {};
     subgroup_heap::handle_type _subgroup_heap_handle;
     region_heap _regions;
     region_group* _maximal_rg = nullptr;
@@ -241,6 +242,8 @@ public:
         auto fn = std::make_unique<concrete_allocating_function<Func>>(std::forward<Func>(func));
         auto fut = fn->get_future();
         _blocked_requests.push_back(std::move(fn));
+
+        blocked_at->try_to_async_evict_some();
         return fut;
     }
 private:
@@ -299,6 +302,8 @@ private:
         do_release_requests();
     }
     void do_release_requests() noexcept;
+
+    void try_to_async_evict_some();
 
     uint64_t top_region_evictable_space() const;
 
