@@ -538,8 +538,10 @@ inline void quiesce(FutureType&& fut) {
 
 SEASTAR_TEST_CASE(test_region_groups_basic_throttling) {
     return seastar::async([] {
+        region_group_reclaimer simple_reclaimer(logalloc::segment_size);
+
         // singleton hierarchy, only one segment allowed
-        logalloc::region_group simple(logalloc::segment_size);
+        logalloc::region_group simple(simple_reclaimer);
         auto simple_region = std::make_unique<logalloc::region>(simple);
         std::vector<managed_ref<uint64_t>> simple_objs;
 
@@ -596,8 +598,11 @@ SEASTAR_TEST_CASE(test_region_groups_basic_throttling) {
 
 SEASTAR_TEST_CASE(test_region_groups_linear_hierarchy_throttling_child_alloc) {
     return seastar::async([] {
-        logalloc::region_group parent(2 * logalloc::segment_size);
-        logalloc::region_group child(&parent, logalloc::segment_size);
+        region_group_reclaimer parent_reclaimer(2 * logalloc::segment_size);
+        region_group_reclaimer child_reclaimer(logalloc::segment_size);
+
+        logalloc::region_group parent(parent_reclaimer);
+        logalloc::region_group child(&parent, child_reclaimer);
 
         auto child_region = std::make_unique<logalloc::region>(child);
         auto parent_region = std::make_unique<logalloc::region>(parent);
@@ -652,8 +657,10 @@ SEASTAR_TEST_CASE(test_region_groups_linear_hierarchy_throttling_child_alloc) {
 
 SEASTAR_TEST_CASE(test_region_groups_linear_hierarchy_throttling_parent_alloc) {
     return seastar::async([] {
-        logalloc::region_group parent(logalloc::segment_size);
-        logalloc::region_group child(&parent, logalloc::segment_size);
+        region_group_reclaimer simple_reclaimer(logalloc::segment_size);
+
+        logalloc::region_group parent(simple_reclaimer);
+        logalloc::region_group child(&parent, simple_reclaimer);
 
         auto parent_region = std::make_unique<logalloc::region>(parent);
 
@@ -682,7 +689,9 @@ SEASTAR_TEST_CASE(test_region_groups_linear_hierarchy_throttling_parent_alloc) {
 SEASTAR_TEST_CASE(test_region_groups_fifo_order) {
     // tests that requests that are queued for later execution execute in FIFO order
     return seastar::async([] {
-        logalloc::region_group rg(logalloc::segment_size);
+        region_group_reclaimer simple_reclaimer(logalloc::segment_size);
+
+        logalloc::region_group rg(simple_reclaimer);
 
         auto region = std::make_unique<logalloc::region>(rg);
 
@@ -714,17 +723,17 @@ SEASTAR_TEST_CASE(test_region_groups_fifo_order) {
     });
 }
 
-
-
 SEASTAR_TEST_CASE(test_region_groups_linear_hierarchy_throttling_moving_restriction) {
     // Hierarchy here is A -> B -> C.
     // We will fill B causing an execution in C to fail. We then fill A and free B.
     //
     // C should still be blocked.
     return seastar::async([] {
-        logalloc::region_group root(logalloc::segment_size);
-        logalloc::region_group inner(&root, logalloc::segment_size);
-        logalloc::region_group child(&inner, logalloc::segment_size);
+        region_group_reclaimer simple_reclaimer(logalloc::segment_size);
+
+        logalloc::region_group root(simple_reclaimer);
+        logalloc::region_group inner(&root, simple_reclaimer);
+        logalloc::region_group child(&inner, simple_reclaimer);
 
         auto inner_region = std::make_unique<logalloc::region>(inner);
         auto root_region = std::make_unique<logalloc::region>(root);
@@ -776,45 +785,49 @@ SEASTAR_TEST_CASE(test_region_groups_linear_hierarchy_throttling_moving_restrict
 SEASTAR_TEST_CASE(test_region_groups_tree_hierarchy_throttling_leaf_alloc) {
     return seastar::async([] {
         class leaf {
-            logalloc::region_group rg;
-            std::unique_ptr<logalloc::region> region;
-            std::vector<managed_bytes> allocs;
+            region_group_reclaimer _leaf_reclaimer;
+            logalloc::region_group _rg;
+            std::unique_ptr<logalloc::region> _region;
+            std::vector<managed_bytes> _allocs;
         public:
             leaf(logalloc::region_group& parent)
-                : rg(&parent, logalloc::segment_size)
-                , region(std::make_unique<logalloc::region>(rg))
+                : _leaf_reclaimer(logalloc::segment_size)
+                , _rg(&parent, _leaf_reclaimer)
+                , _region(std::make_unique<logalloc::region>(_rg))
                 {}
 
             ~leaf() {
-                with_allocator(region->allocator(), [this] {
-                    std::vector<managed_bytes>().swap(allocs);
+                with_allocator(_region->allocator(), [this] {
+                    std::vector<managed_bytes>().swap(_allocs);
                 });
-                region.reset();
+                _region.reset();
             }
 
             future<> shutdown() {
-                return rg.shutdown();
+                return _rg.shutdown();
             }
 
             void alloc(size_t size) {
-                with_allocator(region->allocator(), [this, size] {
-                    allocs.push_back(bytes(bytes::initialized_later(), size));
+                with_allocator(_region->allocator(), [this, size] {
+                    _allocs.push_back(bytes(bytes::initialized_later(), size));
                 });
             }
             future<> try_alloc(size_t size) {
-                return rg.run_when_memory_available([this, size] {
+                return _rg.run_when_memory_available([this, size] {
                     alloc(size);
                 });
             }
             void reset() {
-                with_allocator(region->allocator(), [this] {
-                    std::vector<managed_bytes>().swap(allocs);
+                with_allocator(_region->allocator(), [this] {
+                    std::vector<managed_bytes>().swap(_allocs);
                 });
-                region.reset(new logalloc::region(rg));
+                _region.reset(new logalloc::region(_rg));
             }
         };
 
-        logalloc::region_group parent(logalloc::segment_size);
+        region_group_reclaimer simple_reclaimer(logalloc::segment_size);
+        logalloc::region_group parent(simple_reclaimer);
+
         leaf first_leaf(parent);
         leaf second_leaf(parent);
         leaf third_leaf(parent);
