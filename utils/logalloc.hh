@@ -553,7 +553,7 @@ private:
 public:
     region();
     explicit region(region_group& group);
-    ~region();
+    virtual ~region();
     region(region&& other);
     region& operator=(region&& other);
     region(const region& other) = delete;
