@@ -210,6 +210,46 @@ private:
     }
 };
 
+class dirty_memory_reclaimer: public logalloc::region_group_reclaimer {
+    seastar::gate _asynchronous_reclaim_gate;
+    // We need a separate boolean, because from the LSA point of view, pressure may still be
+    // mounting, in which case the pressure flag could be set back on if we force it off.
+    bool _db_shutdown_requested = false;
+
+    // We need to track ongoing reclaims on our side as well. The LSA infrastructure won't keep
+    // calling start_reclaim during the same pressure event, but pressure conditions can toggle
+    // between on/off fairly quickly. While this would be an unlikely scenarion in the day and age
+    // where we were not forcing compactions, compact-on-idle makes it quite frequent: as the first
+    // request throttles (pressure starts), we go idle. Then we compact some bytes and we are now
+    // slightly below limit (pressure stops). But that only lasts for another request, etc.
+    //
+    // If we don't protect against this, we will soon find ourselves starting many flushes where we
+    // needed only one - most likely for the same CF, which is still the one that tops memory usage.
+    // That'll get us some really small SSTables, as low as 1 partition.
+    bool _ongoing_reclaim = false;
+protected:
+    database& _db;
+    virtual logalloc::region_group& rg() = 0;
+    virtual lw_shared_ptr<memtable_list> get_memtable_list(column_family& cf) = 0;
+public:
+    virtual void start_reclaiming();
+    future<> shutdown();
+    dirty_memory_reclaimer(database& db, size_t threshold): logalloc::region_group_reclaimer(threshold), _db(db) {}
+};
+
+struct memtable_dirty_memory_reclaimer: public dirty_memory_reclaimer {
+    virtual logalloc::region_group& rg();
+    virtual lw_shared_ptr<memtable_list> get_memtable_list(column_family& cf);
+    memtable_dirty_memory_reclaimer(database& db, size_t threshold): dirty_memory_reclaimer(db, threshold) {}
+};
+
+struct streaming_dirty_memory_reclaimer: public dirty_memory_reclaimer {
+    virtual logalloc::region_group& rg();
+    virtual lw_shared_ptr<memtable_list> get_memtable_list(column_family& cf);
+    streaming_dirty_memory_reclaimer(database& db, size_t threshold): dirty_memory_reclaimer(db, threshold) {}
+};
+
+
 using sstable_list = sstables::sstable_list;
 
 // The CF has a "stats" structure. But we don't want all fields here,
@@ -308,6 +348,9 @@ private:
     lw_shared_ptr<memtable_list> make_memory_only_memtable_list();
     lw_shared_ptr<memtable_list> make_memtable_list();
     lw_shared_ptr<memtable_list> make_streaming_memtable_list();
+
+    friend struct memtable_dirty_memory_reclaimer;
+    friend struct streaming_dirty_memory_reclaimer;
 
     // generation -> sstable. Ordered by key so we can easily get the most recent.
     lw_shared_ptr<sstable_list> _sstables;
@@ -850,8 +893,11 @@ class database {
     std::unique_ptr<db::config> _cfg;
     size_t _memtable_total_space = 500 << 20;
     size_t _streaming_memtable_total_space = 500 << 20;
-    logalloc::region_group_reclaimer _dirty_memory_region_group_reclaimer;
-    logalloc::region_group_reclaimer _streaming_dirty_memory_region_group_reclaimer;
+    memtable_dirty_memory_reclaimer _dirty_memory_region_group_reclaimer;
+    streaming_dirty_memory_reclaimer _streaming_dirty_memory_region_group_reclaimer;
+
+    friend struct memtable_dirty_memory_reclaimer;
+    friend struct streaming_dirty_memory_reclaimer;
 
     logalloc::region_group _dirty_memory_region_group;
     logalloc::region_group _streaming_dirty_memory_region_group;

@@ -1310,8 +1310,8 @@ database::database(const db::config& cfg)
         return memtable_total_space;
     }())
     , _streaming_memtable_total_space(_memtable_total_space / 4)
-    , _dirty_memory_region_group_reclaimer(_memtable_total_space)
-    , _streaming_dirty_memory_region_group_reclaimer(_streaming_memtable_total_space)
+    , _dirty_memory_region_group_reclaimer(*this, _memtable_total_space)
+    , _streaming_dirty_memory_region_group_reclaimer(*this, _streaming_memtable_total_space)
     , _dirty_memory_region_group(_dirty_memory_region_group_reclaimer)
     , _streaming_dirty_memory_region_group(&_dirty_memory_region_group, _streaming_dirty_memory_region_group_reclaimer)
     , _version(empty_version)
@@ -2050,6 +2050,55 @@ column_family::check_valid_rp(const db::replay_position& rp) const {
     }
 }
 
+void dirty_memory_reclaimer::start_reclaiming() {
+    with_gate(_asynchronous_reclaim_gate, [this] {
+        return do_until([this] { return _ongoing_reclaim || _db_shutdown_requested || !under_pressure(); }, [this] {
+            // There are many criteria that can be used to select what is the best memtable to
+            // flush. Most of the time we want some coordination with the commitlog to allow us to
+            // release commitlog segments as early as we can.
+            //
+            // But during pressure condition, we'll just pick the CF that holds the largest
+            // memtable. The advantage of doing this is that this is objectively the one that will
+            // release the biggest amount of memory and is less likely to be generating tiny
+            // SSTables. The disadvantage is that right now, because we only release memory when the
+            // SSTable is fully written, that may take a bit of time to happen.
+            //
+            // However, since we'll very soon have a mechanism in place to account for the memory
+            // that was already written in one form or another, that disadvantage is mitigated.
+            memtable& biggest_memtable = dynamic_cast<memtable&>(*(rg().get_largest_region()));
+            auto& biggest_cf = _db.find_column_family(biggest_memtable.schema());
+            auto memtable_list = get_memtable_list(biggest_cf);
+            _ongoing_reclaim = true;
+            return memtable_list->seal_active_memtable(memtable_list::flush_behavior::immediate).finally([this] {
+                _ongoing_reclaim = false;
+            });
+        });
+    });
+}
+
+future<> dirty_memory_reclaimer::shutdown() {
+    _db_shutdown_requested = true;
+    return _asynchronous_reclaim_gate.close().then([this] {
+        return rg().shutdown();
+    });
+}
+
+logalloc::region_group& memtable_dirty_memory_reclaimer::rg() {
+    return _db._dirty_memory_region_group;
+}
+
+lw_shared_ptr<memtable_list> memtable_dirty_memory_reclaimer::get_memtable_list(column_family &cf) {
+    return cf._memtables;
+}
+
+logalloc::region_group& streaming_dirty_memory_reclaimer::rg() {
+    return _db._streaming_dirty_memory_region_group;
+}
+
+lw_shared_ptr<memtable_list> streaming_dirty_memory_reclaimer::get_memtable_list(column_family &cf) {
+    return cf._streaming_memtables;
+}
+
 future<> database::apply_in_memory(const frozen_mutation& m, schema_ptr m_schema, db::replay_position rp) {
     return _dirty_memory_region_group.run_when_memory_available([this, &m, m_schema = std::move(m_schema), rp = std::move(rp)] {
         try {
@@ -2199,9 +2248,9 @@ database::stop() {
         }
         return make_ready_future<>();
     }).then([this] {
-        return _dirty_memory_region_group.shutdown();
+        return _dirty_memory_region_group_reclaimer.shutdown();
     }).then([this] {
-        return _streaming_dirty_memory_region_group.shutdown();
+        return _streaming_dirty_memory_region_group_reclaimer.shutdown();
     }).then([this] {
         return parallel_for_each(_column_families, [this] (auto& val_pair) {
             return val_pair.second->stop();
