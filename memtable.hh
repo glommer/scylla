@@ -90,8 +90,11 @@ public:
     };
 };
 
+// Multiple inheritance is a bit ugly and confusing, but enable_lw_shared_from_this is such a simple
+// and well defined interface, that we can safely use it here.
+//
 // Managed by lw_shared_ptr<>.
-class memtable final : public enable_lw_shared_from_this<memtable> {
+class memtable final : public enable_lw_shared_from_this<memtable>, public logalloc::region {
 public:
     using partitions_type = bi::set<memtable_entry,
         bi::member_hook<memtable_entry, bi::set_member_hook<>, &memtable_entry::_link>,
@@ -99,7 +102,6 @@ public:
 private:
     schema_ptr _schema;
     logalloc::allocating_section _read_section;
-    mutable logalloc::region _region;
     logalloc::allocating_section _allocating_section;
     partitions_type partitions;
     db::replay_position _replay_position;
@@ -124,11 +126,10 @@ public:
     // The mutation is upgraded to current schema.
     void apply(const frozen_mutation& m, const schema_ptr& m_schema, const db::replay_position& = db::replay_position());
     const logalloc::region& region() const {
-        return _region;
+        return *this;
     }
 public:
     size_t partition_count() const;
-    logalloc::occupancy_stats occupancy() const;
 
     // Creates a reader of data in this memtable for given partition range.
     //
