@@ -1371,6 +1371,17 @@ public:
         }
     }
 
+    virtual size_t object_memory_size_in_allocator(void* obj) const noexcept override {
+        segment* seg = shard_segment_pool.containing_segment(obj);
+
+        if (!seg) {
+            return standard_allocator().object_memory_size_in_allocator(obj);
+        } else {
+            auto desc = reinterpret_cast<object_descriptor*>(reinterpret_cast<uintptr_t>(obj) - sizeof(object_descriptor));
+            return sizeof(object_descriptor) + desc->size() + desc->padding();
+        }
+    }
+
     // Merges another region into this region. The other region is made
     // to refer to this region.
     // Doesn't invalidate references to allocated objects.

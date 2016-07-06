@@ -97,6 +97,11 @@ public:
     // Doesn't invalidate references to objects allocated with this strategy.
     virtual void free(void*) = 0;
 
+    // Returns the total memory size used by the allocator to host this object.
+    // This will be at least the size of the object itself, plus the overhead, if any,
+    // to represent the object.
+    virtual size_t object_memory_size_in_allocator(void* obj) const noexcept = 0;
+
     // Like alloc() but also constructs the object with a migrator using
     // standard move semantics. Allocates respecting object's alignment
     // requirement.
@@ -137,6 +142,10 @@ public:
 
     virtual void free(void* obj) override {
         ::free(obj);
+    }
+
+    virtual size_t object_memory_size_in_allocator(void* obj) const noexcept {
+        return ::malloc_usable_size(obj);
     }
 };
 
