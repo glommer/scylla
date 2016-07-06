@@ -845,35 +845,32 @@ column_family::try_flush_memtable_to_sstable(lw_shared_ptr<memtable> old) {
     }).then_wrapped([this, old, newtab, memtable_size] (future<> ret) {
         _config.cf_stats->pending_memtables_flushes_count--;
         _config.cf_stats->pending_memtables_flushes_bytes -= memtable_size;
-        dblog.debug("Flushing done");
-        try {
-            ret.get();
-
-            // We must add sstable before we call update_cache(), because
-            // memtable's data after moving to cache can be evicted at any time.
-            auto old_sstables = _sstables;
-            add_sstable(newtab);
-            old->mark_flushed(newtab);
-
-            trigger_compaction();
-
-            return update_cache(*old, newtab).then_wrapped([this, old] (future<> f) {
-                try {
-                    f.get();
-                } catch(...) {
-                    dblog.error("failed to move memtable to cache: {}", std::current_exception());
-                }
-
-                _memtables->erase(old);
-                dblog.debug("Memtable replaced");
-
-                return make_ready_future<stop_iteration>(stop_iteration::yes);
-            });
-        } catch (...) {
-            dblog.error("failed to write sstable: {}", std::current_exception());
+        if (ret.failed()) {
+            auto ptr = std::move(ret.get_exception());
+            dblog.error("failed to write sstable: {}", ptr);
+            return make_exception_future<stop_iteration>(std::move(ptr));
         }
-        return sleep(10s).then([] {
-            return make_ready_future<stop_iteration>(stop_iteration::no);
+
+        dblog.debug("Flushing done");
+        // We must add sstable before we call update_cache(), because
+        // memtable's data after moving to cache can be evicted at any time.
+        auto old_sstables = _sstables;
+        add_sstable(newtab);
+        old->mark_flushed(newtab);
+
+        trigger_compaction();
+
+        return update_cache(*old, newtab).then_wrapped([this, old] (future<> f) {
+            try {
+                f.get();
+            } catch(...) {
+                dblog.error("failed to move memtable to cache: {}", std::current_exception());
+            }
+
+            _memtables->erase(old);
+            dblog.debug("Memtable replaced");
+
+            return make_ready_future<stop_iteration>(stop_iteration::yes);
         });
     });
 }
