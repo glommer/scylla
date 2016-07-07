@@ -375,7 +375,7 @@ public:
             size_t mem = 0;
             blob_storage* blob = _u.ptr;
             while (blob) {
-                mem += blob->frag_size + sizeof(blob_storage);
+                mem += current_allocator().object_memory_size_in_allocator(blob);
                 blob = blob->next;
             }
             return mem;

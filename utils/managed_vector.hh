@@ -236,7 +236,8 @@ public:
     // Returns the amount of external memory used.
     size_t memory_usage() const {
         if (is_external()) {
-            return sizeof(external) + _capacity * sizeof(T);
+            void* obj = const_cast<managed_vector*>(this)->get_external();
+            return current_allocator().object_memory_size_in_allocator(obj);
         }
         return 0;
     }
