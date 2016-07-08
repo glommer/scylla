@@ -659,6 +659,41 @@ column_family::update_cache(memtable& m, sstables::shared_sstable exclude_sstabl
     }
 }
 
+class dirty_memory_update_state {
+    size_t _used_memory = 0;
+    dirty_memory_manager* _manager = nullptr;
+public:
+    ~dirty_memory_update_state() {
+        if (_manager && _used_memory) {
+            _manager->region_group().update(-_used_memory);
+        }
+    }
+
+    dirty_memory_update_state(dirty_memory_update_state&& d) {
+        std::swap(_used_memory, d._used_memory);
+        std::swap(_manager, d._manager);
+    }
+
+    dirty_memory_update_state() {}
+    dirty_memory_update_state(memtable& m, dirty_memory_manager& manager, row_cache& cache)
+        : _used_memory(m.occupancy().used_space())
+        , _manager(&manager) {
+        // At this point, we will move the memtable's memory to the cache, which means that only
+        // the memory that is truly used should be considered dirty. The rest of the region can
+        // already be used by other cacheable memory if we need to.
+        //
+        // Due to the way that the region group statistics operate, we should first add the
+        // memory to the region group and only then reduce it back through the cache move. That is
+        // because if we would move the memory away first, the region group would notice the
+        // decrease and start releasing blocked requests.
+        _manager->region_group().update(_used_memory);
+        cache.import_memtable_data(m);
+    }
+
+    dirty_memory_update_state& operator=(dirty_memory_update_state&& d) = default;
+    dirty_memory_update_state(const dirty_memory_update_state& d) = delete;
+};
+
 // FIXME: because we are coalescing, it could be that mutations belonging to the same
 // range end up in two different tables. Technically, we should wait for both. However,
 // the only way we have to make this happen now is to wait on all previous writes. This
@@ -828,6 +863,10 @@ column_family::try_flush_memtable_to_sstable(lw_shared_ptr<memtable> old) {
     _config.cf_stats->pending_memtables_flushes_bytes += memtable_size;
     newtab->set_unshared();
     dblog.debug("Flushing to {}", newtab->get_filename());
+
+    auto mem_update_state = _config.enable_cache ?
+        dirty_memory_update_state(*old, *_config.dirty_memory_manager, _cache) : dirty_memory_update_state();
+
     // Note that due to our sharded architecture, it is possible that
     // in the face of a value change some shards will backup sstables
     // while others won't.
@@ -842,7 +881,7 @@ column_family::try_flush_memtable_to_sstable(lw_shared_ptr<memtable> old) {
     auto&& priority = service::get_local_memtable_flush_priority();
     return newtab->write_components(*old, incremental_backups_enabled(), priority).then([this, newtab, old] {
         return newtab->open_data();
-    }).then_wrapped([this, old, newtab, memtable_size] (future<> ret) {
+    }).then_wrapped([this, old, newtab, memtable_size, mem_update_state = std::move(mem_update_state)] (future<> ret) mutable {
         _config.cf_stats->pending_memtables_flushes_count--;
         _config.cf_stats->pending_memtables_flushes_bytes -= memtable_size;
         if (ret.failed()) {
@@ -860,7 +899,7 @@ column_family::try_flush_memtable_to_sstable(lw_shared_ptr<memtable> old) {
 
         trigger_compaction();
 
-        return update_cache(*old, newtab).then_wrapped([this, old] (future<> f) {
+        return update_cache(*old, newtab).then_wrapped([this, old, mem_update_state = std::move(mem_update_state)] (future<> f) mutable {
             try {
                 f.get();
             } catch(...) {

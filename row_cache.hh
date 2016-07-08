@@ -263,6 +263,8 @@ public:
     // before this method was invoked.
     future<> clear();
 
+    void import_memtable_data(memtable&);
+
     // Synchronizes cache with the underlying data source from a memtable which
     // has just been flushed to the underlying data source.
     // The memtable can be queried during the process, but must not be written.
