@@ -147,6 +147,7 @@ class region_group {
     struct allocating_function {
         virtual ~allocating_function() = default;
         virtual void allocate() = 0;
+        virtual std::chrono::duration<double> queued_for() = 0;
     };
 
     template <typename Func>
@@ -154,11 +155,18 @@ class region_group {
         using futurator = futurize<std::result_of_t<Func()>>;
         typename futurator::promise_type pr;
         Func func;
+        std::chrono::steady_clock::time_point queued;
     public:
+        std::chrono::duration<double> queued_for() override {
+            auto delta = std::chrono::steady_clock::now() - queued;
+            return std::chrono::duration_cast<std::chrono::duration<double>>(delta);
+        }
+
         void allocate() override {
             futurator::apply(func).forward_to(std::move(pr));
         }
-        concrete_allocating_function(Func&& func) : func(std::forward<Func>(func)) {}
+        concrete_allocating_function(Func&& func) : func(std::forward<Func>(func))
+                                                  , queued(std::chrono::steady_clock::now()) {}
         typename futurator::type get_future() {
             return pr.get_future();
         }
@@ -317,6 +325,18 @@ public:
     future<> shutdown() {
         _shutdown_requested = true;
         return _asynchronous_gate.close();
+    }
+
+    size_t blocked_requests() {
+        return _blocked_requests.size();
+    }
+
+    float blocked_for() {
+        if (_blocked_requests.empty()) {
+            return 0.0;
+        }
+
+        return _blocked_requests.front()->queued_for().count();
     }
 private:
     // Make sure we get a notification and can call release_requests when one of our ancestors that
