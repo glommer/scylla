@@ -20,6 +20,7 @@
  */
 
 #include "memtable.hh"
+#include "database.hh"
 #include "frozen_mutation.hh"
 #include "sstable_mutation_readers.hh"
 
@@ -240,10 +241,100 @@ public:
     }
 };
 
+class flush_memory_accounting {
+    uint64_t _bytes_read = 0;
+    logalloc::region& _region;
+    uint64_t _total_free_bytes;
+public:
+    flush_memory_accounting(logalloc::region& region) : _region(region)
+                                                      , _total_free_bytes(region.occupancy().free_space()) {}
+
+    size_t free_space() const {
+        return _total_free_bytes;
+    }
+
+    template <typename Func>
+    void update_bytes_read(Func&& f) {
+        auto delta = with_allocator(_region.allocator(), [f = std::forward<Func>(f)] () -> uint64_t {
+            return f();
+        });
+        // If there are compactions in the middle of the flush, the total space for this region
+        // group will go down. Since it could be that we have already accounted part of it we could
+        // free here more than the region has.
+        //
+        // XXX: This code assumes that the memtable can't grow in size after it is sealed. This
+        // assumption holds for now but may not hold in the future if we allow writes to sealed
+        // memtables.
+        auto max_delta = (_region.occupancy().total_space() - _bytes_read);
+        _bytes_read += std::min(delta, max_delta);
+        dirty_memory_manager::from_region_group(_region.group()).account_potentially_cleaned_up_memory(delta);
+    }
+
+    ~flush_memory_accounting() {
+        dirty_memory_manager::from_region_group(_region.group()).revert_potentially_cleaned_up_memory(_bytes_read);
+    }
+};
+
+struct partition_snapshot_flush_reader: public partition_snapshot_reader {
+    lw_shared_ptr<flush_memory_accounting> _acc;
+    partition_snapshot_flush_reader(lw_shared_ptr<memtable> mt, logalloc::region& region, logalloc::allocating_section &read_section,
+                                    memtable_entry& e, lw_shared_ptr<flush_memory_accounting> acc)
+        : partition_snapshot_reader(mt->schema(), e.key(),
+                                    e.partition().read(mt->schema()),
+                                    query::clustering_key_filter_ranges::get_ranges(*mt->schema(), query::full_slice, e.key().key()),
+                                    region, read_section, mt)
+        , _acc(acc)
+    {
+        // We will release requests that are blocked based on the amount of memory that is about to be
+        // released when the sstable is finally fully written. We don't know precisely how much memory
+        // we will be releasing, nor do we know when, so we will use a lower bound on the amount of
+        // memory to be released.
+        //
+        // Technically speaking, any lower bound is fine, but the closer we are to the real number, the
+        // better. If our lower bound is too distant from reality, we will be denying the application
+        // some throughput, as requests will be blocked for longer than they should.
+        //
+        // The flush reader will provide an estimate on the amount of used memory written, but in
+        // reality the it is the total memory, not used memory, that is used in dirty memory
+        // accounting. So to get us closer to the real number, we will also mark free_memory (total
+        // - used) as potentially clean.
+        //
+        // The total of free memory cleaned will be spread over all partitions the memtable, so we
+        // account for one of them at each partition that we read.
+        auto free_share = _acc->free_space() / mt->partition_count();
+        _acc->update_bytes_read([&e, free_share, s = _schema] {
+            return free_share +
+                   current_allocator().object_memory_size_in_allocator(&e) +
+                   current_allocator().object_memory_size_in_allocator(&*(partition_snapshot(s, &(e.partition())).version())) +
+                   e.key().key().memory_usage();
+        });
+    }
+
+    virtual void account_component(mutation_fragment& mf) override {
+        _acc->update_bytes_read([&mf] {
+            // Can't call mf.memory_usage() because that includes the memory allocated to hold
+            // the mutation fragment itself. That is not part of the memtable, and therefore should
+            // not be accounted here.
+            return mf.visit([] (auto& component) {
+                return component.memory_usage();
+            });
+        });
+    }
+
+    virtual void account_component(const rows_entry& e) override {
+        _acc->update_bytes_read([&e] {
+            return current_allocator().object_memory_size_in_allocator(&const_cast<rows_entry&>(e));
+        });
+    }
+};
+
 class flush_reader final : public iterator_reader {
+    lw_shared_ptr<flush_memory_accounting> _flushed_memory;
+
 public:
     flush_reader(schema_ptr s, lw_shared_ptr<memtable> m)
         : iterator_reader(std::move(s), std::move(m), query::full_partition_range)
+        , _flushed_memory(make_lw_shared<flush_memory_accounting>(region()))
     {}
 
     virtual future<streamed_mutation_opt> operator()() override {
@@ -253,7 +344,7 @@ public:
         if (!e) {
             return make_ready_future<streamed_mutation_opt>(stdx::nullopt);
         } else {
-            return make_ready_future<streamed_mutation_opt>((*e).read(mtbl(), schema(), query::full_slice));
+            return make_ready_future<streamed_mutation_opt>(make_streamed_mutation<partition_snapshot_flush_reader>(mtbl(), region(), read_section(), *e, _flushed_memory));
         }
     }
 };
