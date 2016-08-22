@@ -25,6 +25,10 @@
 
 namespace stdx = std::experimental;
 
+size_t memtable_entry::memory_footprint() {
+    return sizeof(memtable_entry) + sizeof(partition_version);
+}
+
 memtable::memtable(schema_ptr schema, logalloc::region_group* dirty_memory_region_group)
         : logalloc::region(dirty_memory_region_group ? logalloc::region(*dirty_memory_region_group) : logalloc::region())
         , _schema(std::move(schema))

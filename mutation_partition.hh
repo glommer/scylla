@@ -459,6 +459,11 @@ public:
         : _key(e._key)
         , _row(e._row)
     { }
+
+    static size_t memory_footprint() {
+        return sizeof(rows_entry);
+    }
+
     clustering_key& key() {
         return _key;
     }

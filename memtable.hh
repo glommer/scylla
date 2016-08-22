@@ -51,6 +51,7 @@ public:
         , _pe(std::move(p))
     { }
 
+    static size_t memory_footprint();
     memtable_entry(memtable_entry&& o) noexcept;
 
     const dht::decorated_key& key() const { return _key; }
