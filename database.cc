@@ -839,6 +839,31 @@ column_family::try_flush_memtable_to_sstable(lw_shared_ptr<memtable> old) {
 
     newtab->set_unshared();
     dblog.debug("Flushing to {}", newtab->get_filename());
+
+    // We will release requests that are blocked based on the amount of memory that is about to be
+    // released when the sstable is finally fully written. We don't know precisely how much memory
+    // we will be releasing, nor do we know when, so we will use a lower bound on the amount of
+    // memory to be released.
+    //
+    // Technically speaking, any lower bound is fine, but the closer we are to the real number, the
+    // better. If our lower bound is too distant from reality, we will be denying the application
+    // some throughput, as requests will be blocked for longer than they should.
+    //
+    // The SSTable will provide an estimate on the amount of used memory written, but in reality the
+    // it is the total memory, not used memory, that is used in dirty memory accounting. So to get
+    // us closer to the real number, we will also mark free_memory (total - used) as potentially
+    // clean.
+    //
+    // The total of free memory cleaned will be spread over all partitions in this memtable.
+    auto last_bytes_written = make_lw_shared<uint64_t>(0ul);
+    auto extra_memory_per_partition = old->occupancy().free_space() / old->partition_count();
+    newtab->on_partition_end([this, last_bytes_written, extra_memory_per_partition] (const sstables::sstable& sst) {
+        auto now = sst.lower_bound_on_memory_written() + extra_memory_per_partition;
+        auto delta = now - *last_bytes_written;
+        *last_bytes_written = now;
+        _config.dirty_memory_manager->account_potentially_cleaned_up_memory(delta);
+    });
+
     // Note that due to our sharded architecture, it is possible that
     // in the face of a value change some shards will backup sstables
     // while others won't.
@@ -853,8 +878,12 @@ column_family::try_flush_memtable_to_sstable(lw_shared_ptr<memtable> old) {
     auto&& priority = service::get_local_memtable_flush_priority();
     return newtab->write_components(*old, incremental_backups_enabled(), priority).then([this, newtab, old] {
         return newtab->open_data();
-    }).then_wrapped([this, old, newtab] (future<> ret) {
+    }).then_wrapped([this, old, newtab, last_bytes_written] (future<> ret) {
         dblog.debug("Flushing to {} done", newtab->get_filename());
+        // We will know amend the amount of dirty memory used. We revert whatever speculative
+        // changed we have made, and update_cache() will then subtract the real value. (or the
+        // memtable destructor if cache is disabled)
+        _config.dirty_memory_manager->revert_potentially_cleaned_up_memory(*last_bytes_written);
         try {
             ret.get();
 
@@ -1397,7 +1426,7 @@ database::database(const db::config& cfg)
     // in a different region group. This is because throttled requests are serviced in FIFO order,
     // and we don't want system requests to be waiting for a long time behind user requests.
     , _system_dirty_memory_manager(*this, _memtable_total_space + (10 << 20))
-    , _dirty_memory_manager(*this, &_system_dirty_memory_manager, _memtable_total_space)
+    , _dirty_memory_manager(*this, &_system_dirty_memory_manager, _memtable_total_space / 2)
     , _streaming_dirty_memory_manager(*this, &_dirty_memory_manager, _streaming_memtable_total_space)
     , _version(empty_version)
     , _enable_incremental_backups(cfg.incremental_backups())
@@ -1415,7 +1444,7 @@ database::setup_collectd() {
                 , scollectd::per_cpu_plugin_instance
                 , "bytes", "dirty")
                 , scollectd::make_typed(scollectd::data_type::GAUGE, [this] {
-            return dirty_memory_region_group().memory_used();
+            return _dirty_memory_manager.real_dirty_memory();
     })));
 
     _collectd.push_back(

@@ -132,6 +132,7 @@ class dirty_memory_manager: public logalloc::region_group_reclaimer {
     // default values here.
     size_t _concurrency;
     semaphore _flush_serializer;
+    int64_t _dirty_bytes_released_pre_accounted = 0;
 
     seastar::gate _waiting_flush_gate;
     std::vector<shared_memtable> _pending_flushes;
@@ -161,6 +162,20 @@ public:
 
     const logalloc::region_group& region_group() const {
         return _region_group;
+    }
+
+    void revert_potentially_cleaned_up_memory(int64_t delta) {
+        _region_group.update(delta);
+        _dirty_bytes_released_pre_accounted -= delta;
+    }
+
+    void account_potentially_cleaned_up_memory(int64_t delta) {
+        _region_group.update(-delta);
+        _dirty_bytes_released_pre_accounted += delta;
+    }
+
+    size_t real_dirty_memory() const {
+        return _region_group.memory_used() + _dirty_bytes_released_pre_accounted;
     }
 
     template <typename Func>
