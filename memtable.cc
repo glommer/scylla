@@ -20,6 +20,7 @@
  */
 
 #include "memtable.hh"
+#include "database.hh"
 #include "frozen_mutation.hh"
 #include "sstable_mutation_readers.hh"
 
@@ -240,11 +241,71 @@ public:
     }
 };
 
+class flush_memory_accounter {
+    uint64_t _bytes_read = 0;
+    logalloc::region& _region;
+
+    template <typename Func>
+    void update_bytes_read(Func&& f) {
+        // that's so we can catch f by reference.
+        static_assert(!is_future<std::result_of_t<Func()>>::value, "future-returning functions are not permitted.");
+        auto delta = with_allocator(_region.allocator(), [&f] () -> uint64_t {
+            return f();
+        });
+        _bytes_read += delta;
+        dirty_memory_manager::from_region_group(_region.group()).account_potentially_cleaned_up_memory(delta);
+    }
+public:
+    explicit flush_memory_accounter(logalloc::region& region)
+        : _region(region)
+	{}
+
+    ~flush_memory_accounter() {
+        assert(_bytes_read <= _region.occupancy().used_space());
+        dirty_memory_manager::from_region_group(_region.group()).revert_potentially_cleaned_up_memory(_bytes_read);
+    }
+
+
+    void account_component(const range_tombstone& rt) {
+        update_bytes_read([&rt] {
+            return rt.memory_usage();
+        });
+    }
+
+    void account_component(const row& sr) {
+        update_bytes_read([&sr] {
+            return sr.memory_usage();
+        });
+    }
+
+    void account_component(const rows_entry& e) {
+        update_bytes_read([&e] {
+            return current_allocator().object_memory_size_in_allocator(&const_cast<rows_entry&>(e)) +
+                   e.key().memory_usage() +
+                   e.row().cells().memory_usage();
+        });
+    }
+
+    void account_component(memtable_entry& e) {
+        update_bytes_read([this, &e] {
+            return current_allocator().object_memory_size_in_allocator(&e) +
+                   current_allocator().object_memory_size_in_allocator(&*(partition_snapshot(e.schema(), &(e.partition())).version())) +
+                   e.key().key().memory_usage();
+        });
+    }
+};
+
 class flush_reader final : public iterator_reader {
+    flush_memory_accounter _flushed_memory;
 public:
     flush_reader(schema_ptr s, lw_shared_ptr<memtable> m)
         : iterator_reader(std::move(s), std::move(m), query::full_partition_range)
+        , _flushed_memory(region())
     {}
+    flush_reader(const flush_reader&) = delete;
+    flush_reader(flush_reader&&) = delete;
+    flush_reader& operator=(flush_reader&&) = delete;
+    flush_reader& operator=(const flush_reader&) = delete;
 
     virtual future<streamed_mutation_opt> operator()() override {
         logalloc::reclaim_lock _(region());
@@ -253,7 +314,11 @@ public:
         if (!e) {
             return make_ready_future<streamed_mutation_opt>(stdx::nullopt);
         } else {
-            return make_ready_future<streamed_mutation_opt>((*e).read(mtbl(), schema(), query::full_slice));
+            auto cr = query::clustering_key_filter_ranges::get_ranges(*schema(), query::full_slice, e->key().key());
+            auto snp = e->partition().read(schema());
+            auto mpsr = make_partition_snapshot_reader(schema(), e->key(), std::move(cr), snp, region(), read_section(), mtbl(), _flushed_memory);
+            _flushed_memory.account_component(*e);
+            return make_ready_future<streamed_mutation_opt>(std::move(mpsr));
         }
     }
 };
