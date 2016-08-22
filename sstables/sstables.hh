@@ -334,6 +334,10 @@ public:
     // Returns the total bytes of all components.
     uint64_t bytes_on_disk();
 
+    uint64_t lower_bound_on_memory_written() const {
+        return _memory_written_lower_bound;
+    }
+
     partition_key get_first_partition_key(const schema& s) const;
     partition_key get_last_partition_key(const schema& s) const;
 
@@ -411,6 +415,7 @@ private:
     uint64_t _index_file_size;
     uint64_t _filter_file_size = 0;
     uint64_t _bytes_on_disk = 0;
+    uint64_t _memory_written_lower_bound = 0;
 
     // _pi_write is used temporarily for building the promoted
     // index (column sample) of one partition when writing a new sstable.

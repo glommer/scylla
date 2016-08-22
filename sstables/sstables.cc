@@ -1598,6 +1598,7 @@ void components_writer::consume_new_partition(const dht::decorated_key& dk) {
     write(_out, p_key);
 
     _tombstone_written = false;
+    _sst._memory_written_lower_bound += dk.key().memory_usage() + memtable_entry::memory_footprint();
 }
 
 void components_writer::consume(tombstone t) {
@@ -1625,12 +1626,14 @@ void components_writer::consume(tombstone t) {
 stop_iteration components_writer::consume(static_row&& sr) {
     ensure_tombstone_is_written();
     _sst.write_static_row(_out, _schema, sr.cells());
+    _sst._memory_written_lower_bound += sr.memory_usage() + rows_entry::memory_footprint();
     return stop_iteration::no;
 }
 
 stop_iteration components_writer::consume(clustering_row&& cr) {
     ensure_tombstone_is_written();
     _sst.write_clustered_row(_out, _schema, cr);
+    _sst._memory_written_lower_bound += cr.memory_usage() + rows_entry::memory_footprint();
     return stop_iteration::no;
 }
 
@@ -1645,6 +1648,7 @@ stop_iteration components_writer::consume(range_tombstone&& rt) {
     auto end = composite::from_clustering_element(_schema, std::move(rt.end));
     _sst.maybe_flush_pi_block(_out, start, {});
     _sst.write_range_tombstone(_out, std::move(start), rt.start_kind, std::move(end), rt.end_kind, {}, rt.tomb);
+    _sst._memory_written_lower_bound += rt.memory_usage();
     return stop_iteration::no;
 }
 
