@@ -272,6 +272,10 @@ public:
     // progress (i.e., returned a future which hasn't completed yet).
     mutation_reader read_rows(schema_ptr schema, const io_priority_class& pc = default_priority_class());
 
+    void on_partition_end(std::function<void (const sstable&)> fn) {
+        _on_partition_end = std::move(fn);
+    }
+
     // Write sstable components from a memtable.
     future<> write_components(memtable& mt, bool backup = false,
                               const io_priority_class& pc = default_priority_class(), bool leave_unsealed = false);
@@ -416,6 +420,7 @@ private:
     uint64_t _filter_file_size = 0;
     uint64_t _bytes_on_disk = 0;
     uint64_t _memory_written_lower_bound = 0;
+    std::function<void (const sstable&)> _on_partition_end;
 
     // _pi_write is used temporarily for building the promoted
     // index (column sample) of one partition when writing a new sstable.

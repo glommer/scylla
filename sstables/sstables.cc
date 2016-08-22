@@ -1684,6 +1684,10 @@ stop_iteration components_writer::consume_end_of_partition() {
     }
     _last_key = std::move(*_partition_key);
 
+    if (_sst._on_partition_end) {
+        _sst._on_partition_end(_sst);
+    }
+
     return get_offset() < _max_sstable_size ? stop_iteration::no : stop_iteration::yes;
 }
 
