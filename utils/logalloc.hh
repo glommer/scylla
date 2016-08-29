@@ -582,6 +582,8 @@ public:
 
     allocation_strategy& allocator();
 
+    region_group* group();
+
     // Merges another region into this region. The other region is left empty.
     // Doesn't invalidate references to allocated objects.
     void merge(region& other);
