@@ -1293,6 +1293,10 @@ public:
         return total;
     }
 
+    region_group* group() {
+        return _group;
+    }
+
     occupancy_stats compactible_occupancy() const {
         return _closed_occupancy;
     }
@@ -1618,6 +1622,10 @@ region::~region() {
 
 occupancy_stats region::occupancy() const {
     return _impl->occupancy();
+}
+
+region_group* region::group() {
+    return _impl->group();
 }
 
 void region::merge(region& other) {
