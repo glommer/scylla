@@ -269,6 +269,8 @@ public:
             return merge_mutations(std::move(_mutations));
         });
     }
+
+    single_key_sstable_reader(single_key_sstable_reader&&) = delete; // reader takes reference to member fields
 };
 
 mutation_reader
