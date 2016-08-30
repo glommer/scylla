@@ -272,9 +272,10 @@ private:
 public:
     ~row_cache();
     row_cache(schema_ptr, mutation_source underlying, key_source, cache_tracker&, uint64_t _max_cached_partition_size_in_bytes = 10 * 1024 * 1024);
-    row_cache(row_cache&&) = default;
+    // delete all move constructors so we can safely keep references to external objects
+    row_cache(row_cache&&) = delete;
     row_cache(const row_cache&) = delete;
-    row_cache& operator=(row_cache&&) = default;
+    row_cache& operator=(row_cache&&) = delete;
 public:
     // Implements mutation_source for this cache, see mutation_reader.hh
     // User needs to ensure that the row_cache object stays alive
