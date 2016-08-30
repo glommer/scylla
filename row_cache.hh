@@ -34,6 +34,7 @@
 #include "utils/phased_barrier.hh"
 #include "utils/histogram.hh"
 #include "partition_version.hh"
+#include "sstables/estimated_histogram.hh"
 
 namespace scollectd {
 
@@ -210,6 +211,7 @@ public:
 
 // Returns a reference to shard-wide cache_tracker.
 cache_tracker& global_cache_tracker();
+extern thread_local sstables::estimated_histogram default_histogram;
 
 //
 // A data source which wraps another data source such that data obtained from the underlying data source
@@ -242,6 +244,7 @@ private:
     partitions_type _partitions; // Cached partitions are complete.
     mutation_source _underlying;
     key_source _underlying_keys;
+    sstables::estimated_histogram& _underlying_hit_histogram;
     uint64_t _max_cached_partition_size_in_bytes;
 
     // Synchronizes populating reads with updates of underlying data source to ensure that cache
@@ -271,7 +274,10 @@ private:
     static thread_local seastar::thread_scheduling_group _update_thread_scheduling_group;
 public:
     ~row_cache();
-    row_cache(schema_ptr, mutation_source underlying, key_source, cache_tracker&, uint64_t _max_cached_partition_size_in_bytes = 10 * 1024 * 1024);
+    row_cache(schema_ptr, mutation_source underlying, key_source, sstables::estimated_histogram&, cache_tracker&, uint64_t _max_cached_partition_size_in_bytes = 10 * 1024 * 1024);
+    row_cache(schema_ptr s, mutation_source underlying, key_source underlying_ks, cache_tracker& tracker, uint64_t _max_cached_partition_size_in_bytes = 10 * 1024 * 1024)
+        : row_cache(std::move(s), std::move(underlying), std::move(underlying_ks), default_histogram, tracker, _max_cached_partition_size_in_bytes) {}
+
     // delete all move constructors so we can safely keep references to external objects
     row_cache(row_cache&&) = delete;
     row_cache(const row_cache&) = delete;
