@@ -232,6 +232,7 @@ class single_key_sstable_reader final : public mutation_reader::impl {
     std::vector<streamed_mutation> _mutations;
     bool _done = false;
     lw_shared_ptr<sstables::sstable_set> _sstables;
+    sstables::estimated_histogram& _sstable_histogram;
     // Use a pointer instead of copying, so we don't need to regenerate the reader if
     // the priority changes.
     const io_priority_class& _pc;
@@ -239,6 +240,7 @@ class single_key_sstable_reader final : public mutation_reader::impl {
 public:
     single_key_sstable_reader(schema_ptr schema,
                               lw_shared_ptr<sstables::sstable_set> sstables,
+                              sstables::estimated_histogram& sstable_histogram,
                               const partition_key& key,
                               query::clustering_key_filtering_context ck_filtering,
                               const io_priority_class& pc)
@@ -246,6 +248,7 @@ public:
         , _rp(dht::global_partitioner().decorate_key(*_schema, key))
         , _key(sstables::key::from_partition_key(*_schema, key))
         , _sstables(std::move(sstables))
+        , _sstable_histogram(sstable_histogram)
         , _pc(pc)
         , _ck_filtering(ck_filtering)
     { }
@@ -254,19 +257,23 @@ public:
         if (_done) {
             return make_ready_future<streamed_mutation_opt>();
         }
-        return parallel_for_each(_sstables->select(query::partition_range(_rp)),
-            [this](const lw_shared_ptr<sstables::sstable>& sstable) {
-                return sstable->read_row(_schema, _key, _ck_filtering, _pc).then([this](auto smo) {
-                    if (smo) {
-                        _mutations.emplace_back(std::move(*smo));
-                    }
-                });
-        }).then([this] () -> streamed_mutation_opt {
-            _done = true;
-            if (_mutations.empty()) {
-                return { };
-            }
-            return merge_mutations(std::move(_mutations));
+        return do_with(unsigned(0), [this] (unsigned& sstables_touched) {
+            return parallel_for_each(_sstables->select(query::partition_range(_rp)),
+                [this, &sstables_touched](const lw_shared_ptr<sstables::sstable>& sstable) {
+                    return sstable->read_row(_schema, _key, _ck_filtering, _pc).then([this, &sstables_touched](auto smo) {
+                        if (smo) {
+                            sstables_touched++;
+                            _mutations.emplace_back(std::move(*smo));
+                        }
+                    });
+            }).then([this, &sstables_touched] () -> streamed_mutation_opt {
+                _sstable_histogram.add(sstables_touched);
+                _done = true;
+                if (_mutations.empty()) {
+                    return { };
+                }
+                return merge_mutations(std::move(_mutations));
+            });
         });
     }
 
@@ -292,7 +299,7 @@ column_family::make_sstable_reader(schema_ptr s,
         if (dht::shard_of(pos.token()) != engine().cpu_id()) {
             return make_empty_reader(); // range doesn't belong to this shard
         }
-        return restrict_reader(make_mutation_reader<single_key_sstable_reader>(std::move(s), _sstables, *pos.key(), ck_filtering, pc));
+        return restrict_reader(make_mutation_reader<single_key_sstable_reader>(std::move(s), _sstables, _stats.estimated_sstable_per_read, *pos.key(), ck_filtering, pc));
     } else {
         // range_sstable_reader is not movable so we need to wrap it
         return restrict_reader(make_mutation_reader<range_sstable_reader>(std::move(s), _sstables, pr, ck_filtering, pc));
