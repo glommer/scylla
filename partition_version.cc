@@ -375,6 +375,8 @@ void partition_snapshot_reader::refresh_iterators()
             }
         }();
 
+        account_component(*cr);
+
         if (cr != cr_end) {
             _clustering_rows.emplace_back(rows_position { cr, cr_end });
         }
@@ -418,12 +420,17 @@ mutation_fragment_opt partition_snapshot_reader::read_next()
     return _range_tombstones.get_next();
 }
 
+void partition_snapshot_reader::emplace_fragment(mutation_fragment&& mfopt) {
+    account_component(mfopt);
+    _buffer.emplace_back(std::move(mfopt));
+}
+
 void partition_snapshot_reader::do_fill_buffer()
 {
     if (!_last_entry) {
         auto mfopt = read_static_row();
         if (mfopt) {
-            _buffer.emplace_back(std::move(*mfopt));
+            emplace_fragment(std::move(*mfopt));
         }
     }
 
@@ -443,7 +450,7 @@ void partition_snapshot_reader::do_fill_buffer()
 
         auto mfopt = read_next();
         if (mfopt) {
-            _buffer.emplace_back(std::move(*mfopt));
+            emplace_fragment(std::move(*mfopt));
         } else {
             _end_of_stream = true;
         }

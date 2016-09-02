@@ -318,12 +318,16 @@ private:
     mutation_fragment_opt read_next();
     void do_fill_buffer();
     static tombstone tomb(partition_snapshot& snp);
+    void emplace_fragment(mutation_fragment&& mfopt);
+protected:
+    virtual void account_component(mutation_fragment& mf) {}
+    virtual void account_component(const rows_entry& e) {}
 public:
     partition_snapshot_reader(schema_ptr s, dht::decorated_key dk, lw_shared_ptr<partition_snapshot> snp,
         query::clustering_key_filter_ranges crr,
         logalloc::region& region, logalloc::allocating_section& read_section,
         boost::any pointer_to_container);
-    ~partition_snapshot_reader();
+    virtual ~partition_snapshot_reader();
     virtual future<> fill_buffer() override;
 };
 
