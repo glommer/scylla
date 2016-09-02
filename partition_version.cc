@@ -311,7 +311,6 @@ partition_snapshot_reader::partition_snapshot_reader(schema_ptr s, dht::decorate
     for (auto&& v : _snapshot->versions()) {
         _range_tombstones.apply(v.partition().row_tombstones());
     }
-    do_fill_buffer();
 }
 
 partition_snapshot_reader::~partition_snapshot_reader()
