@@ -271,6 +271,14 @@ inline partition_version_ref& partition_snapshot::version()
     }
 }
 
+struct partition_snapshot_reader_dummy_accounter {
+   void account_component(const rows_entry& e) {}
+   void account_component(const range_tombstone& e) {}
+   void account_component(const row& e) {}
+};
+extern partition_snapshot_reader_dummy_accounter no_accounter;
+
+template <typename MemoryAccounter = partition_snapshot_reader_dummy_accounter>
 class partition_snapshot_reader : public streamed_mutation::impl {
     struct rows_position {
         mutation_partition::rows_type::const_iterator _position;
@@ -307,6 +315,7 @@ private:
 
     logalloc::region& _lsa_region;
     logalloc::allocating_section& _read_section;
+    MemoryAccounter& _mem_accounter;
 
     uint64_t _reclaim_counter;
     unsigned _version_count = 0;
@@ -329,6 +338,7 @@ private:
             }();
 
             if (cr != cr_end) {
+                _mem_accounter.account_component(*cr);
                 _clustering_rows.emplace_back(rows_position { cr, cr_end });
             }
         }
@@ -352,6 +362,7 @@ private:
         mutation_fragment_opt sr;
         for (auto&& v : _snapshot->versions()) {
             if (!v.partition().static_row().empty()) {
+                _mem_accounter.account_component(v.partition().static_row());
                 if (!sr) {
                     sr = mutation_fragment(static_row(v.partition().static_row()));
                 } else {
@@ -366,6 +377,7 @@ private:
         if (!_clustering_rows.empty()) {
             auto rt = _range_tombstones.peek_next(*_clustering_rows.front()._position);
             if (rt) {
+                _mem_accounter.account_component(*rt);
                 return _range_tombstones.get_next(rt);
             }
 
@@ -382,6 +394,9 @@ private:
             return mutation_fragment(std::move(result));
         }
         auto rt = _range_tombstones.peek_next();
+        if (rt) {
+            _mem_accounter.account_component(*rt);
+        }
         return _range_tombstones.get_next(rt);
     }
 
@@ -427,7 +442,7 @@ public:
     partition_snapshot_reader(schema_ptr s, dht::decorated_key dk, lw_shared_ptr<partition_snapshot> snp,
         query::clustering_key_filter_ranges crr,
         logalloc::region& region, logalloc::allocating_section& read_section,
-        boost::any pointer_to_container)
+        boost::any pointer_to_container, MemoryAccounter& acct)
     : streamed_mutation::impl(s, std::move(dk), tomb(*snp))
     , _container_guard(std::move(pointer_to_container))
     , _ck_ranges(std::move(crr))
@@ -438,7 +453,8 @@ public:
     , _snapshot(snp)
     , _range_tombstones(*s)
     , _lsa_region(region)
-    , _read_section(read_section) {
+    , _read_section(read_section)
+    , _mem_accounter(acct) {
         for (auto&& v : _snapshot->versions()) {
             _range_tombstones.apply(v.partition().row_tombstones());
         }
@@ -473,12 +489,23 @@ public:
     }
 };
 
+template <typename MemoryAccounter>
+inline streamed_mutation
+make_partition_snapshot_reader(schema_ptr s, dht::decorated_key dk,
+    query::clustering_key_filter_ranges crr,
+    lw_shared_ptr<partition_snapshot> snp, logalloc::region& region,
+    logalloc::allocating_section& read_section, boost::any pointer_to_container, MemoryAccounter& acct)
+{
+    return make_streamed_mutation<partition_snapshot_reader<MemoryAccounter>>(s, std::move(dk),
+           snp, std::move(crr), region, read_section, std::move(pointer_to_container), acct);
+}
+
 inline streamed_mutation
 make_partition_snapshot_reader(schema_ptr s, dht::decorated_key dk,
     query::clustering_key_filter_ranges crr,
     lw_shared_ptr<partition_snapshot> snp, logalloc::region& region,
     logalloc::allocating_section& read_section, boost::any pointer_to_container)
 {
-    return make_streamed_mutation<partition_snapshot_reader>(s, std::move(dk),
+    return make_streamed_mutation<partition_snapshot_reader<>>(s, std::move(dk),
            snp, std::move(crr), region, read_section, std::move(pointer_to_container), no_accounter);
 }

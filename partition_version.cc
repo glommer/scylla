@@ -291,3 +291,5 @@ lw_shared_ptr<partition_snapshot> partition_entry::read(schema_ptr entry_schema)
         return snp;
     }
 }
+
+partition_snapshot_reader_dummy_accounter no_accounter;
