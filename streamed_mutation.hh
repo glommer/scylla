@@ -550,12 +550,20 @@ class range_tombstone_stream {
     range_tombstone_list _list;
     bool _inside_range_tombstone = false;
 private:
-    mutation_fragment_opt do_get_next();
+    mutation_fragment_opt do_get_next(range_tombstone& rt);
 public:
     range_tombstone_stream(const schema& s) : _schema(s), _cmp(s), _list(s) { }
+
+    range_tombstone* peek_next(const rows_entry&);
+    range_tombstone* peek_next(const mutation_fragment&);
+    range_tombstone* peek_next();
+
     mutation_fragment_opt get_next(const rows_entry&);
     mutation_fragment_opt get_next(const mutation_fragment&);
     mutation_fragment_opt get_next();
+    mutation_fragment_opt get_next(range_tombstone* rt) {
+        return rt ? do_get_next(*rt) : mutation_fragment_opt();
+    }
 
     void apply(range_tombstone&& rt) {
         _list.apply(_schema, std::move(rt));

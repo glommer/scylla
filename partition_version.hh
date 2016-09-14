@@ -364,9 +364,9 @@ private:
 
     mutation_fragment_opt read_next() {
         if (!_clustering_rows.empty()) {
-            auto mf = _range_tombstones.get_next(*_clustering_rows.front()._position);
-            if (mf) {
-                return mf;
+            auto rt = _range_tombstones.peek_next(*_clustering_rows.front()._position);
+            if (rt) {
+                return _range_tombstones.get_next(rt);
             }
 
             boost::range::pop_heap(_clustering_rows, heap_compare(_cmp));
@@ -381,7 +381,8 @@ private:
             _last_entry = result.position();
             return mutation_fragment(std::move(result));
         }
-        return _range_tombstones.get_next();
+        auto rt = _range_tombstones.peek_next();
+        return _range_tombstones.get_next(rt);
     }
 
     void do_fill_buffer() {

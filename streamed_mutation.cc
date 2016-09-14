@@ -348,37 +348,54 @@ streamed_mutation merge_mutations(std::vector<streamed_mutation> ms)
     return make_streamed_mutation<mutation_merger>(ms.back().schema(), ms.back().decorated_key(), std::move(ms));
 }
 
-mutation_fragment_opt range_tombstone_stream::do_get_next()
+range_tombstone* range_tombstone_stream::peek_next() {
+    if (!_list.empty()) {
+        return &*_list.tombstones().begin();
+    }
+    return nullptr;
+}
+
+range_tombstone* range_tombstone_stream::peek_next(const rows_entry& re) {
+    if (_list.empty() || _cmp(re, _list.begin()->start_bound())) {
+        return nullptr;
+    } else {
+        return &*_list.tombstones().begin();
+    }
+}
+
+range_tombstone* range_tombstone_stream::peek_next(const mutation_fragment& mf) {
+    if (_list.empty() || _cmp(mf, *_list.begin())) {
+        return nullptr;
+    } else {
+        return &*_list.tombstones().begin();
+    }
+}
+
+mutation_fragment_opt range_tombstone_stream::do_get_next(range_tombstone& rt)
 {
-    auto& rt = *_list.tombstones().begin();
+    auto it = _list.tombstones().iterator_to(rt);
+    _list.tombstones().erase(it);
     auto mf = mutation_fragment(std::move(rt));
-    _list.tombstones().erase(_list.begin());
     current_deleter<range_tombstone>()(&rt);
     return mf;
 }
 
 mutation_fragment_opt range_tombstone_stream::get_next(const rows_entry& re)
 {
-    if (!_list.empty()) {
-        return !_cmp(re, _list.begin()->start_bound()) ? do_get_next() : mutation_fragment_opt();
-    }
-    return { };
+    auto rt = peek_next(re);
+    return rt ? do_get_next(*rt) : mutation_fragment_opt();
 }
 
 mutation_fragment_opt range_tombstone_stream::get_next(const mutation_fragment& mf)
 {
-    if (!_list.empty()) {
-        return !_cmp(mf, *_list.begin()) ? do_get_next() : mutation_fragment_opt();
-    }
-    return { };
+    auto rt = peek_next(mf);
+    return rt ? do_get_next(*rt) : mutation_fragment_opt();
 }
 
 mutation_fragment_opt range_tombstone_stream::get_next()
 {
-    if (!_list.empty()) {
-        return do_get_next();
-    }
-    return { };
+    auto rt = peek_next();
+    return rt ? do_get_next(*rt) : mutation_fragment_opt();
 }
 
 streamed_mutation reverse_streamed_mutation(streamed_mutation sm) {
