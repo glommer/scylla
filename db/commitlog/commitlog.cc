@@ -484,19 +484,6 @@ public:
         _known_schema_versions.clear();
     }
 
-    bool must_sync() {
-        if (_segment_manager->cfg.mode == sync_mode::BATCH) {
-            return false;
-        }
-        auto now = clock_type::now();
-        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                now - _sync_time).count();
-        if ((_segment_manager->cfg.commitlog_sync_period_in_ms * 2) < uint64_t(ms)) {
-            logger.debug("{} needs sync. {} ms elapsed", *this, ms);
-            return true;
-        }
-        return false;
-    }
     /**
      * Finalize this segment and get a new one
      */
@@ -818,9 +805,7 @@ public:
 
         std::experimental::optional<future<sseg_ptr>> op;
 
-        if (must_sync()) {
-            op = sync();
-        } else if (must_wait_for_alloc()) {
+        if (must_wait_for_alloc()) {
             op = wait_for_alloc();
         } else if (!is_still_allocating() || position() + s > _segment_manager->max_size) { // would we make the file too big?
             // do this in next segment instead.
