@@ -2100,6 +2100,7 @@ void region_group::release_requests() noexcept {
             if (!blocked_at) {
                 auto req = std::move(_blocked_requests.front());
                 _blocked_requests.pop_front();
+                _blocked_for_max = std::max(_blocked_for_max, req->queued_for().count());
                 req->allocate();
                 release_requests();
             } else {

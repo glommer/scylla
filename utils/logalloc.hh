@@ -331,14 +331,13 @@ public:
         return _blocked_requests.size();
     }
 
-    float blocked_for() {
-        if (_blocked_requests.empty()) {
-            return 0.0;
-        }
-
-        return _blocked_requests.front()->queued_for().count();
+    double blocked_for() {
+        auto ret = _blocked_for_max;
+        _blocked_for_max = 0;
+        return ret;
     }
 private:
+    double _blocked_for_max = 0;
     // Make sure we get a notification and can call release_requests when one of our ancestors that
     // used to block us is no longer under memory pressure.
     void subscribe_for_ancestor_available_memory_notification(region_group *ancestor) {
