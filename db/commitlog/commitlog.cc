@@ -810,9 +810,7 @@ public:
         } else if (!is_still_allocating() || position() + s > _segment_manager->max_size) { // would we make the file too big?
             // do this in next segment instead.
             op = finish_and_get_new();
-        } else if (_buffer.empty()) {
-            new_buffer(s);
-        } else if (s > (_buffer.size() - _buf_pos)) { // enough data?
+        } else if (!_buffer.empty() && (s > (_buffer.size() - _buf_pos))) { // enough data?
             _needed_size += s; // hint to next new_buffer, in case we are not first.
             if (_segment_manager->cfg.mode == sync_mode::BATCH) {
                 // TODO: this could cause starvation if we're really unlucky.
@@ -832,6 +830,10 @@ public:
         }
 
         _gate.enter(); // this might throw. I guess we accept this?
+
+        if (_buffer.empty()) {
+            new_buffer(s);
+        }
 
         replay_position rp(_desc.id, position());
         auto pos = _buf_pos;
