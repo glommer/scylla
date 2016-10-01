@@ -686,35 +686,34 @@ public:
         // The write will be allowed to start now, but flush (below) must wait for not only this,
         // but all previous write/flush pairs.
         return _pending_ops.run_with_ordered_post_op(rp, [this, size, off, buf = std::move(buf)]() mutable {
-            auto written = make_lw_shared<size_t>(0);
-            auto p = buf.get();
-            return repeat([this, size, off, written, p]() mutable {
-                auto&& priority_class = service::get_local_commitlog_priority();
-                return _file.dma_write(off + *written, p + *written, size - *written, priority_class).then_wrapped([this, size, written](future<size_t>&& f) {
-                    try {
-                        auto bytes = std::get<0>(f.get());
-                        *written += bytes;
-                        _segment_manager->totals.bytes_written += bytes;
-                        _segment_manager->totals.total_size_on_disk += bytes;
-                        ++_segment_manager->totals.cycle_count;
-                        if (*written == size) {
-                            return make_ready_future<stop_iteration>(stop_iteration::yes);
-                        }
-                        // gah, partial write. should always get here with dma chunk sized
-                        // "bytes", but lets make sure...
-                        logger.debug("Partial write {}: {}/{} bytes", *this, *written, size);
-                        *written = align_down(*written, alignment);
-                        return make_ready_future<stop_iteration>(stop_iteration::no);
-                        // TODO: retry/ignore/fail/stop - optional behaviour in origin.
-                        // we fast-fail the whole commit.
-                    } catch (...) {
-                        logger.error("Failed to persist commits to disk for {}: {}", *this, std::current_exception());
-                        throw;
+            return do_with(seastar::gate(), [this, size, off, buf = std::move(buf)] (auto& gate) mutable {
+                auto p = buf.get();
+                size_t written = 0;
+                ++_segment_manager->totals.pending_writes;
+                while (written < size) {
+                    auto eff_size = std::min(size - written, db::commitlog::segment::default_size);
+                    auto rem = size - eff_size - written;
+                    if (rem < (8 << 10)) {
+                        eff_size += rem;
                     }
+                    with_gate(gate, [this, eff_size, written, off, p] {
+                        auto&& priority_class = service::get_local_commitlog_priority();
+                        return _file.dma_write(off + written, p + written,  eff_size, priority_class).then([this, eff_size](size_t bytes) {
+                            _segment_manager->region_group.update(-bytes);
+                            _segment_manager->totals.bytes_written += bytes;
+                            _segment_manager->totals.total_size_on_disk += bytes;
+                        }).handle_exception([this] (auto ep) {
+                            logger.error("Failed to persist commits to disk for {}: {}", *this, ep);
+                            return make_exception_future<>(std::move(ep));
+                        });
+                    });
+                    written += eff_size;
+                }
+                return gate.close().finally([this, buf = std::move(buf), size]() mutable {
+                    ++_segment_manager->totals.cycle_count;
+                    --_segment_manager->totals.pending_writes;
+                    _segment_manager->release_buffer(std::move(buf));
                 });
-            }).finally([this, buf = std::move(buf), size]() mutable {
-                _segment_manager->release_buffer(std::move(buf));
-                _segment_manager->region_group.update(-size);
             });
         }, [me, flush_after, top, rp] { // lambda instead of bind, so we keep "me" alive.
             assert(me->_pending_ops.has_operation(rp));
