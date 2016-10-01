@@ -431,6 +431,45 @@ class db::commitlog::segment: public enable_lw_shared_from_this<segment> {
         _segment_manager->end_write();
     }
 
+    // non-deferring part of allocate. Nothing here is supposed to defer.
+    replay_position do_allocate(const cf_id_type& id, shared_ptr<entry_writer> writer, size_t s, size_t size) {
+        _gate.enter(); // this might throw. I guess we accept this?
+
+        if (_buffer.empty()) {
+            new_buffer(s);
+        }
+
+        replay_position rp(_desc.id, position());
+        auto pos = _buf_pos;
+        _buf_pos += s;
+        _cf_dirty[id] = rp.pos;
+
+        auto * p = _buffer.get_write() + pos;
+        auto * e = _buffer.get_write() + pos + s - sizeof(uint32_t);
+
+        data_output out(p, e);
+        crc32_nbo crc;
+
+        out.write(uint32_t(s));
+        crc.process(uint32_t(s));
+        out.write(crc.checksum());
+
+        // actual data
+        writer->write(*this, out);
+
+        crc.process_bytes(p + 2 * sizeof(uint32_t), size);
+
+        out = data_output(e, sizeof(uint32_t));
+        out.write(crc.checksum());
+
+        ++_segment_manager->totals.allocation_count;
+        ++_num_allocs;
+
+        _gate.leave();
+        return rp;
+    }
+
+
 public:
     struct cf_mark {
         const segment& s;
@@ -829,39 +868,7 @@ public:
             });
         }
 
-        _gate.enter(); // this might throw. I guess we accept this?
-
-        if (_buffer.empty()) {
-            new_buffer(s);
-        }
-
-        replay_position rp(_desc.id, position());
-        auto pos = _buf_pos;
-        _buf_pos += s;
-        _cf_dirty[id] = rp.pos;
-
-        auto * p = _buffer.get_write() + pos;
-        auto * e = _buffer.get_write() + pos + s - sizeof(uint32_t);
-
-        data_output out(p, e);
-        crc32_nbo crc;
-
-        out.write(uint32_t(s));
-        crc.process(uint32_t(s));
-        out.write(crc.checksum());
-
-        // actual data
-        writer->write(*this, out);
-
-        crc.process_bytes(p + 2 * sizeof(uint32_t), size);
-
-        out = data_output(e, sizeof(uint32_t));
-        out.write(crc.checksum());
-
-        ++_segment_manager->totals.allocation_count;
-        ++_num_allocs;
-
-        _gate.leave();
+        auto rp = do_allocate(id, std::move(writer), s, size);
 
         if (_segment_manager->cfg.mode == sync_mode::BATCH) {
             return batch_cycle().then([rp](auto s) {
