@@ -55,6 +55,8 @@ try_to_read(uint64_t max_cached_partition_size_in_bytes, streamed_mutation_opt&&
         });
 }
 
+#include <sys/sdt.h>
+
 cache_tracker& global_cache_tracker() {
     static thread_local cache_tracker instance;
     return instance;
@@ -72,6 +74,7 @@ cache_tracker::cache_tracker() {
             if (_lru.empty()) {
                 return memory::reclaiming_result::reclaimed_nothing;
             }
+	    STAP_PROBE(scylla, cache_evict_start);
             cache_entry& ce = _lru.back();
             auto it = row_cache::partitions_type::s_iterator_to(ce);
             --it;
@@ -80,6 +83,7 @@ cache_tracker::cache_tracker() {
             --_partitions;
             ++_evictions;
             ++_modification_count;
+	    STAP_PROBE(scylla, cache_evict_end);
             return memory::reclaiming_result::reclaimed_something;
            } catch (std::bad_alloc&) {
             // Bad luck, linearization during partition removal caused us to
@@ -908,11 +912,13 @@ future<> row_cache::update(memtable& m, partition_presence_checker presence_chec
                 unsigned quota = 30;
                 auto cmp = cache_entry::compare(_schema);
                 {
+		    STAP_PROBE(scylla, cache_update_start);
                     _update_section(_tracker.region(), [&] {
                         auto i = m.partitions.begin();
                         while (i != m.partitions.end() && quota) {
                           with_linearized_managed_bytes([&] {
                            {
+		            STAP_PROBE(scylla, cache_update_entry_start);
                             memtable_entry& mem_e = *i;
                             // FIXME: Optimize knowing we lookup in-order.
                             auto cache_i = _partitions.lower_bound(mem_e.key(), cmp);
@@ -940,10 +946,12 @@ future<> row_cache::update(memtable& m, partition_presence_checker presence_chec
                             i = m.partitions.erase(i);
                             current_allocator().destroy(&mem_e);
                             --quota;
+		            STAP_PROBE(scylla, cache_update_entry_end);
                            }
                           });
                         }
                     });
+		    STAP_PROBE(scylla, cache_update_end);
                     if (quota == 0 && seastar::thread::should_yield()) {
                         return;
                     }
