@@ -225,6 +225,9 @@ public:
     }
 };
 
+#include <sys/sdt.h>
+static thread_local uint64_t sstable_read_id = 0;
+
 class single_key_sstable_reader final : public mutation_reader::impl {
     schema_ptr _schema;
     dht::ring_position _rp;
@@ -254,6 +257,8 @@ public:
         if (_done) {
             return make_ready_future<streamed_mutation_opt>();
         }
+	auto sst_id = sstable_read_id++;
+	STAP_PROBE1(scylla, sstable_read_start, sst_id);
         return parallel_for_each(_sstables->select(query::partition_range(_rp)),
             [this](const lw_shared_ptr<sstables::sstable>& sstable) {
                 return sstable->read_row(_schema, _key, _ck_filtering, _pc).then([this](auto smo) {
@@ -261,8 +266,9 @@ public:
                         _mutations.emplace_back(std::move(*smo));
                     }
                 });
-        }).then([this] () -> streamed_mutation_opt {
+        }).then([this, sst_id] () -> streamed_mutation_opt {
             _done = true;
+            STAP_PROBE2(scylla, sstable_read_end, sst_id, _mutations.size());
             if (_mutations.empty()) {
                 return { };
             }
