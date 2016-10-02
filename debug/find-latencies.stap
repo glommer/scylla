@@ -1,0 +1,111 @@
+#!/usr/bin/stap
+#
+@define store_lat(start, idx, where) %(
+    # ignore clearly negative latencies. Not sure why they are happening
+    if ((gettimeofday_us() - @start[@idx]) < (3600 * 1000 * 1000)) {
+        @where <<< gettimeofday_us() - @start[@idx];
+    }
+    delete @start[@idx]
+%)
+
+
+# reactor tasks
+global rt_start_time
+global reactor_task 
+probe process(@1).mark("reactor_run_tasks_start") {
+    rt_start_time[tid()] = gettimeofday_us()
+}
+
+probe process(@1).mark("reactor_run_tasks_end") {
+    @store_lat(rt_start_time, tid(), reactor_task)
+}
+
+# thread tasks
+global thr_start_time
+global thread_run
+probe process(@1).mark("thread_run_start") {
+    thr_start_time[$arg1] = gettimeofday_us()
+}
+
+probe process(@1).mark("thread_run_end") {
+    @store_lat(thr_start_time, $arg1, thread_run)
+}
+
+# mutate
+global sp_mut_start_time
+global sp_mutate 
+probe process(@1).mark("storage_proxy_mutate_start") {
+    sp_mut_start_time[$arg1] = gettimeofday_us()
+}
+
+probe process(@1).mark("storage_proxy_mutate_end") {
+    @store_lat(sp_mut_start_time, $arg1, sp_mutate)
+}
+
+# query
+global sp_query_start_time
+global sp_query
+probe process(@1).mark("storage_proxy_query_start") {
+    sp_query_start_time[$arg1] = gettimeofday_us()
+}
+
+probe process(@1).mark("storage_proxy_query_end") {
+    @store_lat(sp_query_start_time, $arg1, sp_query)
+}
+
+# cache evict
+global cache_evict_start_time
+global cache_evict
+probe process(@1).mark("cache_evict_start") {
+    cache_evict_start_time[tid()] = gettimeofday_us()
+}
+
+probe process(@1).mark("cache_evict_end") {
+    @store_lat(cache_evict_start_time, tid(), cache_evict);
+}
+
+# cache update
+global cache_update_start_time
+global cache_update
+probe process(@1).mark("cache_update_start") {
+    cache_update_start_time[tid()] = gettimeofday_us()
+}
+
+probe process(@1).mark("cache_update_end") {
+    @store_lat(cache_update_start_time, tid(), cache_update);
+}
+
+# sstable read
+global sstable_read_start_time
+global sstable_read
+probe process(@1).mark("sstable_read_start") {
+    sstable_read_start_time[$arg1] = gettimeofday_us()
+}
+
+probe process(@1).mark("sstable_read_end") {
+    @store_lat(sstable_read_start_time, $arg1, sstable_read);
+}
+
+probe begin {
+    println("Probing some important latencies");
+}
+
+@define show_hist(msg, hist) %(
+    println(@msg)
+    if (@count(@hist)) {
+	print(@hist_log(@hist));
+    } else {
+        println("No events");
+    }
+%)
+
+probe end {
+    println();
+    @show_hist("Seastar reactor", reactor_task);
+    @show_hist("Seastar threads", thread_run);
+    @show_hist("mutate", sp_mutate);
+    @show_hist("query", sp_query);
+    @show_hist("cache_evict", cache_evict);
+    @show_hist("cache_update", cache_update);
+    @show_hist("sstable_read", sstable_read);
+}
