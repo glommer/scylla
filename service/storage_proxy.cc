@@ -2669,6 +2669,7 @@ storage_proxy::query_partition_key_range(lw_shared_ptr<query::read_command> cmd,
         return merger.get();
     });
 }
+static thread_local uint64_t query_id = 0;
 
 future<foreign_ptr<lw_shared_ptr<query::result>>>
 storage_proxy::query(schema_ptr s,
@@ -2692,7 +2693,9 @@ storage_proxy::query(schema_ptr s,
         });
     }
 
-    return do_query(s, cmd, std::move(partition_ranges), cl, std::move(trace_state));
+    auto this_query = query_id++;
+    STAP_PROBE1(scylla, storage_proxy_query_start, this_query);
+    return do_query(s, cmd, std::move(partition_ranges), cl, std::move(trace_state)).finally([this_query] { STAP_PROBE1(scylla, storage_proxy_query_end, this_query); });
 }
 
 future<foreign_ptr<lw_shared_ptr<query::result>>>
