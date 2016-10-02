@@ -1132,6 +1132,9 @@ future<> storage_proxy::mutate_end(future<> mutate_result, utils::latency_counte
     }
 }
 
+#include <sys/sdt.h>
+
+static thread_local uint64_t mutate_id = 0;
 /**
  * Use this method to have these Mutations applied
  * across all replicas. This method will take care
@@ -1143,7 +1146,9 @@ future<> storage_proxy::mutate_end(future<> mutate_result, utils::latency_counte
  * @param tr_state trace state handle
  */
 future<> storage_proxy::mutate(std::vector<mutation> mutations, db::consistency_level cl, tracing::trace_state_ptr tr_state) {
-    return mutate_internal(std::move(mutations), cl, std::move(tr_state));
+    auto this_mut = mutate_id++;
+    STAP_PROBE1(scylla, storage_proxy_mutate_start, this_mut);
+    return mutate_internal(std::move(mutations), cl, std::move(tr_state)).finally([this_mut] { STAP_PROBE1(scylla, storage_proxy_mutate_end, this_mut); });
 }
 
 /*
