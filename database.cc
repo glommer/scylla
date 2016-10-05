@@ -227,6 +227,7 @@ public:
 
 #include <sys/sdt.h>
 static thread_local uint64_t sstable_read_id = 0;
+static thread_local uint64_t sstable_read_one_id = 0;
 
 class single_key_sstable_reader final : public mutation_reader::impl {
     schema_ptr _schema;
@@ -264,7 +265,10 @@ public:
 	STAP_PROBE1(scylla, sstable_read_start, sst_id);
         return parallel_for_each(_sstables->select(query::partition_range(_rp)),
             [this](const lw_shared_ptr<sstables::sstable>& sstable) {
-                return sstable->read_row(_schema, _key, _ck_filtering, _pc).then([this](auto smo) {
+		auto sst_oid = sstable_read_one_id++;
+	        STAP_PROBE1(scylla, sstable_read_one_start, sst_oid);
+                return sstable->read_row(_schema, _key, _ck_filtering, _pc).then([this, sst_oid](auto smo) {
+	           STAP_PROBE2(scylla, sstable_read_one_end, sst_oid, bool(smo));
                     if (smo) {
                         _mutations.emplace_back(std::move(*smo));
                     }
