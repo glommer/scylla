@@ -29,6 +29,7 @@
 #include "utils/move.hh"
 #include "dht/i_partitioner.hh"
 #include <seastar/core/byteorder.hh>
+#include <sys/sdt.h>
 
 namespace sstables {
 
@@ -769,6 +770,9 @@ future<uint64_t> sstables::sstable::data_end_position(uint64_t summary_idx, cons
     });
 }
 
+static thread_local uint32_t  disk_ranges_id = 0;
+static thread_local uint32_t  find_disk_ranges_id = 0;
+
 future<streamed_mutation_opt>
 sstables::sstable::read_row(schema_ptr schema,
                             const sstables::key& key,
@@ -780,7 +784,11 @@ sstables::sstable::read_row(schema_ptr schema,
     if (!filter_has_key(key)) {
         return make_ready_future<streamed_mutation_opt>();
     }
-    return find_disk_ranges(schema, key, ck_filtering, pc).then([this, &key, ck_filtering, &pc, schema] (disk_read_range toread) {
+
+    uint32_t frid = find_disk_ranges_id++;
+    STAP_PROBE1(scylla, find_ranges_start, frid);
+    return find_disk_ranges(schema, key, ck_filtering, pc).then([this, &key, ck_filtering, &pc, schema, frid] (disk_read_range toread) {
+        STAP_PROBE1(scylla, find_ranges_end, frid);
         if (!toread.found_row()) {
             _filter_tracker.add_false_positive();
         }
@@ -788,7 +796,11 @@ sstables::sstable::read_row(schema_ptr schema,
             return make_ready_future<streamed_mutation_opt>();
         }
         _filter_tracker.add_true_positive();
-        return sstable_streamed_mutation::create(schema, this->shared_from_this(), key, ck_filtering, pc, std::move(toread)).then([] (auto sm) {
+
+    	uint32_t rid = disk_ranges_id++;
+	STAP_PROBE2(scylla, create_from_range_start, rid, toread.end - toread.start);
+        return sstable_streamed_mutation::create(schema, this->shared_from_this(), key, ck_filtering, pc, std::move(toread)).then([rid] (auto sm) {
+	    STAP_PROBE1(scylla, create_from_range_end, rid);
             return streamed_mutation_opt(std::move(sm));
         });
     });
