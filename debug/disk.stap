@@ -1,5 +1,4 @@
 #!/usr/bin/stap
-#
 @define store_lat(start, idx, where) %(
     # ignore clearly negative latencies. Not sure why they are happening
     if ((gettimeofday_us() - @start[tid(), @idx]) < (3600 * 1000 * 1000)) {
@@ -9,7 +8,7 @@
 %)
 
 @define start_lat(start, idx) %(
-    @start[tid(), @idx] = gettimeofday_us()
+    @start[tid(), idx] = gettimeofday_us()
 %)
 
 # reactor tasks
@@ -49,7 +48,7 @@ probe process(@1).mark("storage_proxy_mutate_end") {
 global sp_query_start_time
 global sp_query
 probe process(@1).mark("storage_proxy_query_start") {
-    @start_lat(sp_query_start_time, $arg1)
+    @start_lart(sp_query_start_time, $arg1)
 }
 
 probe process(@1).mark("storage_proxy_query_end") {
@@ -81,13 +80,11 @@ probe process(@1).mark("cache_update_end") {
 # sstable read
 global sstable_read_start_time
 global sstable_read
-global sstable_hist
 probe process(@1).mark("sstable_read_start") {
     @start_lat(sstable_read_start_time, $arg1)
 }
 
 probe process(@1).mark("sstable_read_end") {
-    sstable_hist <<< $arg2
     @store_lat(sstable_read_start_time, $arg1, sstable_read);
 }
 
@@ -116,9 +113,7 @@ probe process(@1).mark("find_ranges_end") {
 # sstable create_from_range
 global create_from_range_start_time
 global create_from_range
-global read_size_hist
 probe process(@1).mark("create_from_range_start") {
-    read_size_hist <<< $arg2
     @start_lat(create_from_range_start_time, $arg1)
 }
 
@@ -175,6 +170,4 @@ probe end {
     @show_hist("create_from_range", create_from_range);
     @show_hist("mmerger_read_next", mmerger_read_next);
     @show_hist("mmerger_do_fill_buffer", mmerger_do_fill_buffer);
-    @show_hist("Sstable per access count", sstable_hist)
-    @show_hist("read size hist", read_size_hist)
 }
