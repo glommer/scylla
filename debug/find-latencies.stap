@@ -2,29 +2,32 @@
 #
 @define store_lat(start, idx, where) %(
     # ignore clearly negative latencies. Not sure why they are happening
-    if ((gettimeofday_us() - @start[@idx]) < (3600 * 1000 * 1000)) {
-        @where <<< gettimeofday_us() - @start[@idx];
+    if ((gettimeofday_us() - @start[tid(), @idx]) < (3600 * 1000 * 1000)) {
+        @where <<< gettimeofday_us() - @start[tid(), @idx];
     }
-    delete @start[@idx]
+    delete @start[tid(), @idx]
 %)
 
+@define start_lat(start, idx) %(
+    @start[tid(), idx] = gettimeofday_us()
+%)
 
 # reactor tasks
 global rt_start_time
 global reactor_task 
 probe process(@1).mark("reactor_run_tasks_start") {
-    rt_start_time[tid()] = gettimeofday_us()
+    @start_lat(rt_start_time, 0)
 }
 
 probe process(@1).mark("reactor_run_tasks_end") {
-    @store_lat(rt_start_time, tid(), reactor_task)
+    @store_lat(rt_start_time, 0, reactor_task)
 }
 
 # thread tasks
 global thr_start_time
 global thread_run
 probe process(@1).mark("thread_run_start") {
-    thr_start_time[$arg1] = gettimeofday_us()
+    @start_lat(thr_start_time, $arg1)
 }
 
 probe process(@1).mark("thread_run_end") {
@@ -35,7 +38,7 @@ probe process(@1).mark("thread_run_end") {
 global sp_mut_start_time
 global sp_mutate 
 probe process(@1).mark("storage_proxy_mutate_start") {
-    sp_mut_start_time[$arg1] = gettimeofday_us()
+    @start_lat(sp_mut_start_time, $arg1)
 }
 
 probe process(@1).mark("storage_proxy_mutate_end") {
@@ -46,7 +49,7 @@ probe process(@1).mark("storage_proxy_mutate_end") {
 global sp_query_start_time
 global sp_query
 probe process(@1).mark("storage_proxy_query_start") {
-    sp_query_start_time[$arg1] = gettimeofday_us()
+    @start_lart(sp_query_start_time, $arg1)
 }
 
 probe process(@1).mark("storage_proxy_query_end") {
@@ -57,33 +60,88 @@ probe process(@1).mark("storage_proxy_query_end") {
 global cache_evict_start_time
 global cache_evict
 probe process(@1).mark("cache_evict_start") {
-    cache_evict_start_time[tid()] = gettimeofday_us()
+    @start_lat(cache_evict_start_time, 0)
 }
 
 probe process(@1).mark("cache_evict_end") {
-    @store_lat(cache_evict_start_time, tid(), cache_evict);
+    @store_lat(cache_evict_start_time, 0, cache_evict);
 }
 
 # cache update
 global cache_update_start_time
 global cache_update
 probe process(@1).mark("cache_update_start") {
-    cache_update_start_time[tid()] = gettimeofday_us()
+    @start_lat(cache_update_start_time, 0)
 }
 
 probe process(@1).mark("cache_update_end") {
-    @store_lat(cache_update_start_time, tid(), cache_update);
+    @store_lat(cache_update_start_time, 0, cache_update);
 }
 
 # sstable read
 global sstable_read_start_time
 global sstable_read
 probe process(@1).mark("sstable_read_start") {
-    sstable_read_start_time[$arg1] = gettimeofday_us()
+    @start_lat(sstable_read_start_time, $arg1)
 }
 
 probe process(@1).mark("sstable_read_end") {
     @store_lat(sstable_read_start_time, $arg1, sstable_read);
+}
+
+# sstable one read
+global sstable_read_one_start_time
+global sstable_read_one
+probe process(@1).mark("sstable_read_one_start") {
+    @start_lat(sstable_read_one_start_time, $arg1)
+}
+
+probe process(@1).mark("sstable_read_one_end") {
+    @store_lat(sstable_read_one_start_time, $arg1, sstable_read_one);
+}
+
+# sstable find_row 
+global find_ranges_start_time
+global find_ranges
+probe process(@1).mark("find_ranges_start") {
+    @start_lat(find_ranges_start_time, $arg1)
+}
+
+probe process(@1).mark("find_ranges_end") {
+    @store_lat(find_ranges_start_time, $arg1, find_ranges);
+}
+
+# sstable create_from_range
+global create_from_range_start_time
+global create_from_range
+probe process(@1).mark("create_from_range_start") {
+    @start_lat(create_from_range_start_time, $arg1)
+}
+
+probe process(@1).mark("create_from_range_end") {
+    @store_lat(create_from_range_start_time, $arg1, create_from_range);
+}
+
+# sstable mmerger_read_next
+global mmerger_read_next_start_time
+global mmerger_read_next
+probe process(@1).mark("mmerger_read_next_start") {
+    @start_lat(mmerger_read_next_start_time, $arg1)
+}
+
+probe process(@1).mark("mmerger_read_next_end") {
+    @store_lat(mmerger_read_next_start_time, $arg1, mmerger_read_next);
+}
+
+# sstable mmerger_do_fill_buffer
+global mmerger_do_fill_buffer_start_time
+global mmerger_do_fill_buffer
+probe process(@1).mark("mmerger_do_fill_buffer_start") {
+    @start_lat(mmerger_do_fill_buffer_start_time, $arg1)
+}
+
+probe process(@1).mark("mmerger_do_fill_buffer_end") {
+    @store_lat(mmerger_do_fill_buffer_start_time, $arg1, mmerger_do_fill_buffer);
 }
 
 probe begin {
@@ -108,4 +166,9 @@ probe end {
     @show_hist("cache_evict", cache_evict);
     @show_hist("cache_update", cache_update);
     @show_hist("sstable_read", sstable_read);
+    @show_hist("sstable_read_one", sstable_read_one);
+    @show_hist("find_ranges", find_ranges);
+    @show_hist("create_from_range", create_from_range);
+    @show_hist("mmerger_read_next", mmerger_read_next);
+    @show_hist("mmerger_do_fill_buffer", mmerger_do_fill_buffer);
 }
