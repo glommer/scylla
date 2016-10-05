@@ -1783,9 +1783,17 @@ sstable_writer sstable::get_writer(const schema& s, uint64_t estimated_partition
     return sstable_writer(*this, s, estimated_partitions, max_sstable_size, backup, leave_unsealed, pc);
 }
 
+static seastar::thread_scheduling_group* scheduling_group() {
+    static thread_local seastar::thread_scheduling_group scheduling_group(std::chrono::microseconds(500), 0.20);
+    return &scheduling_group;
+}
+
 future<> sstable::write_components(::mutation_reader mr,
         uint64_t estimated_partitions, schema_ptr schema, uint64_t max_sstable_size, bool backup, const io_priority_class& pc, bool leave_unsealed) {
-    return seastar::async([this, mr = std::move(mr), estimated_partitions, schema = std::move(schema), max_sstable_size, backup, &pc, leave_unsealed] () mutable {
+
+    seastar::thread_attributes attr;
+    attr.scheduling_group = scheduling_group();
+    return seastar::async(std::move(attr), [this, mr = std::move(mr), estimated_partitions, schema = std::move(schema), max_sstable_size, backup, &pc, leave_unsealed] () mutable {
         auto wr = get_writer(*schema, estimated_partitions, max_sstable_size, backup, pc, leave_unsealed);
         consume_flattened_in_thread(mr, wr);
     });
