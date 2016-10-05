@@ -64,11 +64,11 @@ public:
 
     priority_manager()
         : _commitlog_priority(engine().register_one_priority_class("commitlog", 100))
-        , _mt_flush_priority(engine().register_one_priority_class("memtable_flush", 100))
+        , _mt_flush_priority(engine().register_one_priority_class("memtable_flush", 20))
         , _stream_read_priority(engine().register_one_priority_class("streaming_read", 20))
         , _stream_write_priority(engine().register_one_priority_class("streaming_write", 20))
         , _sstable_query_read(engine().register_one_priority_class("query", 100))
-        , _compaction_priority(engine().register_one_priority_class("compaction", 100))
+        , _compaction_priority(engine().register_one_priority_class("compaction", 20))
 
     {}
 };
