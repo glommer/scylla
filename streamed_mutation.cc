@@ -26,6 +26,7 @@
 #include "mutation.hh"
 #include "streamed_mutation.hh"
 #include "utils/move.hh"
+#include <sys/sdt.h>
 
 mutation_fragment::mutation_fragment(static_row&& r)
     : _kind(kind::static_row), _data(std::make_unique<data>())
@@ -223,6 +224,9 @@ streamed_mutation streamed_mutation_from_mutation(mutation m)
     return make_streamed_mutation<reader>(std::move(m));
 }
 
+static thread_local uint32_t glb_dfb = 0;
+static thread_local uint32_t glb_next = 0;
+
 class mutation_merger final : public streamed_mutation::impl {
     std::vector<streamed_mutation> _original_readers;
     std::vector<streamed_mutation*> _next_readers;
@@ -239,6 +243,9 @@ private:
             _end_of_stream = true;
             return;
         }
+
+	uint32_t nid = glb_next++;
+	STAP_PROBE1(scylla, mmerger_read_next_start, nid);
 
         position_in_partition::less_compare cmp(*_schema);
         auto heap_compare = [&] (auto& a, auto& b) { return cmp(b.row, a.row); };
@@ -273,9 +280,12 @@ private:
         }
 
         push_mutation_fragment(std::move(result));
+	STAP_PROBE1(scylla, mmerger_read_next_end, nid);
     }
 
     void do_fill_buffer() {
+        uint32_t dfb_id = glb_dfb++;
+	STAP_PROBE1(scylla, mmerger_do_fill_buffer_start, dfb_id);
         position_in_partition::less_compare cmp(*_schema);
         auto heap_compare = [&] (auto& a, auto& b) { return cmp(b.row, a.row); };
 
@@ -290,6 +300,7 @@ private:
         _next_readers.clear();
 
         read_next();
+	STAP_PROBE1(scylla, mmerger_do_fill_buffer_end, dfb_id);
     }
     void prefill_buffer() {
         while (!is_end_of_stream() && !is_buffer_full()) {
