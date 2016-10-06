@@ -1603,6 +1603,7 @@ void components_writer::consume_new_partition(const dht::decorated_key& dk) {
 
 void components_writer::consume(tombstone t) {
     deletion_time d;
+    seastar::thread::yield();
 
     if (t) {
         d.local_deletion_time = t.deletion_time.time_since_epoch().count();
@@ -1624,18 +1625,21 @@ void components_writer::consume(tombstone t) {
 }
 
 stop_iteration components_writer::consume(static_row&& sr) {
+    seastar::thread::yield();
     ensure_tombstone_is_written();
     _sst.write_static_row(_out, _schema, sr.cells());
     return stop_iteration::no;
 }
 
 stop_iteration components_writer::consume(clustering_row&& cr) {
+    seastar::thread::yield();
     ensure_tombstone_is_written();
     _sst.write_clustered_row(_out, _schema, cr);
     return stop_iteration::no;
 }
 
 stop_iteration components_writer::consume(range_tombstone&& rt) {
+    seastar::thread::yield();
     ensure_tombstone_is_written();
     // Remember the range tombstone so when we need to open a new promoted
     // index block, we can figure out which ranges are still open and need
@@ -1650,6 +1654,7 @@ stop_iteration components_writer::consume(range_tombstone&& rt) {
 }
 
 stop_iteration components_writer::consume_end_of_partition() {
+    seastar::thread::yield();
     // If there is an incomplete block in the promoted index, write it too.
     // However, if the _promoted_index is still empty, don't add a single
     // chunk - better not output a promoted index at all in this case.
@@ -1785,7 +1790,7 @@ sstable_writer sstable::get_writer(const schema& s, uint64_t estimated_partition
 }
 
 static seastar::thread_scheduling_group* scheduling_group() {
-    static thread_local seastar::thread_scheduling_group scheduling_group(std::chrono::microseconds(500), 0.20);
+    static thread_local seastar::thread_scheduling_group scheduling_group(std::chrono::microseconds(500), 0.05);
     return &scheduling_group;
 }
 
