@@ -64,6 +64,18 @@
 thread_local disk_error_signal_type sstable_read_error;
 thread_local disk_error_signal_type sstable_write_error;
 
+thread_local uint32_t consumer_id = 0;
+
+uint32_t process_start() {
+	auto pid = consumer_id++;
+	STAP_PROBE1(scyla, consumer_process_start, pid);
+	return pid;
+}
+
+void process_end(uint32_t pid) {
+	STAP_PROBE1(scyla, consumer_process_end, pid);
+}
+
 namespace sstables {
 
 logging::logger sstlog("sstable");
@@ -881,6 +893,8 @@ void write_digest(const sstring file_path, uint32_t full_checksum) {
 thread_local std::array<std::vector<int>, downsampling::BASE_SAMPLING_LEVEL> downsampling::_sample_pattern_cache;
 thread_local std::array<std::vector<int>, downsampling::BASE_SAMPLING_LEVEL> downsampling::_original_index_cache;
 
+static thread_local uint32_t consume_id = 0;
+
 future<index_list> sstable::read_indexes(uint64_t summary_idx, const io_priority_class& pc) {
     if (summary_idx >= _summary.header.size) {
         return make_ready_future<index_list>(index_list());
@@ -906,7 +920,10 @@ future<index_list> sstable::read_indexes(uint64_t summary_idx, const io_priority
         // TODO: it's redundant to constrain the consumer here to stop at
         // index_size()-position, the input stream is already constrained.
         auto ctx = make_lw_shared<index_consume_entry_context<index_consumer>>(ic, std::move(stream), this->index_size() - position);
-        return ctx->consume_input(*ctx).finally([ctx] {
+	auto cid = consume_id;
+	STAP_PROBE1(scylla, index_consume_start, cid);
+        return ctx->consume_input(*ctx).finally([ctx, cid] {
+            STAP_PROBE1(scylla, index_consume_end, cid);
             return ctx->close();
         }).then([ctx, &ic] {
             return make_ready_future<index_list>(std::move(ic.indexes));

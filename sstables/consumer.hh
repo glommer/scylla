@@ -26,6 +26,8 @@
 #include "core/iostream.hh"
 #include "sstables/exceptions.hh"
 
+extern uint32_t process_start();
+extern void process_end(uint32_t i);
 template<typename T>
 static inline T consume_be(temporary_buffer<char>& p) {
     T i = net::ntoh(*unaligned_cast<const T*>(p.get()));
@@ -234,6 +236,7 @@ public:
     }
 
     inline proceed process(temporary_buffer<char>& data) {
+        auto id = process_start();
         while (data || non_consuming()) {
             process_buffer(data);
             // If _prestate is set to something other than prestate::NONE
@@ -244,13 +247,16 @@ public:
             if (__builtin_expect((_prestate != prestate::NONE), 0)) {
                 // assert that data was all consumed by process_buffer.
                 assert(data.size() == 0);
+        	process_end(id);
                 return proceed::yes;
             }
             auto ret = state_processor().process_state(data);
             if (__builtin_expect(ret == proceed::no, 0)) {
+        	process_end(id);
                 return ret;
             }
         }
+        process_end(id);
         return proceed::yes;
     }
 
