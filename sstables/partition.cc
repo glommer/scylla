@@ -845,6 +845,9 @@ static bool has_static_columns(const schema& schema, index_entry &ie) {
     return schema.is_compound() && data.size() >= 20 && data[18] == -1 && data[19] == -1;
 }
 
+static thread_local uint32_t read_index_id = 0;
+static thread_local uint32_t data_end_id = 0;
+
 future<sstable::disk_read_range>
 sstables::sstable::find_disk_ranges(
         schema_ptr schema, const sstables::key& key,
@@ -862,7 +865,10 @@ sstables::sstable::find_disk_ranges(
         return make_ready_future<disk_read_range>();
     }
 
-    return read_indexes(summary_idx, pc).then([this, schema, ck_filtering, &key, token, summary_idx, &pc] (auto index_list) {
+    auto ridx = read_index_id++;
+    STAP_PROBE1(scylla, read_indexes_start, ridx);
+    return read_indexes(summary_idx, pc).then([this, schema, ck_filtering, &key, token, summary_idx, &pc, ridx] (auto index_list) {
+    	STAP_PROBE1(scylla, read_indexes_end, ridx);
         auto index_idx = this->binary_search(index_list, key, token);
         if (index_idx < 0) {
             return make_ready_future<disk_read_range>();
@@ -982,7 +988,11 @@ sstables::sstable::find_disk_ranges(
         // If we're still here there is no promoted index, or we had problems
         // using it, so just just find the entire partition's range.
         auto start = ie.position();
-        return this->data_end_position(summary_idx, index_idx, index_list, pc).then([start] (uint64_t end) {
+
+    	auto dwp = data_end_id++;
+	STAP_PROBE1(scylla, data_end_position_start, dwp);
+        return this->data_end_position(summary_idx, index_idx, index_list, pc).then([start, dwp] (uint64_t end) {
+	    STAP_PROBE1(scylla, data_end_position_end, dwp);
             return disk_read_range(start, end);
         });
     });

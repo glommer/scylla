@@ -59,6 +59,8 @@
 #include "disk-error-handler.hh"
 #include "service/storage_service.hh"
 
+#include <sys/sdt.h>
+
 thread_local disk_error_signal_type sstable_read_error;
 thread_local disk_error_signal_type sstable_write_error;
 
@@ -899,6 +901,7 @@ future<index_list> sstable::read_indexes(uint64_t summary_idx, const io_priority
         file_input_stream_options options;
         options.buffer_size = sstable_buffer_size;
         options.io_priority_class = pc;
+	STAP_PROBE1(scylla, index_read_size, end - position);
         auto stream = make_file_input_stream(this->_index_file, position, end - position, std::move(options));
         // TODO: it's redundant to constrain the consumer here to stop at
         // index_size()-position, the input stream is already constrained.
