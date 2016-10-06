@@ -1569,6 +1569,7 @@ components_writer::components_writer(sstable& sst, const schema& s, file_writer&
 }
 
 void components_writer::consume_new_partition(const dht::decorated_key& dk) {
+    seastar::thread::yield();
     // Set current index of data to later compute row size.
     _sst._c_stats.start_offset = _out.offset();
 
