@@ -113,6 +113,33 @@ probe process(@1).mark("find_ranges_end") {
     @store_lat(find_ranges_start_time, $arg1, find_ranges);
 }
 
+# sstable find_row 
+global read_indexes_start_time
+global read_indexes
+probe process(@1).mark("read_indexes_start") {
+    @start_lat(read_indexes_start_time, $arg1)
+}
+
+probe process(@1).mark("read_indexes_end") {
+    @store_lat(read_indexes_start_time, $arg1, read_indexes);
+}
+
+# sstable find_row 
+global data_end_position_start_time
+global data_end_position
+probe process(@1).mark("data_end_position_start") {
+    @start_lat(data_end_position_start_time, $arg1)
+}
+
+probe process(@1).mark("data_end_position_end") {
+    @store_lat(data_end_position_start_time, $arg1, data_end_position);
+}
+
+global index_read_size_hist
+probe process(@1).mark("index_read_size") {
+	index_read_size_hist <<< $arg1
+}
+
 # sstable create_from_range
 global create_from_range_start_time
 global create_from_range
@@ -172,9 +199,12 @@ probe end {
     @show_hist("sstable_read", sstable_read);
     @show_hist("sstable_read_one", sstable_read_one);
     @show_hist("find_ranges", find_ranges);
+    @show_hist("read_indexes", read_indexes);
+    @show_hist("data_end_position", data_end_position);
     @show_hist("create_from_range", create_from_range);
     @show_hist("mmerger_read_next", mmerger_read_next);
     @show_hist("mmerger_do_fill_buffer", mmerger_do_fill_buffer);
     @show_hist("Sstable per access count", sstable_hist)
     @show_hist("read size hist", read_size_hist)
+    @show_hist("index read size hist", index_read_size_hist)
 }
