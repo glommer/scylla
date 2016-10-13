@@ -56,6 +56,7 @@
 #include <core/gate.hh>
 #include <core/fstream.hh>
 #include <seastar/core/memory.hh>
+#include <seastar/core/chunked_fifo.hh>
 #include <net/byteorder.hh>
 
 #include "commitlog.hh"
@@ -164,7 +165,6 @@ public:
     bool _shutdown = false;
 
     semaphore _new_segment_semaphore {1};
-    semaphore _write_semaphore;
     semaphore _flush_semaphore;
 
     scollectd::registrations _regs;
@@ -174,6 +174,90 @@ public:
     using time_point = clock_type::time_point;
     using sseg_ptr = lw_shared_ptr<segment>;
 
+    class request_controller {
+        // We do not use a semaphore, because we need to proceed when we have memory available, and
+        // not when we have all the memory available.
+        //
+        // This becomes a correctness issue for mutations that are larger than _memory_allowed.
+        // Because _memory_allowed is what determines the in-flight concurrency of buffers being
+        // written, we do not want to tie that to the maximum allowed mutation size.
+        //
+        // The next best alternative is a condition variable. But that too, has issues: If we just
+        // use a condition variable conditional on the resource being available, then new requests
+        // arriving when there are resources available may run instead of old ones that were
+        // signaled but haven't yet run. This can lead to those resources being starved and never
+        // getting a chance to run until it's way past their timeout.
+        //
+        // The above issue can be solved in two ways:
+        // 1) By keeping a list of waiting requests on our own, and using the condition variable
+        //    to make the front of the list ready; but that duplicates the list of requests already
+        //    in existence inside the condition variable, and
+        // 2) By keeping track of the request number and the amount of requests executed, and only
+        //    allowing the supposed-to-be-next request to execute (by adding that to the condition).
+        //    The problem with that approach is that since the requests can wake up and not be
+        //    allowed execution, they will be reinserted into the list in non-FIFO order, which
+        //    brings back the starvation problem. We can solve that by broadcast()ing instead of
+        //    signal()ing, but that generates a lot more load than we need to.
+        //
+        // For those reasons, we will keep our own list of requests here. This approach performs
+        // significantly better.
+        chunked_fifo<promise<>> _pending_requests;
+        uint64_t _memory_used = 0;
+        uint64_t _memory_allowed;
+
+        bool can_proceed() const {
+            return _memory_used <= _memory_allowed;
+        }
+        void proceed_if_possible() {
+            if (can_proceed() && _pending_requests.size()) {
+                _pending_requests.front().set_value();
+                _pending_requests.pop_front();
+            }
+        }
+    public:
+        request_controller(uint64_t max_memory) : _memory_allowed(max_memory) {}
+
+        uint64_t memory_allowed() const { return _memory_allowed; }
+
+        future<> wait_until_possible() {
+            if (can_proceed() && _pending_requests.empty()) {
+                return make_ready_future<>();
+            } else {
+                _pending_requests.emplace_back();
+                return _pending_requests.back().get_future();
+            }
+        }
+
+        uint64_t pending_allocations() const {
+            return _pending_requests.size();
+        }
+
+        void account_memory_usage(size_t size) {
+            _memory_used += size;
+            proceed_if_possible();
+        }
+
+        void notify_memory_written(size_t size) {
+            _memory_used -= size;
+            proceed_if_possible();
+        }
+    } _request_controller;
+
+    uint64_t maximum_allowed_in_flight_memory() const {
+        return _request_controller.memory_allowed();
+    }
+
+    void account_memory_usage(size_t size) {
+        _request_controller.account_memory_usage(size);
+    }
+
+    void notify_memory_written(size_t size) {
+        _request_controller.notify_memory_written(size);
+    }
+
+    future<db::replay_position>
+    allocate_when_possible(const cf_id_type& id, shared_ptr<entry_writer> writer);
+
     struct stats {
         uint64_t cycle_count = 0;
         uint64_t flush_count = 0;
@@ -182,10 +266,7 @@ public:
         uint64_t bytes_slack = 0;
         uint64_t segments_created = 0;
         uint64_t segments_destroyed = 0;
-        uint64_t pending_writes = 0;
         uint64_t pending_flushes = 0;
-        uint64_t pending_allocations = 0;
-        uint64_t write_limit_exceeded = 0;
         uint64_t flush_limit_exceeded = 0;
         uint64_t total_size = 0;
         uint64_t buffer_list_bytes = 0;
@@ -195,20 +276,7 @@ public:
     stats totals;
 
     size_t pending_allocations() const {
-        return totals.pending_allocations;
-    }
-
-    future<> begin_write() {
-        ++totals.pending_writes; // redundant, given semaphore. but easier to read
-        if (totals.pending_writes >= cfg.max_active_writes) {
-            ++totals.write_limit_exceeded;
-            logger.trace("Write ops overflow: {}. Will block.", totals.pending_writes);
-        }
-        return _write_semaphore.wait();
-    }
-    void end_write() {
-        _write_semaphore.signal();
-        --totals.pending_writes;
+        return _request_controller.pending_allocations();
     }
 
     future<> begin_flush() {
@@ -223,11 +291,6 @@ public:
         _flush_semaphore.signal();
         --totals.pending_flushes;
     }
-
-    bool should_wait_for_write() const {
-        return cfg.mode == sync_mode::BATCH || _write_semaphore.waiters() > 0 || _flush_semaphore.waiters() > 0;
-    }
-
     segment_manager(config c);
     ~segment_manager() {
         logger.trace("Commitlog {} disposed", cfg.commit_log_location);
@@ -388,17 +451,6 @@ class db::commitlog::segment: public enable_lw_shared_from_this<segment> {
         _segment_manager->end_flush();
     }
 
-    future<> begin_write() {
-        // This is maintaining the semantica of only using the write-lock
-        // as a gate for flushing, i.e. once we've begun a flush for position X
-        // we are ok with writes to positions > X
-        return _segment_manager->begin_write();
-    }
-
-    void end_write() {
-        _segment_manager->end_write();
-    }
-
 public:
     struct cf_mark {
         const segment& s;
@@ -470,9 +522,8 @@ public:
      */
     future<sseg_ptr> finish_and_get_new() {
         _closed = true;
-        return maybe_wait_for_write(sync()).then([](sseg_ptr s) {
-            return s->_segment_manager->active_segment();
-        });
+        sync();
+        return _segment_manager->active_segment();
     }
     void reset_sync_time() {
         _sync_time = clock_type::now();
@@ -649,8 +700,6 @@ public:
         // The write will be allowed to start now, but flush (below) must wait for not only this,
         // but all previous write/flush pairs.
         return _pending_ops.run_with_ordered_post_op(rp, [this, size, off, buf = std::move(buf)]() mutable {
-            // This could "block", if we have to many pending writes.
-            return begin_write().then([this, size, off, buf = std::move(buf)]() mutable {
                 auto written = make_lw_shared<size_t>(0);
                 auto p = buf.get();
                 return repeat([this, size, off, written, p]() mutable {
@@ -677,59 +726,13 @@ public:
                             throw;
                         }
                     });
-                }).finally([this, buf = std::move(buf)]() mutable {
+                }).finally([this, buf = std::move(buf), size]() mutable {
                     _segment_manager->release_buffer(std::move(buf));
+                    _segment_manager->notify_memory_written(size);
                 });
-            }).finally([this]() {
-                end_write(); // release
-            });
         }, [me, flush_after, top, rp] { // lambda instead of bind, so we keep "me" alive.
             assert(me->_pending_ops.has_operation(rp));
             return flush_after ? me->do_flush(top) : make_ready_future<sseg_ptr>(me);
-        });
-    }
-
-    future<sseg_ptr> maybe_wait_for_write(future<sseg_ptr> f) {
-        if (_segment_manager->should_wait_for_write()) {
-            ++_write_waiters;
-            logger.trace("Too many pending writes. Must wait.");
-            return f.finally([this] {
-                --_write_waiters;
-            });
-        }
-        return make_ready_future<sseg_ptr>(shared_from_this());
-    }
-
-    /**
-     * If an allocation causes a write, and the write causes a block,
-     * any allocations post that need to wait for this to finish,
-     * other wise we will just continue building up more write queue
-     * eventually (+ loose more ordering)
-     *
-     * Some caution here, since maybe_wait_for_write actually
-     * releases _all_ queued up ops when finishing, we could get
-     * "bursts" of alloc->write, causing build-ups anyway.
-     * This should be measured properly. For now I am hoping this
-     * will work out as these should "block as a group". However,
-     * buffer memory usage might grow...
-     */
-    bool must_wait_for_alloc() {
-        // Note: write_waiters is decremented _after_ both semaphores and
-        // flush queue might be cleared. So we should not look only at it.
-        // But we still don't want to look at "should_wait_for_write" directly,
-        // since that is "global" and includes other segments, and we want to
-        // know if _this_ segment has blocking write ops pending.
-        // So we also check that the flush queue is non-empty.
-        return _write_waiters > 0 && !_pending_ops.empty();
-    }
-
-    future<sseg_ptr> wait_for_alloc() {
-        auto me = shared_from_this();
-        ++_segment_manager->totals.pending_allocations;
-        logger.trace("Previous allocation is blocking. Must wait.");
-        return _pending_ops.wait_for_pending().then_wrapped([me](auto f) { // TODO: do we need a finally?
-            --me->_segment_manager->totals.pending_allocations;
-            return f.failed() ? me->_segment_manager->active_segment() : make_ready_future<sseg_ptr>(me);
         });
     }
 
@@ -767,10 +770,17 @@ public:
             return make_exception_future<sseg_ptr>(p);
         });
     }
+
     /**
      * Add a "mutation" to the segment.
      */
     future<replay_position> allocate(const cf_id_type& id, shared_ptr<entry_writer> writer) {
+        if (must_sync()) {
+            return sync().then([this, id, writer = std::move(writer)] (auto s) mutable {
+                return s->allocate(id, std::move(writer));
+            });
+        }
+
         const auto size = writer->size(*this);
         const auto s = size + entry_overhead_size; // total size
         if (s > _segment_manager->max_mutation_size) {
@@ -781,36 +791,31 @@ public:
                                     + std::to_string(_segment_manager->max_mutation_size)));
         }
 
-        std::experimental::optional<future<sseg_ptr>> op;
 
-        if (must_sync()) {
-            op = sync();
-        } else if (must_wait_for_alloc()) {
-            op = wait_for_alloc();
-        } else if (!is_still_allocating() || position() + s > _segment_manager->max_size) { // would we make the file too big?
-            // do this in next segment instead.
-            op = finish_and_get_new();
-        } else if (_buffer.empty()) {
-            new_buffer(s);
-        } else if (s > (_buffer.size() - _buf_pos)) { // enough data?
+        if (!is_still_allocating() || position() + s > _segment_manager->max_size) { // would we make the file too big?
+            return finish_and_get_new().then([id, writer = std::move(writer)] (auto new_seg) {
+                return new_seg->allocate(id, std::move(writer));
+            });
+        } else if (!_buffer.empty() && (s > (_buffer.size() - _buf_pos))) { // enough data?
             if (_segment_manager->cfg.mode == sync_mode::BATCH) {
                 // TODO: this could cause starvation if we're really unlucky.
                 // If we run batch mode and find ourselves not fit in a non-empty
                 // buffer, we must force a cycle and wait for it (to keep flush order)
                 // This will most likely cause parallel writes, and consecutive flushes.
-                op = cycle(true);
+                cycle(true);
             } else {
-                op = maybe_wait_for_write(cycle());
+                cycle();
             }
         }
 
-        if (op) {
-            return op->then([id, writer = std::move(writer)] (sseg_ptr new_seg) mutable {
-                return new_seg->allocate(id, std::move(writer));
-            });
+        size_t overhead = 0;
+        if (_buffer.empty()) {
+            new_buffer(s);
+            overhead += _buf_pos;
         }
 
         _gate.enter(); // this might throw. I guess we accept this?
+        _segment_manager->account_memory_usage(s + overhead);
 
         replay_position rp(_desc.id, position());
         auto pos = _buf_pos;
@@ -841,12 +846,24 @@ public:
         _gate.leave();
 
         if (_segment_manager->cfg.mode == sync_mode::BATCH) {
-            return batch_cycle().then([rp](auto s) {
-                return make_ready_future<replay_position>(rp);
+            return _pending_ops.wait_for_pending().then([this, rp = std::move(rp)] {
+                return batch_cycle().then([rp](auto s) {
+                    return make_ready_future<replay_position>(rp);
+                });
             });
+        } else {
+            // If this buffer alone is bigger than the maximum allowed size, then no other
+            // request will be allowed in to force the cycle()ing of this buffer. We have to do
+            // it ourselves.
+            //
+            // We could do it when a new request is accepted, but there is no point in waiting as the
+            // likelyhood of a cycle in that case is very high. It would also be a bit more complicated,
+            // because we don't know the size of the request exactly when it arrives.
+            if (_buffer.size() >= _segment_manager->maximum_allowed_in_flight_memory()) {
+                cycle();
+            }
+            return make_ready_future<replay_position>(rp);
         }
-
-        return make_ready_future<replay_position>(rp);
     }
 
     position_type position() const {
@@ -864,6 +881,7 @@ public:
         std::fill(_buffer.get_write() + _buf_pos, _buffer.get_write() + size,
                 0);
         _segment_manager->totals.bytes_slack += (size - _buf_pos);
+        _segment_manager->account_memory_usage(size - _buf_pos);
         return size;
     }
     void mark_clean(const cf_id_type& id, position_type pos) {
@@ -905,6 +923,15 @@ public:
     }
 };
 
+future<db::replay_position>
+db::commitlog::segment_manager::allocate_when_possible(const cf_id_type& id, shared_ptr<entry_writer> writer) {
+    return _request_controller.wait_until_possible().then([this, id, writer = std::move(writer)] () mutable {
+        return active_segment().then([this, id, writer = std::move(writer)] (auto s) mutable {
+            return s->allocate(id, std::move(writer));
+        });
+    });
+}
+
 const size_t db::commitlog::segment::default_size;
 
 db::commitlog::segment_manager::segment_manager(config c)
@@ -931,8 +958,8 @@ db::commitlog::segment_manager::segment_manager(config c)
     , max_size(std::min<size_t>(std::numeric_limits<position_type>::max(), std::max<size_t>(cfg.commitlog_segment_size_in_mb, 1) * 1024 * 1024))
     , max_mutation_size(max_size >> 1)
     , max_disk_size(size_t(std::ceil(cfg.commitlog_total_space_in_mb / double(smp::count))) * 1024 * 1024)
-    , _write_semaphore(cfg.max_active_writes)
     , _flush_semaphore(cfg.max_active_flushes)
+    , _request_controller(cfg.max_active_writes * db::commitlog::segment::default_size)
 {
     assert(max_size > 0);
 
@@ -1071,10 +1098,6 @@ scollectd::registrations db::commitlog::segment_manager::create_counters() {
         ),
 
         add_polled_metric(type_instance_id("commitlog"
-                        , per_cpu_plugin_instance, "queue_length", "pending_writes")
-                , make_typed(data_type::GAUGE, totals.pending_writes)
-        ),
-        add_polled_metric(type_instance_id("commitlog"
                         , per_cpu_plugin_instance, "queue_length", "pending_flushes")
                 , make_typed(data_type::GAUGE, totals.pending_flushes)
         ),
@@ -1084,10 +1107,6 @@ scollectd::registrations db::commitlog::segment_manager::create_counters() {
                 , make_typed(data_type::GAUGE, [this] { return pending_allocations(); })
         ),
 
-        add_polled_metric(type_instance_id("commitlog"
-                        , per_cpu_plugin_instance, "total_operations", "write_limit_exceeded")
-                , make_typed(data_type::DERIVE, totals.write_limit_exceeded)
-        ),
         add_polled_metric(type_instance_id("commitlog"
                         , per_cpu_plugin_instance, "total_operations", "flush_limit_exceeded")
                 , make_typed(data_type::DERIVE, totals.flush_limit_exceeded)
@@ -1429,9 +1448,7 @@ future<db::replay_position> db::commitlog::add(const cf_id_type& id,
         }
     };
     auto writer = ::make_shared<serializer_func_entry_writer>(size, std::move(func));
-    return _segment_manager->active_segment().then([id, writer] (auto s) {
-        return s->allocate(id, writer);
-    });
+    return _segment_manager->allocate_when_possible(id, writer);
 }
 
 future<db::replay_position> db::commitlog::add_entry(const cf_id_type& id, const commitlog_entry_writer& cew)
@@ -1452,9 +1469,7 @@ future<db::replay_position> db::commitlog::add_entry(const cf_id_type& id, const
         }
     };
     auto writer = ::make_shared<cl_entry_writer>(cew);
-    return _segment_manager->active_segment().then([id, writer] (auto s) {
-        return s->allocate(id, writer);
-    });
+    return _segment_manager->allocate_when_possible(id, writer);
 }
 
 db::commitlog::commitlog(config cfg)
@@ -1793,12 +1808,7 @@ uint64_t db::commitlog::get_flush_count() const {
 }
 
 uint64_t db::commitlog::get_pending_tasks() const {
-    return _segment_manager->totals.pending_writes
-                    + _segment_manager->totals.pending_flushes;
-}
-
-uint64_t db::commitlog::get_pending_writes() const {
-    return _segment_manager->totals.pending_writes;
+    return _segment_manager->totals.pending_flushes;
 }
 
 uint64_t db::commitlog::get_pending_flushes() const {
@@ -1807,10 +1817,6 @@ uint64_t db::commitlog::get_pending_flushes() const {
 
 uint64_t db::commitlog::get_pending_allocations() const {
     return _segment_manager->pending_allocations();
-}
-
-uint64_t db::commitlog::get_write_limit_exceeded_count() const {
-    return _segment_manager->totals.write_limit_exceeded;
 }
 
 uint64_t db::commitlog::get_flush_limit_exceeded_count() const {
