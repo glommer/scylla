@@ -203,6 +203,7 @@ public:
         // significantly better.
         chunked_fifo<promise<>> _pending_requests;
         uint64_t _memory_used = 0;
+        uint64_t _total_pending_allocations = 0;
         uint64_t _memory_allowed;
 
         bool can_proceed() const {
@@ -223,9 +224,14 @@ public:
             if (can_proceed() && _pending_requests.empty()) {
                 return make_ready_future<>();
             } else {
+                ++_total_pending_allocations;
                 _pending_requests.emplace_back();
                 return _pending_requests.back().get_future();
             }
+        }
+
+        uint64_t total_pending_allocations() const {
+            return _total_pending_allocations;
         }
 
         uint64_t pending_allocations() const {
@@ -277,6 +283,10 @@ public:
 
     size_t pending_allocations() const {
         return _request_controller.pending_allocations();
+    }
+
+    size_t total_pending_allocations() const {
+        return _request_controller.total_pending_allocations();
     }
 
     future<> begin_flush() {
@@ -1105,6 +1115,11 @@ scollectd::registrations db::commitlog::segment_manager::create_counters() {
         add_polled_metric(type_instance_id("commitlog"
                         , per_cpu_plugin_instance, "queue_length", "pending_allocations")
                 , make_typed(data_type::GAUGE, [this] { return pending_allocations(); })
+        ),
+
+        add_polled_metric(type_instance_id("commitlog"
+                        , per_cpu_plugin_instance, "total_operations", "pending_allocations")
+                , make_typed(data_type::DERIVE, [this] { return total_pending_allocations(); })
         ),
 
         add_polled_metric(type_instance_id("commitlog"
