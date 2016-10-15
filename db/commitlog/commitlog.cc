@@ -176,6 +176,7 @@ public:
 
     size_t _max_memory;
     semaphore _request_controller;
+    size_t _total_pending_allocations = 0;
 
     size_t maximum_allowed_in_flight_memory() const {
         return _max_memory;
@@ -211,6 +212,10 @@ public:
 
     size_t pending_allocations() const {
         return _request_controller.waiters();
+    }
+
+    size_t total_pending_allocations() const {
+        return _total_pending_allocations;
     }
 
     future<> begin_flush() {
@@ -859,7 +864,11 @@ public:
 
 future<db::replay_position>
 db::commitlog::segment_manager::allocate_when_possible(const cf_id_type& id, shared_ptr<entry_writer> writer) {
-    return _request_controller.wait(0).then([this, id, writer = std::move(writer)] () mutable {
+    auto fut = _request_controller.wait(0);
+    if (!fut.available()) {
+        _total_pending_allocations++;
+    }
+    return fut.then([this, id, writer = std::move(writer)] () mutable {
         return active_segment().then([this, id, writer = std::move(writer)] (auto s) mutable {
             return s->allocate(id, std::move(writer));
         });
@@ -1040,6 +1049,11 @@ scollectd::registrations db::commitlog::segment_manager::create_counters() {
         add_polled_metric(type_instance_id("commitlog"
                         , per_cpu_plugin_instance, "queue_length", "pending_allocations")
                 , make_typed(data_type::GAUGE, [this] { return pending_allocations(); })
+        ),
+
+        add_polled_metric(type_instance_id("commitlog"
+                        , per_cpu_plugin_instance, "total_operations", "pending_allocations")
+                , make_typed(data_type::DERIVE, [this] { return total_pending_allocations(); })
         ),
 
         add_polled_metric(type_instance_id("commitlog"
