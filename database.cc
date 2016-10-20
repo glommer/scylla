@@ -97,28 +97,28 @@ lw_shared_ptr<memtable_list>
 column_family::make_memory_only_memtable_list() {
     auto seal = [this] (memtable_list::flush_behavior ignored) { return make_ready_future<>(); };
     auto get_schema = [this] { return schema(); };
-    return make_lw_shared<memtable_list>(std::move(seal), std::move(get_schema), _config.max_memtable_size, _config.dirty_memory_manager);
+    return make_lw_shared<memtable_list>(std::move(seal), std::move(get_schema), _config.dirty_memory_manager);
 }
 
 lw_shared_ptr<memtable_list>
 column_family::make_memtable_list() {
     auto seal = [this] (memtable_list::flush_behavior behavior) { return seal_active_memtable(behavior); };
     auto get_schema = [this] { return schema(); };
-    return make_lw_shared<memtable_list>(std::move(seal), std::move(get_schema), _config.max_memtable_size, _config.dirty_memory_manager);
+    return make_lw_shared<memtable_list>(std::move(seal), std::move(get_schema), _config.dirty_memory_manager);
 }
 
 lw_shared_ptr<memtable_list>
 column_family::make_streaming_memtable_list() {
     auto seal = [this] (memtable_list::flush_behavior behavior) { return seal_active_streaming_memtable(behavior); };
     auto get_schema =  [this] { return schema(); };
-    return make_lw_shared<memtable_list>(std::move(seal), std::move(get_schema), _config.max_streaming_memtable_size, _config.streaming_dirty_memory_manager);
+    return make_lw_shared<memtable_list>(std::move(seal), std::move(get_schema), _config.streaming_dirty_memory_manager);
 }
 
 lw_shared_ptr<memtable_list>
 column_family::make_streaming_memtable_big_list(streaming_memtable_big& smb) {
     auto seal = [this, &smb] (memtable_list::flush_behavior) { return seal_active_streaming_memtable_big(smb); };
     auto get_schema =  [this] { return schema(); };
-    return make_lw_shared<memtable_list>(std::move(seal), std::move(get_schema), _config.max_streaming_memtable_size, _config.streaming_dirty_memory_manager);
+    return make_lw_shared<memtable_list>(std::move(seal), std::move(get_schema), _config.streaming_dirty_memory_manager);
 }
 
 column_family::column_family(schema_ptr schema, config config, db::commitlog* cl, compaction_manager& compaction_manager)
@@ -912,10 +912,6 @@ column_family::seal_active_streaming_memtable_delayed() {
         return make_ready_future<>();
     }
 
-    if (_streaming_memtables->should_flush()) {
-        return seal_active_streaming_memtable_immediate();
-    }
-
     if (!_delayed_streaming_flush.armed()) {
             // We don't want to wait for too long, because the incoming mutations will not be available
             // until we flush them to SSTables. On top of that, if the sender ran out of messages, it won't
@@ -1644,7 +1640,7 @@ database::database(const db::config& cfg)
     // Note that even if we didn't allow extra memory, we would still want to keep system requests
     // in a different region group. This is because throttled requests are serviced in FIFO order,
     // and we don't want system requests to be waiting for a long time behind user requests.
-    , _system_dirty_memory_manager(*this, _memtable_total_space + (10 << 20))
+    , _system_dirty_memory_manager(*this, _memtable_total_space + (10 << 20), _memtable_total_space / 8)
     // The total space that can be used by memtables is _memtable_total_space, but we will only
     // allow the region_group to grow to half of that. This is because of virtual_dirty: memtables
     // can take a long time to flush, and if we are using the maximum amount of memory possible,
@@ -1658,9 +1654,9 @@ database::database(const db::config& cfg)
     // memory used by the memtables, that effectively creates two sub-regions inside the dirty
     // region group, of equal size. In the worst case, we will have _memtable_total_space dirty
     // bytes used, and half of that already virtually freed.
-    , _dirty_memory_manager(*this, &_system_dirty_memory_manager, _memtable_total_space / 2)
+    , _dirty_memory_manager(*this, &_system_dirty_memory_manager, _memtable_total_space / 2, _memtable_total_space / 8)
     // The same goes for streaming in respect to virtual dirty.
-    , _streaming_dirty_memory_manager(*this, &_dirty_memory_manager, _streaming_memtable_total_space / 2)
+    , _streaming_dirty_memory_manager(*this, &_dirty_memory_manager, _streaming_memtable_total_space / 2, _streaming_memtable_total_space / 4)
     , _version(empty_version)
     , _enable_incremental_backups(cfg.incremental_backups())
 {
@@ -2167,8 +2163,6 @@ keyspace::make_column_family_config(const schema& s, const db::config& db_config
     cfg.enable_disk_writes = _config.enable_disk_writes;
     cfg.enable_commitlog = _config.enable_commitlog;
     cfg.enable_cache = _config.enable_cache;
-    cfg.max_memtable_size = _config.max_memtable_size;
-    cfg.max_streaming_memtable_size = _config.max_streaming_memtable_size;
     cfg.dirty_memory_manager = _config.dirty_memory_manager;
     cfg.streaming_dirty_memory_manager = _config.streaming_dirty_memory_manager;
     cfg.read_concurrency_config = _config.read_concurrency_config;
@@ -2468,7 +2462,6 @@ column_family::apply(const mutation& m, const db::replay_position& rp) {
     utils::latency_counter lc;
     _stats.writes.set_latency(lc);
     _memtables->active_memtable().apply(m, rp);
-    _memtables->seal_on_overflow();
     _stats.writes.mark(lc);
     if (lc.is_start()) {
         _stats.estimated_write.add(lc.latency(), _stats.writes.hist.count);
@@ -2481,7 +2474,6 @@ column_family::apply(const frozen_mutation& m, const schema_ptr& m_schema, const
     _stats.writes.set_latency(lc);
     check_valid_rp(rp);
     _memtables->active_memtable().apply(m, m_schema, rp);
-    _memtables->seal_on_overflow();
     _stats.writes.mark(lc);
     if (lc.is_start()) {
         _stats.estimated_write.add(lc.latency(), _stats.writes.hist.count);
@@ -2494,7 +2486,6 @@ void column_family::apply_streaming_mutation(schema_ptr m_schema, utils::UUID pl
         return;
     }
     _streaming_memtables->active_memtable().apply(m, m_schema);
-    _streaming_memtables->seal_on_overflow();
 }
 
 void column_family::apply_streaming_big_mutation(schema_ptr m_schema, utils::UUID plan_id, const frozen_mutation& m) {
@@ -2505,7 +2496,6 @@ void column_family::apply_streaming_big_mutation(schema_ptr m_schema, utils::UUI
     }
     auto entry = it->second;
     entry->memtables->active_memtable().apply(m, m_schema);
-    entry->memtables->seal_on_overflow();
 }
 
 void
@@ -2523,7 +2513,7 @@ future<> dirty_memory_manager::shutdown() {
 }
 
 void dirty_memory_manager::maybe_do_active_flush() {
-    if (!_db || !under_pressure() || _db_shutdown_requested) {
+    if (!_db || !over_soft_limit() || _db_shutdown_requested) {
         return;
     }
 
@@ -2637,10 +2627,6 @@ database::make_keyspace_config(const keyspace_metadata& ksm) {
         cfg.enable_disk_reads = true; // we allways read from disk
         cfg.enable_commitlog = ksm.durable_writes() && _cfg->enable_commitlog() && !_cfg->enable_in_memory_data_store();
         cfg.enable_cache = _cfg->enable_cache();
-        cfg.max_memtable_size = _memtable_total_space * _cfg->memtable_cleanup_threshold();
-        // We should guarantee that at least two memtable are available, otherwise after flush, adding another memtable would
-        // easily take us into throttling until the first one is flushed.
-        cfg.max_streaming_memtable_size = std::min(cfg.max_memtable_size, _streaming_memtable_total_space / 2);
 
     } else {
         cfg.datadir = "";
@@ -2648,9 +2634,6 @@ database::make_keyspace_config(const keyspace_metadata& ksm) {
         cfg.enable_disk_reads = false;
         cfg.enable_commitlog = false;
         cfg.enable_cache = false;
-        cfg.max_memtable_size = std::numeric_limits<size_t>::max();
-        // All writes should go to the main memtable list if we're not durable
-        cfg.max_streaming_memtable_size = 0;
     }
     cfg.dirty_memory_manager = &_dirty_memory_manager;
     cfg.streaming_dirty_memory_manager = &_streaming_dirty_memory_manager;

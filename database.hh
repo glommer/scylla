@@ -130,14 +130,14 @@ protected:
 public:
     future<> shutdown();
 
-    dirty_memory_manager(database* db, size_t threshold)
-                                           : logalloc::region_group_reclaimer(threshold)
+    dirty_memory_manager(database* db, size_t threshold, size_t soft_limit)
+                                           : logalloc::region_group_reclaimer(threshold, soft_limit)
                                            , _db(db)
                                            , _region_group(*this)
                                            , _flush_serializer(1) {}
 
-    dirty_memory_manager(database* db, dirty_memory_manager *parent, size_t threshold)
-                                                                         : logalloc::region_group_reclaimer(threshold)
+    dirty_memory_manager(database* db, dirty_memory_manager *parent, size_t threshold, size_t soft_limit)
+                                                                         : logalloc::region_group_reclaimer(threshold, soft_limit)
                                                                          , _db(db)
                                                                          , _region_group(&parent->_region_group, *this)
                                                                          , _flush_serializer(1) {}
@@ -185,17 +185,19 @@ public:
 class streaming_dirty_memory_manager: public dirty_memory_manager {
     virtual memtable_list& get_memtable_list(column_family& cf) override;
 public:
-    streaming_dirty_memory_manager(database& db, dirty_memory_manager *parent, size_t threshold) : dirty_memory_manager(&db, parent, threshold) {}
+    streaming_dirty_memory_manager(database& db, dirty_memory_manager *parent, size_t threshold, size_t soft_limit)
+        : dirty_memory_manager(&db, parent, threshold, soft_limit) {}
 };
 
 class memtable_dirty_memory_manager: public dirty_memory_manager {
     virtual memtable_list& get_memtable_list(column_family& cf) override;
 public:
-    memtable_dirty_memory_manager(database& db, dirty_memory_manager* parent, size_t threshold) : dirty_memory_manager(&db, parent, threshold) {}
+    memtable_dirty_memory_manager(database& db, dirty_memory_manager* parent, size_t threshold, size_t soft_limit)
+        : dirty_memory_manager(&db, parent, threshold, soft_limit) {}
     // This constructor will be called for the system tables (no parent). Its flushes are usually drive by us
     // and not the user, and tend to be small in size. So we'll allow only two slots.
-    memtable_dirty_memory_manager(database& db, size_t threshold) : dirty_memory_manager(&db, threshold) {}
-    memtable_dirty_memory_manager() : dirty_memory_manager(nullptr, std::numeric_limits<size_t>::max()) {}
+    memtable_dirty_memory_manager(database& db, size_t threshold, size_t soft_limit) : dirty_memory_manager(&db, threshold, soft_limit) {}
+    memtable_dirty_memory_manager() : dirty_memory_manager(nullptr, std::numeric_limits<size_t>::max(), std::numeric_limits<size_t>::max()) {}
 };
 
 extern thread_local memtable_dirty_memory_manager default_dirty_memory_manager;
@@ -225,14 +227,12 @@ private:
     std::vector<shared_memtable> _memtables;
     std::function<future<> (flush_behavior)> _seal_fn;
     std::function<schema_ptr()> _current_schema;
-    size_t _max_memtable_size;
     dirty_memory_manager* _dirty_memory_manager;
 public:
-    memtable_list(std::function<future<> (flush_behavior)> seal_fn, std::function<schema_ptr()> cs, size_t max_memtable_size, dirty_memory_manager* dirty_memory_manager)
+    memtable_list(std::function<future<> (flush_behavior)> seal_fn, std::function<schema_ptr()> cs, dirty_memory_manager* dirty_memory_manager)
         : _memtables({})
         , _seal_fn(seal_fn)
         , _current_schema(cs)
-        , _max_memtable_size(max_memtable_size)
         , _dirty_memory_manager(dirty_memory_manager) {
         add_memtable();
     }
@@ -280,18 +280,6 @@ public:
     void add_memtable() {
         _memtables.emplace_back(new_memtable());
     }
-
-    bool should_flush() {
-        return active_memtable().occupancy().total_space() >= _max_memtable_size;
-    }
-
-    void seal_on_overflow() {
-        if (should_flush()) {
-            // FIXME: if sparse, do some in-memory compaction first
-            // FIXME: maybe merge with other in-memory memtables
-            seal_active_memtable(flush_behavior::immediate);
-        }
-    }
 private:
     lw_shared_ptr<memtable> new_memtable() {
         return make_lw_shared<memtable>(_current_schema(), &(_dirty_memory_manager->region_group()));
@@ -328,8 +316,6 @@ public:
         bool enable_cache = true;
         bool enable_commitlog = true;
         bool enable_incremental_backups = false;
-        size_t max_memtable_size = 5'000'000;
-        size_t max_streaming_memtable_size = 5'000'000;
         ::dirty_memory_manager* dirty_memory_manager = &default_dirty_memory_manager;
         ::dirty_memory_manager* streaming_dirty_memory_manager = &default_dirty_memory_manager;
         restricted_mutation_reader_config read_concurrency_config;
@@ -882,8 +868,6 @@ public:
         bool enable_disk_writes = true;
         bool enable_cache = true;
         bool enable_incremental_backups = false;
-        size_t max_memtable_size = 5'000'000;
-        size_t max_streaming_memtable_size = 5'000'000;
         ::dirty_memory_manager* dirty_memory_manager = &default_dirty_memory_manager;
         ::dirty_memory_manager* streaming_dirty_memory_manager = &default_dirty_memory_manager;
         restricted_mutation_reader_config read_concurrency_config;
