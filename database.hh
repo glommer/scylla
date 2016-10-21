@@ -119,11 +119,15 @@ class dirty_memory_manager: public logalloc::region_group_reclaimer {
     // throttled for a long time. Even when we have virtual dirty, that only provides a rough
     // estimate, and we can't release requests that early.
     semaphore _flush_serializer;
+    condition_variable _should_flush;
     int64_t _dirty_bytes_released_pre_accounted = 0;
 
-    seastar::gate _waiting_flush_gate;
-    std::vector<shared_memtable> _pending_flushes;
-    void maybe_do_active_flush();
+    future<> flush_when_needed();
+    future<> flush_one(column_family& cf, semaphore_units<> permit);
+
+    std::unordered_map<utils::UUID, shared_promise<>> _cfs_pending_explicit_flush = {};
+    circular_buffer<utils::UUID> _cfs_explicit_flush_order = {};
+    future<> _waiting_flush;
 protected:
     virtual memtable_list& get_memtable_list(column_family& cf) = 0;
     virtual void start_reclaiming() override;
@@ -134,13 +138,15 @@ public:
                                            : logalloc::region_group_reclaimer(threshold, threshold / 4)
                                            , _db(db)
                                            , _region_group(*this)
-                                           , _flush_serializer(1) {}
+                                           , _flush_serializer(1)
+                                           , _waiting_flush(flush_when_needed()) {}
 
     dirty_memory_manager(database* db, dirty_memory_manager *parent, size_t threshold)
                                                                          : logalloc::region_group_reclaimer(threshold, threshold / 4)
                                                                          , _db(db)
                                                                          , _region_group(&parent->_region_group, *this)
-                                                                         , _flush_serializer(1) {}
+                                                                         , _flush_serializer(1)
+                                                                         , _waiting_flush(flush_when_needed()) {}
 
     static dirty_memory_manager& from_region_group(logalloc::region_group *rg) {
         return *(boost::intrusive::get_parent_from_member(rg, &dirty_memory_manager::_region_group));
@@ -172,14 +178,14 @@ public:
         return _region_group.memory_used();
     }
 
-    template <typename Func>
-    future<> serialize_flush(Func&& func) {
-        return seastar::with_gate(_waiting_flush_gate,  [this, func] () mutable {
-            return with_semaphore(_flush_serializer, 1, func).finally([this] {
-                maybe_do_active_flush();
-            });
-        });
-    }
+    // This is used for explicit flushes. Will queue the memtable for flushing, but won't seal at
+    // this time (since the flush itself wouldn't happen anyway). Keeping the memtable in memory
+    // will potentially increase the time a memtable spends in memory allowing for more
+    // coalescing opportunities.
+    //
+    // Technically, we can just wait on the semaphore. However, we'll keep those in a separate queue
+    // because we want to prioritize explicit flushes.
+    future<> flush(utils::UUID uuid);
 };
 
 class streaming_dirty_memory_manager: public dirty_memory_manager {
