@@ -700,6 +700,10 @@ public:
         return _stats;
     }
 
+    stats& get_stats() {
+        return _stats;
+    }
+
     ::cf_stats* cf_stats() {
         return _config.cf_stats;
     }
@@ -999,7 +1003,7 @@ class database {
     bool _enable_incremental_backups = false;
 
     future<> init_commitlog();
-    future<> apply_in_memory(const frozen_mutation& m, schema_ptr m_schema, db::replay_position);
+    future<> apply_in_memory(const frozen_mutation& m, schema_ptr m_schema, db::replay_position, utils::latency_counter&& lc);
     future<> populate(sstring datadir);
     future<> populate_keyspace(sstring datadir, sstring ks_name);
 
