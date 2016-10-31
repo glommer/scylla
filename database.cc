@@ -2468,25 +2468,13 @@ std::ostream& operator<<(std::ostream& out, const database& db) {
 
 void
 column_family::apply(const mutation& m, const db::replay_position& rp) {
-    utils::latency_counter lc;
-    _stats.writes.set_latency(lc);
     _memtables->active_memtable().apply(m, rp);
-    _stats.writes.mark(lc);
-    if (lc.is_start()) {
-        _stats.estimated_write.add(lc.latency(), _stats.writes.hist.count);
-    }
 }
 
 void
 column_family::apply(const frozen_mutation& m, const schema_ptr& m_schema, const db::replay_position& rp) {
-    utils::latency_counter lc;
-    _stats.writes.set_latency(lc);
     check_valid_rp(rp);
     _memtables->active_memtable().apply(m, m_schema, rp);
-    _stats.writes.mark(lc);
-    if (lc.is_start()) {
-        _stats.estimated_write.add(lc.latency(), _stats.writes.hist.count);
-    }
 }
 
 void column_family::apply_streaming_mutation(schema_ptr m_schema, utils::UUID plan_id, const frozen_mutation& m, bool fragmented) {
@@ -2634,12 +2622,19 @@ void dirty_memory_manager::start_reclaiming() {
     _should_flush.signal();
 }
 
-future<> database::apply_in_memory(const frozen_mutation& m, schema_ptr m_schema, db::replay_position rp) {
-    return _dirty_memory_manager.region_group().run_when_memory_available([this, &m, m_schema = std::move(m_schema), rp = std::move(rp)] {
+future<> database::apply_in_memory(const frozen_mutation& m, schema_ptr m_schema, db::replay_position rp, utils::latency_counter lc) {
+    return _dirty_memory_manager.region_group().run_when_memory_available([this, &m, m_schema = std::move(m_schema), rp = std::move(rp), lc = std::move(lc)] () mutable {
         try {
             auto& cf = find_column_family(m.column_family_id());
             cf.apply(m, m_schema, rp);
+            cf.get_stats().writes.mark(lc);
+            if (lc.is_start()) {
+                cf.get_stats().estimated_write.add(lc.latency(), cf.get_stats().writes.hist.count);
+            }
         } catch (no_such_column_family&) {
+            if (lc.is_start()) {
+                lc.stop();
+            }
             dblog.error("Attempting to mutate non-existent table {}", m.column_family_id());
         }
     });
@@ -2655,11 +2650,14 @@ future<> database::do_apply(schema_ptr s, const frozen_mutation& m) {
         throw std::runtime_error(sprint("attempted to mutate using not synced schema of %s.%s, version=%s",
                                  s->ks_name(), s->cf_name(), s->version()));
     }
+
+    utils::latency_counter lc;
+    cf.get_stats().writes.set_latency(lc);
     if (cf.commitlog() != nullptr) {
-        commitlog_entry_writer cew(s, m, [this, s, &m] (auto rp) {
+        commitlog_entry_writer cew(s, m, [this, s, &m, lc = std::move(lc)] (auto rp) mutable {
             // Shouldn't ever see a reorder. The commitlog will call this in the order the replay
             // positions are produced, and run_when_memory_available() guarantees FIFO ordering.
-            return this->apply_in_memory(m, s, rp);
+            return this->apply_in_memory(m, s, rp, std::move(lc));
         });
         return cf.commitlog()->add_entry(uuid, cew).discard_result().handle_exception([this, s, &m] (auto ep) {
             try {
@@ -2672,7 +2670,7 @@ future<> database::do_apply(schema_ptr s, const frozen_mutation& m) {
             }
         });
     }
-    return apply_in_memory(m, s, db::replay_position());
+    return apply_in_memory(m, s, db::replay_position(), std::move(lc));
 }
 
 future<> database::apply(schema_ptr s, const frozen_mutation& m) {
