@@ -2483,27 +2483,15 @@ std::ostream& operator<<(std::ostream& out, const database& db) {
 
 void
 column_family::apply(const mutation& m, const db::replay_position& rp) {
-    utils::latency_counter lc;
-    _stats.writes.set_latency(lc);
     _memtables->active_memtable().apply(m, rp);
     _memtables->seal_on_overflow();
-    _stats.writes.mark(lc);
-    if (lc.is_start()) {
-        _stats.estimated_write.add(lc.latency(), _stats.writes.hist.count);
-    }
 }
 
 void
 column_family::apply(const frozen_mutation& m, const schema_ptr& m_schema, const db::replay_position& rp) {
-    utils::latency_counter lc;
-    _stats.writes.set_latency(lc);
     check_valid_rp(rp);
     _memtables->active_memtable().apply(m, m_schema, rp);
     _memtables->seal_on_overflow();
-    _stats.writes.mark(lc);
-    if (lc.is_start()) {
-        _stats.estimated_write.add(lc.latency(), _stats.writes.hist.count);
-    }
 }
 
 void column_family::apply_streaming_mutation(schema_ptr m_schema, utils::UUID plan_id, const frozen_mutation& m, bool fragmented) {
@@ -2598,22 +2586,33 @@ future<> database::do_apply(schema_ptr s, const frozen_mutation& m) {
     // is a little in flux and commitlog is created only when db is
     // initied from datadir.
     auto uuid = m.column_family_id();
-    auto& cf = find_column_family(uuid);
+    auto cf = get_column_family(uuid);
     if (!s->is_synced()) {
         throw std::runtime_error(sprint("attempted to mutate using not synced schema of %s.%s, version=%s",
                                  s->ks_name(), s->cf_name(), s->version()));
     }
 
+    utils::latency_counter lc;
+    cf->get_stats().writes.set_latency(lc);
+
     auto commitlog_work = make_ready_future<db::replay_position>(db::replay_position());
-    if (cf.commitlog() != nullptr) {
+    if (cf->commitlog() != nullptr) {
         commitlog_entry_writer cew(s, m);
-        commitlog_work = cf.commitlog()->add_entry(uuid, cew);
+        commitlog_work = cf->commitlog()->add_entry(uuid, cew);
     }
 
-    return commitlog_work.then([this, &m, s] (auto rp) {
-        return this->apply_in_memory(m, s, rp).handle_exception([this, s, &m] (auto ep) {
+    return commitlog_work.then([this, &m, s, cf, lc = std::move(lc)] (auto rp) mutable {
+        return this->apply_in_memory(m, s, rp).then_wrapped([this, s, &m, cf, lc = std::move(lc)] (auto f) mutable {
+            auto mark_latency = [](auto cf, auto&& lc) {
+                cf->get_stats().writes.mark(lc);
+                if (lc.is_start()) {
+                    cf->get_stats().estimated_write.add(lc.latency(), cf->get_stats().writes.hist.count);
+                }
+            };
             try {
-                std::rethrow_exception(ep);
+                f.get();
+                mark_latency(cf, std::move(lc));
+                return make_ready_future<>();
             } catch (replay_position_reordered_exception&) {
                 // expensive, but we're assuming this is super rare.
                 // if we failed to apply the mutation due to future re-ordering
@@ -2621,7 +2620,11 @@ future<> database::do_apply(schema_ptr s, const frozen_mutation& m) {
                 // let's just try again, add the mutation to the CL once more,
                 // and assume success in inevitable eventually.
                 dblog.debug("replay_position reordering detected");
-                return this->apply(s, m);
+                // If we have to reorder, that adds to latency as well, so we have
+                // to include it. But we don't want an extra continuation just for that.
+                return this->apply(s, m).finally([cf, lc = std::move(lc), mark_latency = std::move(mark_latency)] () mutable {
+                    mark_latency(cf, std::move(lc));
+                });
             }
         });
     });
