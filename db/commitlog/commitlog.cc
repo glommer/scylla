@@ -149,6 +149,8 @@ db::commitlog::descriptor::operator db::replay_position() const {
     return replay_position(id);
 }
 
+static thread_local db::replay_position highest_rp = {};
+
 const std::string db::commitlog::descriptor::SEPARATOR("-");
 const std::string db::commitlog::descriptor::FILENAME_PREFIX(
         "CommitLog" + SEPARATOR);
@@ -308,6 +310,8 @@ private:
     // The idea is that since the files are 0 len at start, and thus cost little,
     // it is easier to adapt this value compared to timer freq.
     size_t _num_reserve_segments = 0;
+
+//    descriptor _last_seen_segment = {};
     seastar::gate _gate;
     uint64_t _new_counter = 0;
 };
@@ -740,6 +744,9 @@ public:
                 return new_seg->allocate(id, std::move(writer), std::move(permit));
             });
         } else if (!_buffer.empty() && (s > (_buffer.size() - _buf_pos))) {  // enough data?
+            if (_closed == true) {
+                printf("WRITING TO CLOSED SEGMENT!\n");
+            }
             if (_segment_manager->cfg.mode == sync_mode::BATCH) {
                 // TODO: this could cause starvation if we're really unlucky.
                 // If we run batch mode and find ourselves not fit in a non-empty
@@ -751,6 +758,9 @@ public:
             } else {
                 cycle();
             }
+        }
+        if (_closed == true) {
+            printf("WRITING TO CLOSED SEGMENT2!\n");
         }
 
         size_t buf_memory = s;
@@ -879,13 +889,14 @@ db::commitlog::segment_manager::allocate_when_possible(const cf_id_type& id, sha
     if (!fut.available()) {
         totals.requests_blocked_memory++;
     }
-    auto func = [fut = std::move(fut)] () mutable { return std::move(fut); };
-    auto post = [this, id, writer = std::move(writer)] (auto permit) mutable {
-        return this->active_segment().then([this, id, writer = std::move(writer), permit = std::move(permit)] (auto s) mutable {
-            return s->allocate(id, std::move(writer), std::move(permit));
+
+    return _rp_serializer.run_with_ordered_post_op(reqno, [] {}, [this, id, fut = std::move(fut), writer = std::move(writer)] () mutable {
+        return fut.then([this, id, writer = std::move(writer)] (auto permit) mutable {
+            return this->active_segment().then([this, id, writer = std::move(writer), permit = std::move(permit)] (auto s) mutable {
+                return s->allocate(id, std::move(writer), std::move(permit));
+            });
         });
-    };
-    return _rp_serializer.run_with_ordered_post_op(reqno, std::move(func), std::move(post));
+    });
 }
 
 const size_t db::commitlog::segment::default_size;
@@ -1140,12 +1151,28 @@ future<db::commitlog::segment_manager::sseg_ptr> db::commitlog::segment_manager:
     });
 }
 
+static thread_local uint64_t segment_id_cnt = 0; 
+
 future<db::commitlog::segment_manager::sseg_ptr> db::commitlog::segment_manager::new_segment() {
     if (_shutdown) {
         throw std::runtime_error("Commitlog has been shut down. Cannot add data");
     }
 
     ++_new_counter;
+
+    while (_reserve_segments.size()) {
+        if (segment_id_cnt > _reserve_segments.front()->_desc.id) {
+            _reserve_segments.pop_front();
+            continue;
+        } else {
+            segment_id_cnt  = _reserve_segments.front()->_desc.id;
+            _segments.push_back(_reserve_segments.front());
+            _segments.back()->reset_sync_time();
+            _reserve_segments.pop_front();
+            logger.trace("Acquired segment {} from reserve", _segments.back());
+            return make_ready_future<sseg_ptr>(_segments.back());
+        }
+    }
 
     if (_reserve_segments.empty()) {
         if (_num_reserve_segments < cfg.max_reserve_segments) {
@@ -1157,11 +1184,7 @@ future<db::commitlog::segment_manager::sseg_ptr> db::commitlog::segment_manager:
             return make_ready_future<sseg_ptr>(s);
         });
     }
-
-    _segments.push_back(_reserve_segments.front());
-    _reserve_segments.pop_front();
-    _segments.back()->reset_sync_time();
-    logger.trace("Acquired segment {} from reserve", _segments.back());
+    assert(0);
     return make_ready_future<sseg_ptr>(_segments.back());
 }
 
@@ -1320,6 +1343,10 @@ void db::commitlog::segment_manager::on_timer() {
                         const descriptor& d2 = s2->_desc;
                         return d1.id < d2.id;
                     });
+#if 0
+                    if (s->_desc < _last_seen_segment) {
+                    }
+#endif
                     i = _reserve_segments.emplace(i, std::move(s));
                     logger.trace("Added reserve segment {}", *i);
                 }
