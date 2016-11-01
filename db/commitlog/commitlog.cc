@@ -168,6 +168,11 @@ public:
     semaphore _new_segment_semaphore {1};
     semaphore _flush_semaphore;
 
+    // Serialize requests, to make sure that requests that arrive later in time are
+    // assigned a higher replay position.
+    uint64_t _req_counter = 0;
+    utils::flush_queue<uint64_t> _rp_serializer;
+
     scollectd::registrations _regs;
 
     // TODO: verify that we're ok with not-so-great granularity
@@ -860,6 +865,7 @@ public:
 
 future<db::replay_position>
 db::commitlog::segment_manager::allocate_when_possible(const cf_id_type& id, shared_ptr<entry_writer> writer) {
+    auto reqno = _req_counter++;
     auto size = writer->size();
     // If this is already too big now, we should throw early. It's also a correctness issue, since
     // if we are too big at this moment we'll never reach allocate() to actually throw at that
@@ -873,11 +879,13 @@ db::commitlog::segment_manager::allocate_when_possible(const cf_id_type& id, sha
     if (!fut.available()) {
         totals.requests_blocked_memory++;
     }
-    return fut.then([this, id, writer = std::move(writer)] (auto permit) mutable {
+    auto func = [fut = std::move(fut)] () mutable { return std::move(fut); };
+    auto post = [this, id, writer = std::move(writer)] (auto permit) mutable {
         return this->active_segment().then([this, id, writer = std::move(writer), permit = std::move(permit)] (auto s) mutable {
             return s->allocate(id, std::move(writer), std::move(permit));
         });
-    });
+    };
+    return _rp_serializer.run_with_ordered_post_op(reqno, std::move(func), std::move(post));
 }
 
 const size_t db::commitlog::segment::default_size;
