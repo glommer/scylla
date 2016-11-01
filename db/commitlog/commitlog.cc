@@ -1409,12 +1409,12 @@ future<db::replay_position> db::commitlog::add(const cf_id_type& id,
     return _segment_manager->allocate_when_possible(id, writer);
 }
 
-future<db::replay_position> db::commitlog::add_entry(const cf_id_type& id, const commitlog_entry_writer& cew)
+future<db::replay_position> db::commitlog::add_entry(const cf_id_type& id, commitlog_entry_writer cew)
 {
     class cl_entry_writer final : public entry_writer {
         commitlog_entry_writer _writer;
     public:
-        cl_entry_writer(const commitlog_entry_writer& wr) : _writer(wr) { }
+        cl_entry_writer(commitlog_entry_writer&& wr) : _writer(wr) { }
         virtual size_t size(segment& seg) override {
             _writer.set_with_schema(!seg.is_schema_version_known(_writer.schema()));
             return _writer.size();
@@ -1429,7 +1429,7 @@ future<db::replay_position> db::commitlog::add_entry(const cf_id_type& id, const
             _writer.write(out);
         }
     };
-    auto writer = ::make_shared<cl_entry_writer>(cew);
+    auto writer = ::make_shared<cl_entry_writer>(std::move(cew));
     return _segment_manager->allocate_when_possible(id, writer);
 }
 

@@ -2591,8 +2591,7 @@ future<> database::do_apply(schema_ptr s, const frozen_mutation& m) {
                                  s->ks_name(), s->cf_name(), s->version()));
     }
     if (cf.commitlog() != nullptr) {
-        commitlog_entry_writer cew(s, m);
-        return cf.commitlog()->add_entry(uuid, cew).then([&m, this, s, lc = std::move(lc)](auto rp) mutable {
+        return cf.commitlog()->add_entry(uuid, commitlog_entry_writer(s, m)).then([&m, this, s, lc = std::move(lc)](auto rp) mutable {
             return this->apply_in_memory(m, s, rp, std::move(lc)).handle_exception([this, s, &m] (auto ep) {
                 try {
                     std::rethrow_exception(ep);
