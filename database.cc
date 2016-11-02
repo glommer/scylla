@@ -2601,7 +2601,7 @@ future<> database::do_apply(schema_ptr s, const frozen_mutation& m) {
                     // (which should be the ever only reason for rp mismatch in CF)
                     // let's just try again, add the mutation to the CL once more,
                     // and assume success in inevitable eventually.
-                    dblog.debug("replay_position reordering detected");
+                    dblog.info("replay_position reordering detected");
                     return this->apply(s, m);
                 }
             });
