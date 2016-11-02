@@ -2121,6 +2121,26 @@ const column_family& database::find_column_family(const utils::UUID& uuid) const
     }
 }
 
+lw_shared_ptr<column_family> database::get_column_family(const sstring& ks_name, const sstring& cf_name) {
+    try {
+        return get_column_family(find_uuid(ks_name, cf_name));
+    } catch (...) {
+        std::throw_with_nested(no_such_column_family(ks_name, cf_name));
+    }
+}
+
+lw_shared_ptr<column_family> database::get_column_family(const utils::UUID& uuid) {
+    try {
+        return _column_families.at(uuid);
+    } catch (...) {
+        std::throw_with_nested(no_such_column_family(uuid));
+    }
+}
+
+lw_shared_ptr<column_family> database::get_column_family(const schema_ptr& schema) {
+    return get_column_family(schema->id());
+}
+
 bool database::column_family_exists(const utils::UUID& uuid) const {
     return _column_families.count(uuid);
 }

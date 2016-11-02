@@ -1067,6 +1067,11 @@ public:
     const column_family& find_column_family(const utils::UUID&) const;
     column_family& find_column_family(const schema_ptr&);
     const column_family& find_column_family(const schema_ptr&) const;
+
+    lw_shared_ptr<column_family> get_column_family(const sstring& ks, const sstring& name);
+    lw_shared_ptr<column_family> get_column_family(const utils::UUID&);
+    lw_shared_ptr<column_family> get_column_family(const schema_ptr&);
+
     bool column_family_exists(const utils::UUID& uuid) const;
     schema_ptr find_schema(const sstring& ks_name, const sstring& cf_name) const;
     schema_ptr find_schema(const utils::UUID&) const;
