@@ -1392,6 +1392,8 @@ column_family::load_new_sstables(std::vector<sstables::entry_descriptor> new_tab
         // Drop entire cache for this column family because it may be populated
         // with stale data.
         return get_row_cache().clear();
+    }).then([] {
+        return sstables::wait_for_deleted_sstables();
     });
 }
 
@@ -1935,7 +1937,9 @@ future<>
 database::load_sstables(distributed<service::storage_proxy>& proxy) {
 	return parse_system_tables(proxy).then([this] {
 		return populate(_cfg->data_file_directories()[0]);
-	});
+	}).then([] {
+        return sstables::wait_for_deleted_sstables();
+    });
 }
 
 future<>
@@ -2034,7 +2038,7 @@ future<> database::drop_column_family(const sstring& ks_name, const sstring& cf_
     return truncate(ks, *cf, std::move(tsf)).then([this, cf] {
         return cf->stop();
     }).then([this, cf] {
-        return make_ready_future<>();
+        return sstables::wait_for_deleted_sstables();
     });
 }
 
