@@ -57,6 +57,7 @@
 
 #include "checked-file-impl.hh"
 #include "service/storage_service.hh"
+#include "utils/flush_queue.hh"
 
 thread_local disk_error_signal_type sstable_read_error;
 thread_local disk_error_signal_type sstable_write_error;
@@ -2198,6 +2199,14 @@ int sstable::compare_by_max_timestamp(const sstable& other) const {
     return (ts1 > ts2 ? 1 : (ts1 == ts2 ? 0 : -1));
 }
 
+namespace {
+thread_local utils::flush_queue<uint64_t> deleting_sstables;
+thread_local uint64_t deleting_sstable_index = 0;
+}
+
+future<> wait_for_deleted_sstables() {
+    return deleting_sstables.wait_for_pending(deleting_sstable_index);
+}
 sstable::~sstable() {
     if (_index_file) {
         _index_file.close().handle_exception([save = _index_file, op = background_jobs().start()] (auto ep) {
@@ -2220,7 +2229,7 @@ sstable::~sstable() {
         // clean up unused sstables, and because we'll never reuse the same
         // generation number anyway.
         try {
-            delete_atomically({sstable_to_delete(filename(component_type::TOC), _shared)}).handle_exception(
+            auto fut = delete_atomically({sstable_to_delete(filename(component_type::TOC), _shared)}).handle_exception(
                         [op = background_jobs().start()] (std::exception_ptr eptr) {
                             try {
                                 std::rethrow_exception(eptr);
@@ -2230,6 +2239,9 @@ sstable::~sstable() {
                                 sstlog.warn("Exception when deleting sstable file: {}", eptr);
                             }
                         });
+            deleting_sstables.run_with_ordered_post_op(++deleting_sstable_index, [fut = std::move(fut)] () mutable {
+                return std::move(fut);
+            }, [] {});
         } catch (...) {
             sstlog.warn("Exception when deleting sstable file: {}", std::current_exception());
         }

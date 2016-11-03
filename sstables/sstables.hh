@@ -734,6 +734,17 @@ struct sstable_to_delete {
 future<> delete_atomically(std::vector<shared_sstable> ssts);
 future<> delete_atomically(std::vector<sstable_to_delete> ssts);
 
+// Since sstables defer work in their destructor, we need a way to wait for them
+// to finish in situations where we need to be certain that this has quiesced.
+//
+// This method will return a future when all sstables that were deleted up to the
+// point in which it is called are properly atomically deleted.
+// FIXME: this is needed because deleting a lot of sstables at once can trigger a storm
+// of unwaited continuations, and later work that may expect to happen in a quiet node,
+// and tried to guarantee that by waiting, will be disturbed. We should look into rewriting
+// this so that the amount of work done is reduced.
+future<> wait_for_deleted_sstables();
+
 class atomic_deletion_cancelled : public std::exception {
     std::string _msg;
 public:
