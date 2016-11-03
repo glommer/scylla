@@ -520,12 +520,18 @@ int main(int ac, char** av) {
             supervisor_notify("loading sstables");
             // See comment on top of our call to init_system_keyspace as per why we invoke
             // on Shard0 first. Scylla's Github Issue #1014 for details
-            db.invoke_on(0, [&proxy] (database& db) { return db.load_sstables(proxy); }).get();
+            db.invoke_on(0, [&proxy] (database& db) {
+                return db.load_sstables(proxy).then([] {
+                    return sstables::wait_for_deleted_sstables();
+                });
+            }).get();
             db.invoke_on_all([&proxy] (database& db) {
                 if (engine().cpu_id() == 0) {
                     return make_ready_future<>();
                 }
-                return db.load_sstables(proxy);
+                return db.load_sstables(proxy).then([] {
+                    return sstables::wait_for_deleted_sstables();
+                });
             }).get();
             // If the same sstable is shared by several shards, it cannot be
             // deleted until all shards decide to compact it. So we want to
