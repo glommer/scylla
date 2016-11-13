@@ -125,6 +125,12 @@ class dirty_memory_manager: public logalloc::region_group_reclaimer {
     future<> flush_when_needed();
     future<> flush_one(column_family& cf, semaphore_units<> permit);
 
+    // We need to start a flush before the current one finishes, otherwise
+    // we'll have a period without significant disk activity when the current
+    // SSTable is being sealed, the caches are being updated, etc. To do that
+    // we need to keep track of who is it that we are flushing this memory from.
+    std::unordered_map<const logalloc::region*, semaphore_units<>> _flush_manager;
+
     std::unordered_map<utils::UUID, shared_promise<>> _cfs_pending_explicit_flush = {};
     circular_buffer<utils::UUID> _cfs_explicit_flush_order = {};
     future<> _waiting_flush;
@@ -161,6 +167,17 @@ public:
     void revert_potentially_cleaned_up_memory(logalloc::region* from, int64_t delta) {
         _region_group.update(delta);
         _dirty_bytes_released_pre_accounted -= delta;
+
+        auto it = _flush_manager.find(from);
+        assert(it != _flush_manager.end());
+        // Flushed the current memtable. There is still some work to do, like finish sealing the
+        // SSTable and updating the cache, but we can already allow the next one to start.
+        //
+        // By erasing this memtable from the flush_manager we'll destroy the semaphore_units
+        // associated with this flush and will allow another one to start. We'll signal the
+        // condition variable to let them know we might be ready early.
+        _flush_manager.erase(it);
+        _should_flush.signal();
     }
 
     void account_potentially_cleaned_up_memory(logalloc::region* from, int64_t delta) {
