@@ -119,11 +119,24 @@ class dirty_memory_manager: public logalloc::region_group_reclaimer {
     // throttled for a long time. Even when we have virtual dirty, that only provides a rough
     // estimate, and we can't release requests that early.
     semaphore _flush_serializer;
+    // We will accept a new flush before another one ends, once it is done with the data write.
+    // That is so we can keep the disk always busy. But there is still some background work that is
+    // left to be done. Mostly, update the caches and seal the auxiliary components of the SSTable.
+    // This semaphore will cap the amount of background work that we have. Note that we're not
+    // overly concerned about memtable memory, because dirty memory will put a limit to that. This
+    // is mostly about dangling continuations. So that doesn't have to be a small number.
+    semaphore _background_work_flush_serializer = { 20 };
     condition_variable _should_flush;
     int64_t _dirty_bytes_released_pre_accounted = 0;
 
     future<> flush_when_needed();
     future<> flush_one(column_family& cf, semaphore_units<> permit);
+
+    // We need to start a flush before the current one finishes, otherwise
+    // we'll have a period without significant disk activity when the current
+    // SSTable is being sealed, the caches are being updated, etc. To do that
+    // we need to keep track of who is it that we are flushing this memory from.
+    std::unordered_map<const logalloc::region*, semaphore_units<>> _flush_manager;
 
     std::unordered_map<utils::UUID, shared_promise<>> _cfs_pending_explicit_flush = {};
     circular_buffer<utils::UUID> _cfs_explicit_flush_order = {};
@@ -163,6 +176,17 @@ public:
     void revert_potentially_cleaned_up_memory(logalloc::region* from, int64_t delta) {
         _region_group.update(delta);
         _dirty_bytes_released_pre_accounted -= delta;
+
+        auto it = _flush_manager.find(from);
+        assert(it != _flush_manager.end());
+        // Flushed the current memtable. There is still some work to do, like finish sealing the
+        // SSTable and updating the cache, but we can already allow the next one to start.
+        //
+        // By erasing this memtable from the flush_manager we'll destroy the semaphore_units
+        // associated with this flush and will allow another one to start. We'll signal the
+        // condition variable to let them know we might be ready early.
+        _flush_manager.erase(it);
+        _should_flush.signal();
     }
 
     void account_potentially_cleaned_up_memory(logalloc::region* from, int64_t delta) {

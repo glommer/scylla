@@ -2512,8 +2512,17 @@ future<> dirty_memory_manager::flush_one(column_family& cf, semaphore_units<> pe
     if (mtlist.back()->empty()) {
         return make_ready_future<>();
     }
-    return mtlist.seal_active_memtable(memtable_list::flush_behavior::immediate).finally([this, permit = std::move(permit)] {
-        _should_flush.signal();
+
+    auto* region = &(mtlist.back()->region());
+    auto* region_group = mtlist.back()->region_group();
+    // Because the region groups are hierarchical, when we pick the biggest region creating pressure
+    // (in the memory-driven flush case) we may be picking a memtable that is placed in a region
+    // group below ours. That's totally fine and we can certainly use our semaphore to account for
+    // it, but we need to destroy the semaphore units from the right flush manager.
+    dirty_memory_manager::from_region_group(region_group)._flush_manager.emplace(region, std::move(permit));
+    auto fut = mtlist.seal_active_memtable(memtable_list::flush_behavior::immediate);
+    return get_units(_background_work_flush_serializer, 1).then([fut = std::move(fut)] (auto permit) mutable {
+        return std::move(fut).finally([permit = std::move(permit)] {});
     });
 }
 
