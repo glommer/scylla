@@ -26,6 +26,7 @@
 #include "frozen_mutation.hh"
 #include "schema.hh"
 #include "utils/data_output.hh"
+#include "replay_position.hh"
 
 namespace stdx = std::experimental;
 
@@ -49,15 +50,21 @@ class commitlog_entry_writer {
     const frozen_mutation& _mutation;
     bool _with_schema = true;
     size_t _size;
+    std::function<future<>(db::replay_position)> _post_write;
 private:
     void compute_size();
     commitlog_entry get_entry() const;
 public:
-    commitlog_entry_writer(schema_ptr s, const frozen_mutation& fm)
-        : _schema(std::move(s)), _mutation(fm)
+    commitlog_entry_writer(schema_ptr s, const frozen_mutation& fm, std::function<future<>(db::replay_position)> f)
+        : _schema(std::move(s)), _mutation(fm), _post_write(f)
     {
         compute_size();
     }
+
+    commitlog_entry_writer(schema_ptr s, const frozen_mutation& fm)
+        : commitlog_entry_writer(std::move(s), fm, [] (auto rp) { return make_ready_future<>(); })
+    {}
+
 
     void set_with_schema(bool value) {
         _with_schema = value;
@@ -79,6 +86,10 @@ public:
     }
 
     void write(data_output& out) const;
+
+    future<> post_write(db::replay_position rp) {
+        return _post_write(rp);
+    }
 };
 
 class commitlog_entry_reader {
