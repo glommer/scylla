@@ -774,7 +774,7 @@ public:
         out.write(crc.checksum());
 
         // actual data
-        writer->write(*this, out);
+        auto write_fut = writer->write(*this, out, rp);
 
         crc.process_bytes(p + 2 * sizeof(uint32_t), size);
 
@@ -787,8 +787,10 @@ public:
         _gate.leave();
 
         if (_segment_manager->cfg.mode == sync_mode::BATCH) {
-            return batch_cycle().then([rp](auto s) {
-                return make_ready_future<replay_position>(rp);
+            return batch_cycle().then([rp, write_fut = std::move(write_fut)](auto s) mutable {
+                return std::move(write_fut).then([rp] {
+                    return make_ready_future<replay_position>(rp);
+                });
             });
         } else {
             // If this buffer alone is too big, potentially bigger than the maximum allowed size,
@@ -797,7 +799,9 @@ public:
             if ((_buf_pos >= (db::commitlog::segment::default_size))) {
                 cycle();
             }
-            return make_ready_future<replay_position>(rp);
+            return write_fut.then([rp] {
+                return make_ready_future<replay_position>(rp);
+            });
         }
     }
 
@@ -1401,8 +1405,9 @@ future<db::replay_position> db::commitlog::add(const cf_id_type& id,
         { }
         virtual size_t size(segment&) override { return _size; }
         virtual size_t size() override { return _size; }
-        virtual void write(segment&, output& out) override {
+        virtual future<> write(segment&, output& out, const db::replay_position& rp) override {
             _func(out);
+            return make_ready_future<>();
         }
     };
     auto writer = ::make_shared<serializer_func_entry_writer>(size, std::move(func));
@@ -1422,11 +1427,12 @@ future<db::replay_position> db::commitlog::add_entry(const cf_id_type& id, const
         virtual size_t size() override {
             return _writer.mutation_size();
         }
-        virtual void write(segment& seg, output& out) override {
+        virtual future<> write(segment& seg, output& out, const db::replay_position& rp) override {
             if (_writer.with_schema()) {
                 seg.add_schema_version(_writer.schema());
             }
             _writer.write(out);
+            return make_ready_future<>();
         }
     };
     auto writer = ::make_shared<cl_entry_writer>(cew);
