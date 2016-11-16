@@ -1432,7 +1432,7 @@ future<db::replay_position> db::commitlog::add_entry(const cf_id_type& id, const
                 seg.add_schema_version(_writer.schema());
             }
             _writer.write(out);
-            return make_ready_future<>();
+            return _writer.post_write(rp);
         }
     };
     auto writer = ::make_shared<cl_entry_writer>(cew);
