@@ -1538,6 +1538,7 @@ db::commitlog::read_log_file(const sstring& filename, commit_load_reader_func ne
 subscription<temporary_buffer<char>, db::replay_position>
 db::commitlog::read_log_file(file f, commit_load_reader_func next, position_type off) {
     struct work {
+        file_input_stream_options fo;
         file f;
         stream<temporary_buffer<char>, replay_position> s;
         input_stream<char> fin;
@@ -1554,7 +1555,8 @@ db::commitlog::read_log_file(file f, commit_load_reader_func next, position_type
         bool failed = false;
 
         work(file f, position_type o = 0)
-                : f(f), fin(make_file_input_stream(f)), start_off(o) {
+                : fo(file_input_stream_options{db::commitlog::segment::default_size, 10, service::get_local_commitlog_priority()})
+                , f(f), fin(make_file_input_stream(f, o, fo)), start_off(o) {
         }
         work(work&&) = default;
 
