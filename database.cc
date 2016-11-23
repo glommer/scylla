@@ -2587,11 +2587,27 @@ future<> dirty_memory_manager::flush_when_needed() {
                 // memtable that attends the most flush suitable criteria.
                 memtable& candidate_memtable = this->candidate_memtable();
                 dirty_memory_manager* candidate_dirty_manager = &(dirty_memory_manager::from_region_group(candidate_memtable.region_group()));
-                // Do not wait. The semaphore will protect us against a concurrent flush. But we
-                // want to start a new one as soon as the permits are destroyed and the semaphore is
-                // made ready again, not when we are done with the current one.
-                candidate_dirty_manager->flush_one(candidate_memtable, std::move(permit));
-                return make_ready_future<>();
+                if (candidate_dirty_manager == this) {
+                    this->flush_one(candidate_memtable, std::move(permit));
+                    // Do not wait. The semaphore will protect us against a concurrent flush. But we
+                    // want to start a new one as soon as the permits are destroyed and the semaphore is
+                    // made ready again, not when we are done with the current one.
+                    return make_ready_future<>();
+                }
+
+                flush_permit p(std::move(permit));
+                return candidate_dirty_manager->get_flush_permit().then([this, p = std::move(p), previous_candidate = candidate_dirty_manager] (auto permit) mutable {
+                    p.aux_permit = std::move(permit);
+                    memtable& candidate_memtable = this->candidate_memtable();
+                    dirty_memory_manager* candidate_dirty_manager = &(dirty_memory_manager::from_region_group(candidate_memtable.region_group()));
+                    if (candidate_dirty_manager == previous_candidate) {
+                        candidate_dirty_manager->flush_one(candidate_memtable, std::move(p));
+                    }
+                    // If we didn't flush because we changed candidates that's fine. We exit here
+                    // and if we still have work to do we'll immediate acquire our flush permit
+                    // again (unless an ancestor started flushing from us in the mean time)
+                    return make_ready_future<>();
+                });
             });
         });
     }).finally([this] {

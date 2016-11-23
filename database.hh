@@ -131,8 +131,11 @@ class dirty_memory_manager: public logalloc::region_group_reclaimer {
     int64_t _dirty_bytes_released_pre_accounted = 0;
 
     future<> flush_when_needed();
+    // Due to the hierarchical nature of the region group, a flush we initiated may be
+    // serviced by a descendant region group. We need to keep permits for both.
     struct flush_permit {
         semaphore_units<> permit;
+        std::experimental::optional<semaphore_units<>> aux_permit = {};
 
         flush_permit(semaphore_units<>&& permit) : permit(std::move(permit)) {}
         flush_permit(flush_permit&&) = default;
