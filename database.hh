@@ -226,6 +226,10 @@ public:
         return _region_group.memory_used();
     }
 
+    memtable& flush_candidate_memtable() {
+        return memtable::from_region(*(_region_group.get_largest_region()));
+    }
+
     future<> flush_one(memtable_list& cf, semaphore_units<> permit);
 
     future<semaphore_units<>> get_flush_permit() {

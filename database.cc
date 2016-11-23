@@ -2615,13 +2615,27 @@ future<> dirty_memory_manager::flush_when_needed() {
                 // memtable. The advantage of doing this is that this is objectively the one that will
                 // release the biggest amount of memory and is less likely to be generating tiny
                 // SSTables.
-                memtable& biggest_memtable = memtable::from_region(*(this->_region_group.get_largest_region()));
-                auto mtlist = biggest_memtable.get_memtable_list();
-                // Do not wait. The semaphore will protect us against a concurrent flush. But we
-                // want to start a new one as soon as the permits are destroyed and the semaphore is
-                // made ready again, not when we are done with the current one.
-                this->flush_one(*mtlist, std::move(permit));
-                return make_ready_future<>();
+                memtable& candidate_memtable = this->flush_candidate_memtable();
+                dirty_memory_manager* candidate_dirty_manager = &(dirty_memory_manager::from_region_group(candidate_memtable.region_group()));
+                if (candidate_dirty_manager == this) {
+                    auto mtlist = candidate_memtable.get_memtable_list();
+                    this->flush_one(*mtlist, std::move(permit));
+                    return make_ready_future<>();
+                }
+                return candidate_dirty_manager->get_flush_permit().then([this,
+                                                                        previous_candidate = candidate_dirty_manager,
+                                                                        mypermit = std::move(permit)] (auto permit) mutable {
+                    memtable& candidate_memtable = this->flush_candidate_memtable();
+                    dirty_memory_manager* candidate_dirty_manager = &(dirty_memory_manager::from_region_group(candidate_memtable.region_group()));
+                    if (candidate_dirty_manager == previous_candidate) {
+                        auto mtlist = candidate_memtable.get_memtable_list();
+                        this->flush_one(*mtlist, std::move(permit)).finally([mypermit = std::move(permit)] {});
+                    }
+                    // If we didn't flush because we changed candidates that's fine. We exit here
+                    // and if we still have work to do we'll immediate acquire our flush permit
+                    // again (unless an ancestor started flushing from us in the mean time)
+                    return make_ready_future<>();
+                });
             });
         });
     }).finally([this] {
