@@ -2629,30 +2629,41 @@ future<> database::apply_in_memory(const frozen_mutation& m, schema_ptr m_schema
 }
 
 future<> database::do_apply(schema_ptr s, const frozen_mutation& m) {
-    // I'm doing a nullcheck here since the init code path for db etc
-    // is a little in flux and commitlog is created only when db is
-    // initied from datadir.
-    auto uuid = m.column_family_id();
-    auto& cf = find_column_family(uuid);
     if (!s->is_synced()) {
         throw std::runtime_error(sprint("attempted to mutate using not synced schema of %s.%s, version=%s",
                                  s->ks_name(), s->cf_name(), s->version()));
     }
+    auto uuid = m.column_family_id();
+    auto &cf = find_column_family(uuid);
     if (cf.commitlog() != nullptr) {
         commitlog_entry_writer cew(s, m);
-        return cf.commitlog()->add_entry(uuid, cew).then([&m, this, s](auto rp) {
-            return this->apply_in_memory(m, s, rp).handle_exception([this, s, &m] (auto ep) {
-                try {
-                    std::rethrow_exception(ep);
-                } catch (replay_position_reordered_exception&) {
-                    // expensive, but we're assuming this is super rare.
-                    // if we failed to apply the mutation due to future re-ordering
-                    // (which should be the ever only reason for rp mismatch in CF)
-                    // let's just try again, add the mutation to the CL once more,
-                    // and assume success in inevitable eventually.
-                    dblog.debug("replay_position reordering detected");
-                    return this->apply(s, m);
-                }
+        return do_with(unsigned(0), [this, s, &m, cew = std::move(cew), uuid] (unsigned& attempts) mutable {
+            return repeat([this, s, &m, cew = std::move(cew), uuid, &attempts] {
+                auto &cf = find_column_family(uuid);
+                return cf.commitlog()->add_entry(uuid, cew).then([&m, this, s, &attempts](auto rp) {
+                    return this->apply_in_memory(m, s, rp).then_wrapped([this, s, &m, &attempts] (auto f) {
+                        if (!f.failed()) {
+                            return stop_iteration::yes;
+                        } else {
+                            auto&& ep = f.get_exception();
+                            try {
+                                std::rethrow_exception(ep);
+                            } catch (replay_position_reordered_exception&) {
+                                // expensive, but we're assuming this is super rare.
+                                // if we failed to apply the mutation due to future re-ordering
+                                // (which should be the ever only reason for rp mismatch in CF)
+                                // let's just try again, add the mutation to the CL once more,
+                                // and assume success in inevitable eventually.
+                                dblog.debug("replay_position reordering detected.");
+                                if (++attempts <= 10) {
+                                    return stop_iteration::no;
+                                } else {
+                                    throw;
+                                }
+                            }
+                        }
+                    });
+                });
             });
         });
     }
