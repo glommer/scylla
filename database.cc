@@ -2541,14 +2541,7 @@ future<> dirty_memory_manager::flush_one(memtable_list& mtlist, dirty_memory_man
     auto* region = &(mtlist.back()->region());
     auto* region_group = mtlist.back()->region_group();
     auto schema = mtlist.back()->schema();
-    // Because the region groups are hierarchical, when we pick the biggest region creating pressure
-    // (in the memory-driven flush case) we may be picking a memtable that is placed in a region
-    // group below ours. That's totally fine and we can certainly use our semaphore to account for
-    // it, but we need to destroy the semaphore units from the right flush manager.
-    //
-    // If we abandon size-driven flush and go with another flushing scheme that always guarantees
-    // that we're picking from this region_group, we can simplify this.
-    dirty_memory_manager::from_region_group(region_group).add_to_flush_manager(region, std::move(permit));
+    add_to_flush_manager(region, std::move(permit));
     auto fut = mtlist.seal_active_memtable(memtable_list::flush_behavior::immediate);
     return get_units(_background_work_flush_serializer, 1).then([this, fut = std::move(fut), region, region_group, schema] (auto permit) mutable {
         return std::move(fut).then_wrapped([this, region, region_group, schema, permit = std::move(permit)] (auto f) {
@@ -2559,7 +2552,7 @@ future<> dirty_memory_manager::flush_one(memtable_list& mtlist, dirty_memory_man
             // 2) If we are using a memory-only Column Family. That will never create a memtable
             //    flush object, and we'll never get rid of the permits. So we have to remove it
             //    here.
-            dirty_memory_manager::from_region_group(region_group).remove_from_flush_manager(region);
+            this->remove_from_flush_manager(region);
             if (f.failed()) {
                 dblog.error("Failed to flush memtable, {}:{}", schema->ks_name(), schema->cf_name());
             }
@@ -2593,10 +2586,11 @@ future<> dirty_memory_manager::flush_when_needed() {
                 // But during pressure condition, we'll just pick the CF that holds the most
                 // memtable that attends the most flush suitable criteria.
                 memtable& candidate_memtable = this->candidate_memtable();
+                dirty_memory_manager* candidate_dirty_manager = &(dirty_memory_manager::from_region_group(candidate_memtable.region_group()));
                 // Do not wait. The semaphore will protect us against a concurrent flush. But we
                 // want to start a new one as soon as the permits are destroyed and the semaphore is
                 // made ready again, not when we are done with the current one.
-                this->flush_one(candidate_memtable, std::move(permit));
+                candidate_dirty_manager->flush_one(candidate_memtable, std::move(permit));
                 return make_ready_future<>();
             });
         });
