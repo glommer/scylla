@@ -2595,11 +2595,10 @@ future<> dirty_memory_manager::flush_when_needed() {
                 // release the biggest amount of memory and is less likely to be generating tiny
                 // SSTables.
                 memtable& biggest_memtable = memtable::from_region(*(this->_region_group.get_largest_region()));
-                auto mtlist = biggest_memtable.get_memtable_list();
                 // Do not wait. The semaphore will protect us against a concurrent flush. But we
                 // want to start a new one as soon as the permits are destroyed and the semaphore is
                 // made ready again, not when we are done with the current one.
-                this->flush_one(*mtlist, std::move(permit));
+                this->flush_one(biggest_memtable, std::move(permit));
                 return make_ready_future<>();
             });
         });

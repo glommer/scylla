@@ -232,6 +232,9 @@ public:
     }
 
     future<> flush_one(memtable_list& cf, semaphore_units<> permit);
+    future<> flush_one(memtable& mt, semaphore_units<> permit) {
+        return flush_one(*(mt.get_memtable_list()), std::move(permit));
+    }
 
     future<semaphore_units<>> get_flush_permit() {
         return get_units(_flush_serializer, 1);
