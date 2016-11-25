@@ -2533,7 +2533,7 @@ future<> memtable_list::request_flush() {
     }
 }
 
-future<> dirty_memory_manager::flush_one(memtable_list& mtlist, semaphore_units<> permit) {
+future<> dirty_memory_manager::flush_one(memtable_list& mtlist, dirty_memory_manager::flush_permit permit) {
     if (mtlist.back()->empty()) {
         return make_ready_future<>();
     }

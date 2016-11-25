@@ -131,6 +131,16 @@ class dirty_memory_manager: public logalloc::region_group_reclaimer {
     int64_t _dirty_bytes_released_pre_accounted = 0;
 
     future<> flush_when_needed();
+    struct flush_permit {
+        semaphore_units<> permit;
+
+        flush_permit(semaphore_units<>&& permit) : permit(std::move(permit)) {}
+        flush_permit(flush_permit&&) = default;
+        flush_permit& operator=(flush_permit&&) = default;
+        flush_permit(const flush_permit&) = delete;
+        flush_permit& operator=(const flush_permit&) = delete;
+    };
+
     // We need to start a flush before the current one finishes, otherwise
     // we'll have a period without significant disk activity when the current
     // SSTable is being sealed, the caches are being updated, etc. To do that
@@ -138,11 +148,12 @@ class dirty_memory_manager: public logalloc::region_group_reclaimer {
     struct flush_token {
         dirty_memory_manager* _dirty_memory_manager;
         size_t _freed_memory = 0;
-        semaphore_units<> _sem;
+        flush_permit _perm;
     public:
-        flush_token(dirty_memory_manager *dm, semaphore_units<>&& s) : _dirty_memory_manager(dm), _sem(std::move(s)) {}
+        flush_token(dirty_memory_manager *dm, flush_permit&& permit) : _dirty_memory_manager(dm), _perm(std::move(permit)) {}
+
         void mark_end_flush(size_t freed) {
-            auto destroy = std::move(_sem);
+            auto destroy = std::move(_perm);
             _freed_memory = freed;
         }
         ~flush_token() {
@@ -219,7 +230,7 @@ public:
         }
     }
 
-    void add_to_flush_manager(const logalloc::region *region, semaphore_units<>&& permit) {
+    void add_to_flush_manager(const logalloc::region *region, flush_permit&& permit) {
         _flush_manager.emplace(std::piecewise_construct, std::make_tuple(region), std::make_tuple(this, std::move(permit)));
     }
 
@@ -231,8 +242,8 @@ public:
         return _region_group.memory_used();
     }
 
-    future<> flush_one(memtable_list& cf, semaphore_units<> permit);
-    future<> flush_one(memtable& mt, semaphore_units<> permit) {
+    future<> flush_one(memtable_list& cf, flush_permit permit);
+    future<> flush_one(memtable& mt, flush_permit permit) {
         return flush_one(*(mt.get_memtable_list()), std::move(permit));
     }
 
