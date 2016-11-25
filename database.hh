@@ -165,6 +165,10 @@ class dirty_memory_manager: public logalloc::region_group_reclaimer {
     std::unordered_map<const logalloc::region*, flush_token> _flush_manager;
 
     future<> _waiting_flush;
+
+    memtable& candidate_memtable() {
+        return memtable::from_region(*(_region_group.get_largest_region()));
+    }
 protected:
     virtual void start_reclaiming() override;
 public:

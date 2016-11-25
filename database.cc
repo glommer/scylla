@@ -2590,15 +2590,13 @@ future<> dirty_memory_manager::flush_when_needed() {
                 // flush. Most of the time we want some coordination with the commitlog to allow us to
                 // release commitlog segments as early as we can.
                 //
-                // But during pressure condition, we'll just pick the CF that holds the largest
-                // memtable. The advantage of doing this is that this is objectively the one that will
-                // release the biggest amount of memory and is less likely to be generating tiny
-                // SSTables.
-                memtable& biggest_memtable = memtable::from_region(*(this->_region_group.get_largest_region()));
+                // But during pressure condition, we'll just pick the CF that holds the most
+                // memtable that attends the most flush suitable criteria.
+                memtable& candidate_memtable = this->candidate_memtable();
                 // Do not wait. The semaphore will protect us against a concurrent flush. But we
                 // want to start a new one as soon as the permits are destroyed and the semaphore is
                 // made ready again, not when we are done with the current one.
-                this->flush_one(biggest_memtable, std::move(permit));
+                this->flush_one(candidate_memtable, std::move(permit));
                 return make_ready_future<>();
             });
         });
