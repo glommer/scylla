@@ -63,6 +63,7 @@
 #include "utils/flush_queue.hh"
 #include "schema_registry.hh"
 #include "service/priority_manager.hh"
+#include <sys/sdt.h> 
 
 #include "checked-file-impl.hh"
 #include "disk-error-handler.hh"
@@ -1690,6 +1691,14 @@ database::setup_collectd() {
     _collectd.push_back(
         scollectd::add_polled_metric(scollectd::type_instance_id("memory"
                 , scollectd::per_cpu_plugin_instance
+                , "bytes", "system_dirty")
+                , scollectd::make_typed(scollectd::data_type::GAUGE, [this] {
+            return _system_dirty_memory_manager.real_dirty_memory();
+    })));
+
+    _collectd.push_back(
+        scollectd::add_polled_metric(scollectd::type_instance_id("memory"
+                , scollectd::per_cpu_plugin_instance
                 , "bytes", "virtual_dirty")
                 , scollectd::make_typed(scollectd::data_type::GAUGE, [this] {
             return _dirty_memory_manager.virtual_dirty_memory();
@@ -1709,6 +1718,27 @@ database::setup_collectd() {
                 , scollectd::make_typed(scollectd::data_type::GAUGE, [this] {
                     return _dirty_memory_manager.region_group().blocked_requests();
                 })
+    ));
+
+    _collectd.push_back(
+        scollectd::add_polled_metric(scollectd::type_instance_id("memtables"
+                , scollectd::per_cpu_plugin_instance
+                , "total_operations", "flushes")
+                , scollectd::make_typed(scollectd::data_type::DERIVE, _cf_stats.memtable_flushes)
+    ));
+
+    _collectd.push_back(
+        scollectd::add_polled_metric(scollectd::type_instance_id("memtables"
+                , scollectd::per_cpu_plugin_instance
+                , "total_operations", "memory_pressure_flushes")
+                , scollectd::make_typed(scollectd::data_type::DERIVE, _cf_stats.memory_pressure_memtable_flushes)
+    ));
+
+    _collectd.push_back(
+        scollectd::add_polled_metric(scollectd::type_instance_id("memtables"
+                , scollectd::per_cpu_plugin_instance
+                , "total_operations", "commitlog_memtable_flushes")
+                , scollectd::make_typed(scollectd::data_type::DERIVE, _cf_stats.commitlog_memtable_flushes)
     ));
 
     _collectd.push_back(
@@ -2560,6 +2590,7 @@ future<> dirty_memory_manager::flush_one(memtable_list& mtlist, semaphore_units<
     // that we're picking from this region_group, we can simplify this.
     dirty_memory_manager::from_region_group(region_group)._flush_manager.emplace(region, std::move(permit));
     auto fut = mtlist.seal_active_memtable(memtable_list::flush_behavior::immediate);
+    _db->_cf_stats.memtable_flushes++;
     return get_units(_background_work_flush_serializer, 1).then([this, fut = std::move(fut), region, region_group, schema] (auto permit) mutable {
         return std::move(fut).then_wrapped([this, region, region_group, schema] (auto f) {
             // There are two cases in which we may still need to remove the permits from here.
@@ -2609,6 +2640,7 @@ future<> dirty_memory_manager::flush_when_needed() {
                 // Do not wait. The semaphore will protect us against a concurrent flush. But we
                 // want to start a new one as soon as the permits are destroyed and the semaphore is
                 // made ready again, not when we are done with the current one.
+                _db->_cf_stats.memory_pressure_memtable_flushes++;
                 this->flush_one(*mtlist, std::move(permit));
                 return make_ready_future<>();
             });
@@ -3151,6 +3183,7 @@ future<std::unordered_map<sstring, column_family::snapshot_details>> column_fami
 }
 
 future<> column_family::flush() {
+    STAP_PROBE(scylla, explicit_flush);
     _stats.pending_flushes++;
 
     // highest_flushed_rp is only updated when we flush. If the memtable is currently alive, then
@@ -3168,12 +3201,14 @@ future<> column_family::flush() {
 }
 
 future<> column_family::flush(const db::replay_position& pos) {
+    STAP_PROBE(scylla, explicit_flush_with_rp);
     // Technically possible if we've already issued the
     // sstable write, but it is not done yet.
     if (pos < _highest_flushed_rp) {
         return make_ready_future<>();
     }
 
+    _config.cf_stats->memory_pressure_memtable_flushes++;
     // TODO: Origin looks at "secondary" memtables
     // It also consideres "minReplayPosition", which is simply where
     // the CL "started" (the first ever RP in this run).

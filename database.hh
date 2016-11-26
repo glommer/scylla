@@ -339,6 +339,10 @@ struct cf_stats {
     int64_t clustering_filter_fast_path_count = 0;
     // how many sstables survived the clustering key checks
     int64_t surviving_sstables_after_clustering_filter = 0;
+
+    uint64_t memtable_flushes;
+    uint64_t commitlog_memtable_flushes;
+    uint64_t memory_pressure_memtable_flushes;
 };
 
 class column_family {
@@ -994,6 +998,7 @@ class database {
     };
 
     lw_shared_ptr<db_stats> _stats;
+    friend class dirty_memory_manager;
 
     std::unique_ptr<db::config> _cfg;
     size_t _memtable_total_space = 500 << 20;
