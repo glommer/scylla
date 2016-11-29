@@ -392,6 +392,9 @@ memtable::apply(memtable& mt) {
 
 void
 memtable::apply(const mutation& m, const db::replay_position& rp) {
+    if (_memtable_list && empty()) {
+        _memtable_list->on_first_mutation(*this);
+    }
     with_allocator(allocator(), [this, &m] {
         _allocating_section(*this, [&, this] {
           with_linearized_managed_bytes([&] {
@@ -405,6 +408,9 @@ memtable::apply(const mutation& m, const db::replay_position& rp) {
 
 void
 memtable::apply(const frozen_mutation& m, const schema_ptr& m_schema, const db::replay_position& rp) {
+    if (_memtable_list && empty()) {
+        _memtable_list->on_first_mutation(*this);
+    }
     with_allocator(allocator(), [this, &m, &m_schema] {
         _allocating_section(*this, [&, this] {
           with_linearized_managed_bytes([&] {

@@ -153,6 +153,7 @@ class dirty_memory_manager: public logalloc::region_group_reclaimer {
     friend class flush_token;
     std::unordered_map<const logalloc::region*, flush_token> _flush_manager;
 
+    memtable_flush_order _flush_order;
     future<> _waiting_flush;
 protected:
     virtual void start_reclaiming() override;
@@ -183,6 +184,11 @@ public:
 
     const logalloc::region_group& region_group() const {
         return _region_group;
+    }
+
+    void add_to_flush_queue(memtable& mt) {
+        _flush_order.push_back(mt);
+        _should_flush.signal();
     }
 
     void revert_potentially_cleaned_up_memory(logalloc::region* from, int64_t delta) {
@@ -352,6 +358,12 @@ public:
     // wouldn't happen anyway. Keeping the memtable in memory will potentially increase the time it
     // spends in memory allowing for more coalescing opportunities.
     future<> request_flush();
+
+    void on_first_mutation(memtable& mt) {
+        if (may_flush()) {
+            _dirty_memory_manager->add_to_flush_queue(mt);
+        }
+    }
 private:
     lw_shared_ptr<memtable> new_memtable() {
         return make_lw_shared<memtable>(_current_schema(), this);
