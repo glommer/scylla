@@ -1661,7 +1661,7 @@ database::database(const db::config& cfg)
     // Note that even if we didn't allow extra memory, we would still want to keep system requests
     // in a different region group. This is because throttled requests are serviced in FIFO order,
     // and we don't want system requests to be waiting for a long time behind user requests.
-    , _system_dirty_memory_manager(*this, _memtable_total_space / 2 + (10 << 20))
+    , _system_dirty_memory_manager(*this, std::max(size_t(10 << 20), _memtable_total_space / 100))
     // The total space that can be used by memtables is _memtable_total_space, but we will only
     // allow the region_group to grow to half of that. This is because of virtual_dirty: memtables
     // can take a long time to flush, and if we are using the maximum amount of memory possible,
@@ -1675,7 +1675,7 @@ database::database(const db::config& cfg)
     // memory used by the memtables, that effectively creates two sub-regions inside the dirty
     // region group, of equal size. In the worst case, we will have _memtable_total_space dirty
     // bytes used, and half of that already virtually freed.
-    , _dirty_memory_manager(*this, &_system_dirty_memory_manager, _memtable_total_space / 2)
+    , _dirty_memory_manager(*this, _memtable_total_space / 2)
     // The same goes for streaming in respect to virtual dirty.
     , _streaming_dirty_memory_manager(*this, &_dirty_memory_manager, _streaming_memtable_total_space / 2)
     , _version(empty_version)
