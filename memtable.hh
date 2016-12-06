@@ -100,6 +100,7 @@ public:
     using partitions_type = bi::set<memtable_entry,
         bi::member_hook<memtable_entry, bi::set_member_hook<>, &memtable_entry::_link>,
         bi::compare<memtable_entry::compare>>;
+    bi::list_member_hook<> _flush_order;
 private:
     memtable_list *_memtable_list;
     schema_ptr _schema;
@@ -177,3 +178,6 @@ public:
 
     friend class iterator_reader;
 };
+
+using memtable_flush_order = bi::list<memtable,
+                                      bi::member_hook<memtable, bi::list_member_hook<>, &memtable::_flush_order>>;

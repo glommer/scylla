@@ -2591,13 +2591,8 @@ future<> dirty_memory_manager::flush_one(memtable_list& mtlist, semaphore_units<
     auto* region = &(mtlist.back()->region());
     auto* region_group = mtlist.back()->region_group();
     auto schema = mtlist.back()->schema();
-    // Because the region groups are hierarchical, when we pick the biggest region creating pressure
-    // (in the memory-driven flush case) we may be picking a memtable that is placed in a region
-    // group below ours. That's totally fine and we can certainly use our semaphore to account for
-    // it, but we need to destroy the semaphore units from the right flush manager.
-    //
-    // If we abandon size-driven flush and go with another flushing scheme that always guarantees
-    // that we're picking from this region_group, we can simplify this.
+    _flush_order.erase(_flush_order.iterator_to(*mtlist.back()));
+
     add_to_flush_manager(region, std::move(permit));
     return get_units(_background_work_flush_serializer, 1).then([this, &mtlist, region, region_group, schema] (auto permit) mutable {
         return mtlist.seal_active_memtable(memtable_list::flush_behavior::immediate).then_wrapped([this, region, region_group, schema, permit = std::move(permit)] (auto f) {
@@ -2623,7 +2618,7 @@ future<> dirty_memory_manager::flush_when_needed() {
     }
     // If there are explicit flushes requested, we must wait for them to finish before we stop.
     return do_until([this] { return _db_shutdown_requested; }, [this] {
-        auto has_work = [this] { return over_soft_limit() || _db_shutdown_requested; };
+        auto has_work = [this] { return _db_shutdown_requested || (!_flush_order.empty() && over_soft_limit()); };
         return _should_flush.wait(std::move(has_work)).then([this] {
             return get_flush_permit().then([this] (auto permit) {
                 // We give priority to explicit flushes. They are mainly user-initiated flushes,
@@ -2638,12 +2633,7 @@ future<> dirty_memory_manager::flush_when_needed() {
                 // There are many criteria that can be used to select what is the best memtable to
                 // flush. Most of the time we want some coordination with the commitlog to allow us to
                 // release commitlog segments as early as we can.
-                //
-                // But during pressure condition, we'll just pick the CF that holds the largest
-                // memtable. The advantage of doing this is that this is objectively the one that will
-                // release the biggest amount of memory and is less likely to be generating tiny
-                // SSTables.
-                memtable& candidate_memtable = memtable::from_region(*(this->_region_group.get_largest_region()));
+                memtable& candidate_memtable = _flush_order.front();
                 dirty_memory_manager* candidate_dirty_manager = &(dirty_memory_manager::from_region_group(candidate_memtable.region_group()));
                 // Do not wait. The semaphore will protect us against a concurrent flush. But we
                 // want to start a new one as soon as the permits are destroyed and the semaphore is
