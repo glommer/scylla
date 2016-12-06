@@ -158,21 +158,48 @@ class dirty_memory_manager: public logalloc::region_group_reclaimer {
 protected:
     virtual void start_reclaiming() override;
 public:
+    struct no_active_flush {
+        size_t max_size;
+    };
+
+    struct flush_with_allowance {
+        size_t size;
+        size_t allowance;
+    };
+
+    struct regular_flush {
+        size_t threshold;
+    };
+
     future<> shutdown();
 
-    dirty_memory_manager(database* db, size_t threshold)
-                                           : logalloc::region_group_reclaimer(threshold, threshold * 0.4)
-                                           , _db(db)
+    explicit dirty_memory_manager(database& db, no_active_flush threshold)
+                                           : logalloc::region_group_reclaimer(threshold.max_size)
+                                           , _db(&db)
                                            , _region_group(*this)
-                                           , _flush_serializer(1)
-                                           , _waiting_flush(flush_when_needed()) {}
+                                           , _flush_serializer(0)
+                                           , _waiting_flush(make_ready_future<>()) {}
 
-    dirty_memory_manager(database* db, dirty_memory_manager *parent, size_t threshold)
-                                                                         : logalloc::region_group_reclaimer(threshold, threshold * 0.4)
-                                                                         , _db(db)
+    explicit dirty_memory_manager(database& db, dirty_memory_manager *parent, flush_with_allowance threshold)
+                                                                         : logalloc::region_group_reclaimer(threshold.size / 2 + threshold.allowance, threshold.size * 0.4)
+                                                                         , _db(&db)
                                                                          , _region_group(&parent->_region_group, *this)
                                                                          , _flush_serializer(1)
                                                                          , _waiting_flush(flush_when_needed()) {}
+
+    explicit dirty_memory_manager(database& db, dirty_memory_manager *parent, regular_flush threshold)
+                                                                         : logalloc::region_group_reclaimer(threshold.threshold / 2, threshold.threshold * 0.4)
+                                                                         , _db(&db)
+                                                                         , _region_group(&parent->_region_group, *this)
+                                                                         , _flush_serializer(1)
+                                                                         , _waiting_flush(flush_when_needed()) {}
+
+    dirty_memory_manager() : logalloc::region_group_reclaimer()
+                           , _db(nullptr)
+                           , _region_group(*this)
+                           , _flush_serializer(1)
+                           , _waiting_flush(make_ready_future<>()) {}
+
 
     static dirty_memory_manager& from_region_group(logalloc::region_group *rg) {
         return *(boost::intrusive::get_parent_from_member(rg, &dirty_memory_manager::_region_group));
@@ -244,19 +271,7 @@ public:
     }
 };
 
-struct streaming_dirty_memory_manager: public dirty_memory_manager {
-    streaming_dirty_memory_manager(database& db, dirty_memory_manager *parent, size_t threshold) : dirty_memory_manager(&db, parent, threshold) {}
-};
-
-struct memtable_dirty_memory_manager: public dirty_memory_manager {
-    memtable_dirty_memory_manager(database& db, dirty_memory_manager* parent, size_t threshold) : dirty_memory_manager(&db, parent, threshold) {}
-    // This constructor will be called for the system tables (no parent). Its flushes are usually drive by us
-    // and not the user, and tend to be small in size. So we'll allow only two slots.
-    memtable_dirty_memory_manager(database& db, size_t threshold) : dirty_memory_manager(&db, threshold) {}
-    memtable_dirty_memory_manager() : dirty_memory_manager(nullptr, std::numeric_limits<size_t>::max()) {}
-};
-
-extern thread_local memtable_dirty_memory_manager default_dirty_memory_manager;
+extern thread_local dirty_memory_manager default_dirty_memory_manager;
 
 // We could just add all memtables, regardless of types, to a single list, and
 // then filter them out when we read them. Here's why I have chosen not to do
@@ -1060,9 +1075,12 @@ private:
     std::unique_ptr<db::config> _cfg;
     size_t _memtable_total_space = 500 << 20;
     size_t _streaming_memtable_total_space = 500 << 20;
-    memtable_dirty_memory_manager _system_dirty_memory_manager;
-    memtable_dirty_memory_manager _dirty_memory_manager;
-    streaming_dirty_memory_manager _streaming_dirty_memory_manager;
+
+    dirty_memory_manager _overall_dirty_memory_container;
+    dirty_memory_manager _system_dirty_memory_manager;
+    dirty_memory_manager _dirty_memory_manager;
+    dirty_memory_manager _streaming_dirty_memory_manager;
+
     semaphore _read_concurrency_sem{max_concurrent_reads()};
     restricted_mutation_reader_config _read_concurrency_config;
     semaphore _system_read_concurrency_sem{max_system_concurrent_reads()};

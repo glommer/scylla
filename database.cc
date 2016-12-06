@@ -92,7 +92,7 @@ public:
 
 // Used for tests where the CF exists without a database object. We need to pass a valid
 // dirty_memory manager in that case.
-thread_local memtable_dirty_memory_manager default_dirty_memory_manager;
+thread_local dirty_memory_manager default_dirty_memory_manager;
 
 lw_shared_ptr<memtable_list>
 column_family::make_memory_only_memtable_list() {
@@ -1653,6 +1653,23 @@ database::database(const db::config& cfg)
         return memtable_total_space;
     }())
     , _streaming_memtable_total_space(_memtable_total_space / 4)
+    // The total amount of dirty memory is divided up into three groups: system, normal, and
+    // streaming. They are organized in a tree as siblings sitting below the root, the
+    // _overall_dirty_memory_container. That container has a limit that is equal to
+    // _memtable_total_space plus a system allowance, and it will guarantee that when the sum of the
+    // children's memory reach that limit, we'll throttle.
+    //
+    // The overall_dirty_memory_container doesn't really hold any memtables and just work as a
+    // container. For that reason, there is no need to apply any virtual dirty considerations to it.
+    // It also doesn't ever flush. For that to work without freezing the system we need to guarantee
+    // that at least one group below it will have triggered a flush already when the
+    // overall_dirty_memory_container reaches its limit.
+    //
+    // Since all regions have a soft limit threshold that triggers the flush, we can calculate what
+    // should the maximum threshold be to guarantee that condition. Flushes have to happen at the
+    // latest when the region fills up to 44 % of their size (recall that streaming is 4 times
+    // smaller, 0.44 + 0.44 + 0.11 = 99 %)
+    , _overall_dirty_memory_container(*this, dirty_memory_manager::no_active_flush{_memtable_total_space + (10 << 20)})
     // Allow system tables a pool of 10 MB extra memory to write over the threshold. Under normal
     // circumnstances it won't matter, but when we throttle, some system requests will be able to
     // keep being serviced even if user requests are not.
@@ -1660,7 +1677,7 @@ database::database(const db::config& cfg)
     // Note that even if we didn't allow extra memory, we would still want to keep system requests
     // in a different region group. This is because throttled requests are serviced in FIFO order,
     // and we don't want system requests to be waiting for a long time behind user requests.
-    , _system_dirty_memory_manager(*this, _memtable_total_space / 2 + (10 << 20))
+    , _system_dirty_memory_manager(*this, &_overall_dirty_memory_container, dirty_memory_manager::flush_with_allowance{_memtable_total_space, (10 << 20)})
     // The total space that can be used by memtables is _memtable_total_space, but we will only
     // allow the region_group to grow to half of that. This is because of virtual_dirty: memtables
     // can take a long time to flush, and if we are using the maximum amount of memory possible,
@@ -1674,9 +1691,9 @@ database::database(const db::config& cfg)
     // memory used by the memtables, that effectively creates two sub-regions inside the dirty
     // region group, of equal size. In the worst case, we will have _memtable_total_space dirty
     // bytes used, and half of that already virtually freed.
-    , _dirty_memory_manager(*this, &_system_dirty_memory_manager, _memtable_total_space / 2)
+    , _dirty_memory_manager(*this, &_overall_dirty_memory_container, dirty_memory_manager::regular_flush{_memtable_total_space})
     // The same goes for streaming in respect to virtual dirty.
-    , _streaming_dirty_memory_manager(*this, &_dirty_memory_manager, _streaming_memtable_total_space / 2)
+    , _streaming_dirty_memory_manager(*this, &_overall_dirty_memory_container, dirty_memory_manager::regular_flush{_streaming_memtable_total_space})
     , _version(empty_version)
     , _enable_incremental_backups(cfg.incremental_backups())
 {
@@ -2830,6 +2847,8 @@ database::stop() {
         return _dirty_memory_manager.shutdown();
     }).then([this] {
         return _streaming_dirty_memory_manager.shutdown();
+    }).then([this] {
+        return _overall_dirty_memory_container.shutdown();
     });
 }
 
