@@ -2126,7 +2126,7 @@ void region_group::release_requests() noexcept {
     });
 }
 
-region* region_group::get_largest_region() {
+region* region_group::get_best_flush_candidate() {
     if (!_maximal_rg || _maximal_rg->_regions.empty()) {
         return nullptr;
     }

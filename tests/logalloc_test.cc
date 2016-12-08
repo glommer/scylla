@@ -862,7 +862,7 @@ class test_reclaimer: public region_group_reclaimer {
 public:
     virtual void start_reclaiming() override {
         while (this->under_pressure()) {
-            size_t reclaimed = test_async_reclaim_region::from_region(_rg.get_largest_region()).evict();
+            size_t reclaimed = test_async_reclaim_region::from_region(_rg.get_best_flush_candidate()).evict();
             _result_accumulator->_reclaim_sizes.push_back(reclaimed);
         }
     }

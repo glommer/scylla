@@ -2647,7 +2647,7 @@ future<> dirty_memory_manager::flush_when_needed() {
                 // memtable. The advantage of doing this is that this is objectively the one that will
                 // release the biggest amount of memory and is less likely to be generating tiny
                 // SSTables.
-                memtable& candidate_memtable = memtable::from_region(*(this->_region_group.get_largest_region()));
+                memtable& candidate_memtable = memtable::from_region(*(this->_region_group.get_best_flush_candidate()));
                 dirty_memory_manager* candidate_dirty_manager = &(dirty_memory_manager::from_region_group(candidate_memtable.region_group()));
                 // Do not wait. The semaphore will protect us against a concurrent flush. But we
                 // want to start a new one as soon as the permits are destroyed and the semaphore is
@@ -2680,7 +2680,7 @@ future<> dirty_memory_container::flush_when_needed() {
                     return make_ready_future<>();
                 }
 
-                memtable& candidate_memtable = memtable::from_region(*(this->_region_group.get_largest_region()));
+                memtable& candidate_memtable = memtable::from_region(*(this->_region_group.get_best_flush_candidate()));
                 dirty_memory_manager* candidate_dirty_manager = &(dirty_memory_manager::from_region_group(candidate_memtable.region_group()));
                 candidate_dirty_manager->notify_global_pressure(std::move(permit));
                 return make_ready_future<>();
