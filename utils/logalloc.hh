@@ -60,14 +60,22 @@ using eviction_fn = std::function<memory::reclaiming_result()>;
 // those methods - which are a nop by default - the callers can take action to aid the LSA in
 // alleviating pressure.
 class region_group_reclaimer {
+public:
+    enum class tracking_order { size_based };
 protected:
     size_t _threshold;
     size_t _soft_limit;
     bool _under_pressure = false;
     bool _under_soft_pressure = false;
+    tracking_order _tracking_order = tracking_order::size_based;
+
     virtual void start_reclaiming() {}
     virtual void stop_reclaiming() {}
 public:
+    region_group_reclaimer::tracking_order tracking_order() {
+        return _tracking_order;
+    }
+
     bool under_pressure() const {
         return _under_pressure;
     }
@@ -128,6 +136,8 @@ class region_group {
     static region_group_reclaimer no_reclaimer;
 
     struct region_evictable_occupancy_ascending_less_comparator {
+        region_group_reclaimer* _reclaimer;
+        region_evictable_occupancy_ascending_less_comparator(region_group_reclaimer& rgr) : _reclaimer(&rgr) {}
         bool operator()(region_impl* r1, region_impl* r2) const;
     };
 
@@ -240,7 +250,7 @@ public:
     // the total memory for the region group (and all of its parents) is lower or equal to the
     // region_group's throttle_treshold (and respectively for its parents).
     region_group(region_group_reclaimer& reclaimer = no_reclaimer) : region_group(nullptr, reclaimer) {}
-    region_group(region_group* parent, region_group_reclaimer& reclaimer = no_reclaimer) : _parent(parent), _reclaimer(reclaimer) {
+    region_group(region_group* parent, region_group_reclaimer& reclaimer = no_reclaimer) : _parent(parent), _reclaimer(reclaimer), _regions(_reclaimer) {
         if (_parent) {
             _parent->add(this);
         }

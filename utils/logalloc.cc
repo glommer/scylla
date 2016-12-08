@@ -1604,7 +1604,11 @@ memory::reclaiming_result tracker::reclaim() {
 
 bool
 region_group::region_evictable_occupancy_ascending_less_comparator::operator()(region_impl* r1, region_impl* r2) const {
-    return r1->evictable_occupancy().total_space() < r2->evictable_occupancy().total_space();
+    if (_reclaimer->tracking_order() == region_group_reclaimer::tracking_order::size_based) {
+        return r1->evictable_occupancy().total_space() < r2->evictable_occupancy().total_space();
+    } else {
+        assert(0);
+    }
 }
 
 region::region()
