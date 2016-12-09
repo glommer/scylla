@@ -131,8 +131,27 @@ class dirty_memory_manager: public logalloc::region_group_reclaimer {
     int64_t _dirty_bytes_released_pre_accounted = 0;
 
     future<> flush_when_needed();
+
+    // Permit and Parent Permit
+    // ------------------------
+    //
+    // When a region flushes, we want to acquire a semaphore to make sure there are no concurrent
+    // flushes. The units for that semaphore are stored under "permit".
+    //
+    // Also, if a region one its ancestors happen to also be under pressure, that may be enough to
+    // bring relief so we don't want any other ancestor region to initiate a flush at this time. To
+    // guarantee that, every time we start a flush, we acquire units for all ancestors, and store
+    // them at parent_permits.
+    //
+    // Note that those units are acquired by consume(), which can bring the semaphore's total usage
+    // higher than 1 if all sibling regions are flushing at the same time.  That means that the
+    // parent will only be able to acquire its own semaphore when no other child is flushing. In
+    // which case it will pick the best and initiate a flush.
+    struct flush_permit;
+
     struct flush_permit {
         semaphore_units<> permit;
+        std::vector<semaphore_units<>> parent_permits;
 
         flush_permit(semaphore_units<>&& permit) : permit(std::move(permit)) {}
     };
@@ -144,7 +163,6 @@ class dirty_memory_manager: public logalloc::region_group_reclaimer {
     std::unordered_map<const logalloc::region*, flush_permit> _flush_manager;
 
     future<> _waiting_flush;
-protected:
     virtual void start_reclaiming() override;
 
     bool has_pressure() const {
@@ -153,19 +171,60 @@ protected:
 public:
     future<> shutdown();
 
-    dirty_memory_manager(database* db, size_t threshold)
-                                           : logalloc::region_group_reclaimer(threshold, threshold * 0.4)
-                                           , _db(db)
-                                           , _region_group(*this)
-                                           , _flush_serializer(1)
-                                           , _waiting_flush(flush_when_needed()) {}
+    // Limits and pressure conditions:
+    // ===============================
+    //
+    // Virtual Dirty
+    // -------------
+    // We can't free memory until the whole memtable is flushed because we need to keep it in memory
+    // until the end, but we can fake freeing memory. When we are done with an element of the
+    // memtable, we will update the region group pretending memory just went down by that amount.
+    //
+    // Because the amount of memory that we pretend to free should be close enough to the actual
+    // memory used by the memtables, that effectively creates two sub-regions inside the dirty
+    // region group, of equal size. In the worst case, we will have <memtable_total_space> dirty
+    // bytes used, and half of that already virtually freed.
+    //
+    // Hard Limit
+    // ----------
+    // The total space that can be used by memtables in each group is defined by the threshold, but
+    // we will only allow the region_group to grow to half of that. This is because of virtual_dirty
+    // as explained above. Because virtual dirty is implemented by reducing the usage in the
+    // region_group directly on partition written, we want to throttle every time half of the memory
+    // as seen by the region_group. To achieve that we need to set the hard limit (first parameter
+    // of the region_group_reclaimer) to 1/2 of the user-supplied threshold
+    //
+    // Soft Limit
+    // ----------
+    // When the soft limit is hit, no throttle happens. The soft limit exists because we don't want
+    // to start flushing only when the limit is hit, but a bit earlier instead. If we were to start
+    // flushing only when the hard limit is hit, workloads in which the disk is fast enough to cope
+    // would see latency added to some requests unnecessarily.
+    //
+    // We then set the soft limit to 80 % of the virtual dirty hard limit, which is equal to 40 % of
+    // the user-supplied threshold.
+    //
+    // We want the container to initiate flushes only when the total amount of memory is under
+    // pressure, with the total usage coming from different groups.
+    dirty_memory_manager(database& db, size_t threshold)
+        : logalloc::region_group_reclaimer(threshold / 2, threshold * 0.40)
+        , _db(&db)
+        , _region_group(*this)
+        , _flush_serializer(1)
+        , _waiting_flush(flush_when_needed()) {}
 
-    dirty_memory_manager(database* db, dirty_memory_manager *parent, size_t threshold)
-                                                                         : logalloc::region_group_reclaimer(threshold, threshold * 0.4)
-                                                                         , _db(db)
-                                                                         , _region_group(&parent->_region_group, *this)
-                                                                         , _flush_serializer(1)
-                                                                         , _waiting_flush(flush_when_needed()) {}
+    dirty_memory_manager(database& db, dirty_memory_manager *parent, size_t threshold)
+        : logalloc::region_group_reclaimer(threshold / 2, threshold * 0.4)
+        , _db(&db)
+        , _region_group(&parent->_region_group, *this)
+        , _flush_serializer(1)
+        , _waiting_flush(flush_when_needed()) {}
+
+    dirty_memory_manager() : logalloc::region_group_reclaimer()
+        , _db(nullptr)
+        , _region_group(*this)
+        , _flush_serializer(1)
+        , _waiting_flush(make_ready_future<>()) {}
 
     static dirty_memory_manager& from_region_group(logalloc::region_group *rg) {
         return *(boost::intrusive::get_parent_from_member(rg, &dirty_memory_manager::_region_group));
@@ -224,19 +283,7 @@ public:
     }
 };
 
-struct streaming_dirty_memory_manager: public dirty_memory_manager {
-    streaming_dirty_memory_manager(database& db, dirty_memory_manager *parent, size_t threshold) : dirty_memory_manager(&db, parent, threshold) {}
-};
-
-struct memtable_dirty_memory_manager: public dirty_memory_manager {
-    memtable_dirty_memory_manager(database& db, dirty_memory_manager* parent, size_t threshold) : dirty_memory_manager(&db, parent, threshold) {}
-    // This constructor will be called for the system tables (no parent). Its flushes are usually drive by us
-    // and not the user, and tend to be small in size. So we'll allow only two slots.
-    memtable_dirty_memory_manager(database& db, size_t threshold) : dirty_memory_manager(&db, threshold) {}
-    memtable_dirty_memory_manager() : dirty_memory_manager(nullptr, std::numeric_limits<size_t>::max()) {}
-};
-
-extern thread_local memtable_dirty_memory_manager default_dirty_memory_manager;
+extern thread_local dirty_memory_manager default_dirty_memory_manager;
 
 // We could just add all memtables, regardless of types, to a single list, and
 // then filter them out when we read them. Here's why I have chosen not to do
@@ -1037,9 +1084,12 @@ private:
     std::unique_ptr<db::config> _cfg;
     size_t _memtable_total_space = 500 << 20;
     size_t _streaming_memtable_total_space = 500 << 20;
-    memtable_dirty_memory_manager _system_dirty_memory_manager;
-    memtable_dirty_memory_manager _dirty_memory_manager;
-    streaming_dirty_memory_manager _streaming_dirty_memory_manager;
+
+    dirty_memory_manager _overall_dirty_memory_container;
+    dirty_memory_manager _system_dirty_memory_manager;
+    dirty_memory_manager _dirty_memory_manager;
+    dirty_memory_manager _streaming_dirty_memory_manager;
+
     semaphore _read_concurrency_sem{max_concurrent_reads()};
     restricted_mutation_reader_config _read_concurrency_config;
     semaphore _system_read_concurrency_sem{max_system_concurrent_reads()};
