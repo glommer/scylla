@@ -259,6 +259,11 @@ public:
     }
     region_group& operator=(const region_group&) = delete;
     region_group& operator=(region_group&&) = delete;
+
+    region_group* parent() {
+        return _parent;
+    }
+
     size_t memory_used() const {
         return _total_memory;
     }
