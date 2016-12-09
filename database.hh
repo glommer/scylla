@@ -225,14 +225,14 @@ public:
     // We want the container to initiate flushes only when the total amount of memory is under
     // pressure, with the total usage coming from different groups.
     dirty_memory_manager(database& db, size_t threshold)
-        : logalloc::region_group_reclaimer(threshold / 2, threshold * 0.41)
+        : logalloc::region_group_reclaimer(threshold / 2, threshold * 0.41, region_group_reclaimer::tracking_order::age_based)
         , _db(&db)
         , _region_group(*this)
         , _flush_serializer(1)
         , _waiting_flush(make_ready_future<>()) {}
 
     dirty_memory_manager(database& db, dirty_memory_manager *parent, size_t threshold)
-        : logalloc::region_group_reclaimer(threshold / 2, threshold * 0.4)
+        : logalloc::region_group_reclaimer(threshold / 2, threshold * 0.4, region_group_reclaimer::tracking_order::age_based)
         , _db(&db)
         , _region_group(&parent->_region_group, *this)
         , _flush_serializer(1)
