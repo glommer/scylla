@@ -991,6 +991,7 @@ class region_impl : public allocation_strategy {
     static constexpr float max_occupancy_for_compaction = 0.85; // FIXME: make configurable
     static constexpr float max_occupancy_for_compaction_on_idle = 0.93; // FIXME: make configurable
     static constexpr size_t max_managed_object_size = segment::size * 0.1;
+    static thread_local uint64_t vectored_age;
 
     // single-byte flags
     struct obj_flags {
@@ -1103,6 +1104,7 @@ private:
     region* _region = nullptr;
     region_group* _group = nullptr;
     segment* _active = nullptr;
+    uint64_t _age = 0;
     size_t _active_offset;
     segment_heap _segments; // Contains only closed segments
     occupancy_stats _closed_occupancy;
@@ -1204,6 +1206,10 @@ private:
         shard_segment_pool.free_segment(seg);
         if (_group) {
             _evictable_space -= segment_size;
+            if (_evictable_space == 0) {
+                _age = 0;
+            }
+
             _group->decrease_usage(_heap_handle, -segment::size);
         }
     }
@@ -1212,6 +1218,9 @@ private:
         segment* seg = shard_segment_pool.new_segment(this);
         if (_group) {
             _evictable_space += segment_size;
+            if (_age == 0) {
+                _age = --vectored_age;
+            }
             _group->increase_usage(_heap_handle, segment::size);
         }
         return seg;
@@ -1313,6 +1322,11 @@ public:
     occupancy_stats evictable_occupancy() const {
         return occupancy_stats(_evictable_space, _evictable_space);
     }
+
+    uint64_t age() {
+        return _age;
+    }
+
     //
     // Returns true if this region can be compacted and compact() will make forward progress,
     // so that this will eventually stop:
@@ -1344,6 +1358,9 @@ public:
             _non_lsa_occupancy += occupancy_stats(0, allocated_size);
             if (_group) {
                  _evictable_space += allocated_size;
+                if (_age == 0) {
+                    _age = --vectored_age;
+                }
                 _group->increase_usage(_heap_handle, allocated_size);
             }
             shard_segment_pool.update_non_lsa_memory_in_use(allocated_size);
@@ -1362,6 +1379,9 @@ public:
             _non_lsa_occupancy -= occupancy_stats(0, allocated_size);
             if (_group) {
                  _evictable_space -= allocated_size;
+                 if (_evictable_space == 0) {
+                    _age = 0;
+                 }
                 _group->decrease_usage(_heap_handle, allocated_size);
             }
             shard_segment_pool.update_non_lsa_memory_in_use(-allocated_size);
@@ -1580,6 +1600,8 @@ public:
     friend class region_group::region_evictable_occupancy_ascending_less_comparator;
 };
 
+thread_local uint64_t region_impl::vectored_age = 0;
+
 void tracker::set_reclamation_step(size_t step_in_segments) {
     _impl->set_reclamation_step(step_in_segments);
 }
@@ -1604,8 +1626,10 @@ memory::reclaiming_result tracker::reclaim() {
 
 bool
 region_group::region_evictable_occupancy_ascending_less_comparator::operator()(region_impl* r1, region_impl* r2) const {
-    if (_reclaimer->tracking_order() == region_group_reclaimer::tracking_order::size_based) {
+    if (_reclaimer->current_tracking_order() == region_group_reclaimer::tracking_order::size_based) {
         return r1->evictable_occupancy().total_space() < r2->evictable_occupancy().total_space();
+    } else if (_reclaimer->current_tracking_order() == region_group_reclaimer::tracking_order::age_based) {
+        return r1->age() < r2->age();
     } else {
         assert(0);
     }
@@ -2076,8 +2100,17 @@ tracker::impl::~impl() {
 
 region_group_reclaimer region_group::no_reclaimer;
 
-uint64_t region_group::top_region_evictable_space() const {
-    return _regions.empty() ? 0 : _regions.top()->evictable_occupancy().total_space();
+uint64_t region_group::top_region_evictable_score() const {
+    if (_regions.empty()) {
+        return 0;
+    }
+    if (_reclaimer.current_tracking_order() == region_group_reclaimer::tracking_order::size_based) {
+        return _regions.top()->evictable_occupancy().total_space();
+    } else if (_reclaimer.current_tracking_order() == region_group_reclaimer::tracking_order::age_based) {
+        return _regions.top()->age();
+    } else {
+        return 0;
+    }
 }
 
 void region_group::release_requests() noexcept {

@@ -61,18 +61,18 @@ using eviction_fn = std::function<memory::reclaiming_result()>;
 // alleviating pressure.
 class region_group_reclaimer {
 public:
-    enum class tracking_order { size_based };
+    enum class tracking_order { size_based, age_based };
 protected:
     size_t _threshold;
     size_t _soft_limit;
     bool _under_pressure = false;
     bool _under_soft_pressure = false;
-    tracking_order _tracking_order = tracking_order::size_based;
+    const tracking_order _tracking_order;
 
     virtual void start_reclaiming() {}
     virtual void stop_reclaiming() {}
 public:
-    region_group_reclaimer::tracking_order tracking_order() {
+    region_group_reclaimer::tracking_order current_tracking_order() const {
         return _tracking_order;
     }
 
@@ -112,12 +112,12 @@ public:
         }
     }
 
-    region_group_reclaimer()
-        : _threshold(std::numeric_limits<size_t>::max()), _soft_limit(std::numeric_limits<size_t>::max()) {}
-    region_group_reclaimer(size_t threshold)
-        : _threshold(threshold), _soft_limit(threshold) {}
-    region_group_reclaimer(size_t threshold, size_t soft)
-        : _threshold(threshold), _soft_limit(soft) {}
+    region_group_reclaimer(region_group_reclaimer::tracking_order to = tracking_order::size_based)
+        : _threshold(std::numeric_limits<size_t>::max()), _soft_limit(std::numeric_limits<size_t>::max()), _tracking_order(to) {}
+    region_group_reclaimer(size_t threshold, region_group_reclaimer::tracking_order to = tracking_order::size_based)
+        : _threshold(threshold), _soft_limit(threshold), _tracking_order(to) {}
+    region_group_reclaimer(size_t threshold, size_t soft, region_group_reclaimer::tracking_order to = tracking_order::size_based)
+        : _threshold(threshold), _soft_limit(soft), _tracking_order(to) {}
 
     virtual ~region_group_reclaimer() {}
 
@@ -156,6 +156,8 @@ class region_group {
     //
     //      max(our_biggest_region, our_subtree_biggest_region)
     struct subgroup_maximal_region_ascending_less_comparator {
+        region_group_reclaimer* _reclaimer;
+        subgroup_maximal_region_ascending_less_comparator(region_group_reclaimer& rgr) : _reclaimer(&rgr) {}
         bool operator()(region_group* rg1, region_group* rg2) const {
             return rg1->maximal_score() < rg2->maximal_score();
         }
@@ -250,8 +252,11 @@ public:
     // the total memory for the region group (and all of its parents) is lower or equal to the
     // region_group's throttle_treshold (and respectively for its parents).
     region_group(region_group_reclaimer& reclaimer = no_reclaimer) : region_group(nullptr, reclaimer) {}
-    region_group(region_group* parent, region_group_reclaimer& reclaimer = no_reclaimer) : _parent(parent), _reclaimer(reclaimer), _regions(_reclaimer) {
+    region_group(region_group* parent, region_group_reclaimer& reclaimer = no_reclaimer)
+        : _parent(parent), _reclaimer(reclaimer), _subgroups(_reclaimer), _regions(_reclaimer)
+    {
         if (_parent) {
+            assert(_parent->_reclaimer.current_tracking_order() == _reclaimer.current_tracking_order());
             _parent->add(this);
         }
     }
@@ -454,14 +459,14 @@ private:
 
     void release_requests() noexcept;
 
-    uint64_t top_region_evictable_space() const;
-
     uint64_t maximal_score() const {
         return _maximal_score;
     }
 
+    uint64_t top_region_evictable_score() const;
+
     void update_maximal_rg() {
-        auto my_score = top_region_evictable_space();
+        auto my_score = top_region_evictable_score();
         auto children_score = _subgroups.empty() ? 0 : _subgroups.top()->maximal_score();
         auto old_maximal_score = _maximal_score;
         if (children_score > my_score) {
@@ -470,7 +475,7 @@ private:
             _maximal_rg = this;
         }
 
-        _maximal_score = _maximal_rg->top_region_evictable_space();
+        _maximal_score = _maximal_rg->top_region_evictable_score();
         if (_parent) {
             // binomial heap update boost bug.
             if (_maximal_score > old_maximal_score) {

@@ -879,8 +879,10 @@ public:
         return _rg;
     }
 
-    test_reclaimer(size_t threshold) : region_group_reclaimer(threshold), _result_accumulator(this), _rg(*this) {}
-    test_reclaimer(test_reclaimer& parent, size_t threshold) : region_group_reclaimer(threshold), _result_accumulator(&parent), _rg(&parent._rg, *this) {}
+    test_reclaimer(size_t threshold, tracking_order to = tracking_order::size_based)
+        : region_group_reclaimer(threshold, to), _result_accumulator(this), _rg(*this) {}
+    test_reclaimer(test_reclaimer& parent, size_t threshold, tracking_order to = tracking_order::size_based)
+        : region_group_reclaimer(threshold, to), _result_accumulator(&parent), _rg(&parent._rg, *this) {}
 };
 
 SEASTAR_TEST_CASE(test_region_groups_basic_throttling_simple_active_reclaim) {
@@ -1035,5 +1037,43 @@ SEASTAR_TEST_CASE(test_region_groups_basic_throttling_active_reclaim_no_double_r
 
         BOOST_REQUIRE_EQUAL(root.reclaim_sizes().size(), 1);
         BOOST_REQUIRE_EQUAL(root.reclaim_sizes()[0], logalloc::segment_size);
+    });
+}
+
+SEASTAR_TEST_CASE(test_age_based_tracking_order) {
+    return seastar::async([] {
+        test_reclaimer root(logalloc::segment_size, region_group_reclaimer::tracking_order::age_based);
+        test_reclaimer left_leaf(root, logalloc::segment_size, region_group_reclaimer::tracking_order::age_based);
+        test_reclaimer right_leaf(root, logalloc::segment_size, region_group_reclaimer::tracking_order::age_based);
+
+        BOOST_REQUIRE(root.rg().get_best_flush_candidate() == nullptr);
+        auto oldest_region = std::make_unique<logalloc::region>(left_leaf.rg());
+        BOOST_REQUIRE(root.rg().get_best_flush_candidate() == nullptr);
+
+        std::vector<managed_bytes> oldest_alloc;
+        with_allocator(oldest_region->allocator(), [&oldest_alloc] {
+            oldest_alloc.push_back(bytes(bytes::initialized_later(), 128));
+        });
+
+        BOOST_REQUIRE_EQUAL(root.rg().get_best_flush_candidate(), &*oldest_region);
+
+        auto newest_region = std::make_unique<logalloc::region>(left_leaf.rg());
+        std::vector<managed_bytes> newest_alloc;
+        with_allocator(newest_region->allocator(), [&newest_alloc] {
+            newest_alloc.push_back(bytes(bytes::initialized_later(), 512));
+        });
+        BOOST_REQUIRE_EQUAL(root.rg().get_best_flush_candidate(), &*oldest_region);
+
+        with_allocator(oldest_region->allocator(), [oldest_alloc = std::move(oldest_alloc)] () mutable {
+            oldest_alloc.clear();
+        });
+        oldest_region = {};
+
+        BOOST_REQUIRE_EQUAL(root.rg().get_best_flush_candidate(), &*newest_region);
+
+        with_allocator(newest_region->allocator(), [newest_alloc = std::move(newest_alloc)] () mutable {
+            newest_alloc.clear();
+        });
+        newest_region = {};
     });
 }
