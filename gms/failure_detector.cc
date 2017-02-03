@@ -259,9 +259,9 @@ void failure_detector::interpret(inet_address ep) {
 
     if (PHI_FACTOR * phi > get_phi_convict_threshold()) {
         logger.trace("failure_detector: notifying listeners that {} is down", ep);
-        logger.trace("failure_detector: intervals: {} mean: {}", hb_wnd, hb_wnd.mean());
+        logger.info("failure_detector: intervals: {} mean: {}", hb_wnd, hb_wnd.mean());
         for (auto& listener : _fd_evnt_listeners) {
-            logger.debug("failure_detector: convict ep={} phi={}", ep, phi);
+            logger.info("failure_detector: convict ep={} phi={}", ep, phi);
             listener->convict(ep, phi);
         }
     }
