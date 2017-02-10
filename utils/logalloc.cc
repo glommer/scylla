@@ -33,6 +33,7 @@
 #include <seastar/core/align.hh>
 #include <seastar/core/print.hh>
 #include <seastar/core/metrics.hh>
+#include <sys/sdt.h>
 
 #include "utils/logalloc.hh"
 #include "log.hh"
@@ -628,6 +629,7 @@ size_t segment_pool::reclaim_segments(size_t target) {
 
 segment* segment_pool::allocate_segment()
 {
+    STAP_PROBE(scylla, segment_pool_allocate_segment_start);
     //
     // When allocating a segment we want to avoid two things:
     //  - allocating a new zone could cause other to be shrunk or removed
@@ -648,17 +650,18 @@ segment* segment_pool::allocate_segment()
         desc._zone = &zone;
     };
 
+    segment *seg = nullptr;
     do {
         tracker_reclaimer_lock rl;
         if (!_not_full_zones.empty()) {
             auto& zone = _not_full_zones.front();
-            auto seg = zone.allocate_segment();
+            seg = zone.allocate_segment();
             set_zone(seg, zone);
             _free_segments_in_zones--;
             if (!zone.free_segment_count()) {
                 _not_full_zones.pop_front();
             }
-            return seg;
+            break;
         }
         if (can_allocate_more_memory(segment::size)) {
             segment_zone* zone;
@@ -670,21 +673,22 @@ segment* segment_pool::allocate_segment()
             } catch (const std::bad_alloc&) {
                 continue;
             }
-            auto seg = zone->allocate_segment();
+            seg = zone->allocate_segment();
             set_zone(seg, *zone);
             _all_zones.insert(*zone);
             if (zone->free_segment_count()) {
                 _free_segments_in_zones += zone->free_segment_count();
                 _not_full_zones.push_front(*zone);
             }
-            return seg;
+            break;
         }
     } while (shard_tracker().get_impl().compact_and_evict(shard_tracker().reclamation_step() * segment::size));
-    if (shard_tracker().should_abort_on_bad_alloc()) {
+    if (!seg && shard_tracker().should_abort_on_bad_alloc()) {
         logger.error("Aborting due to segment allocation failure");
         abort();
     }
-    return nullptr;
+    STAP_PROBE(scylla, segment_pool_allocate_segment_end);
+    return seg;
 }
 
 void segment_pool::deallocate_segment(segment* seg)
@@ -700,6 +704,7 @@ void segment_pool::deallocate_segment(segment* seg)
 }
 
 void segment_pool::refill_emergency_reserve() {
+    STAP_PROBE(scylla, refill_emergency_reserve_start);
     while (_emergency_reserve.size() < _emergency_reserve_max) {
         auto seg = allocate_segment();
         if (!seg) {
@@ -707,6 +712,7 @@ void segment_pool::refill_emergency_reserve() {
         }
         _emergency_reserve.push(seg);
     }
+    STAP_PROBE(scylla, refill_emergency_reserve_end);
 }
 
 size_t segment_pool::trim_emergency_reserve_to_max() {
