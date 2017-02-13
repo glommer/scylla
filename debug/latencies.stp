@@ -1,0 +1,29 @@
+#!/usr/bin/stap
+
+# usage: stap latencies.stp <scylla binary> <probe_point_name>
+# 
+# This script can be used to provide latency histograms between two points of interest
+# that are named according to the convention: <probe_point_name>_start and <probe_point_name>_end.
+global start_time
+global latencies;
+
+probe process(@1).mark(@2 "_start") {
+    start_time[tid()] = gettimeofday_us()
+}
+
+probe process(@1).mark(@2 "_end") {
+    if (start_time[tid()]) {
+        lat = (gettimeofday_us() - start_time[tid()]);
+        latencies <<< lat;
+        delete start_time[tid()]
+    }
+}
+
+probe begin {
+    printf("Measuring latency in usec for " @2);
+}
+
+probe end {
+    println();
+    print(@hist_log(latencies));
+}
