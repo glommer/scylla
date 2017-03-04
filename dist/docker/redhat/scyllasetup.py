@@ -2,6 +2,7 @@ import subprocess
 import logging
 import yaml
 import os
+import shutil
 
 class ScyllaSetup:
     def __init__(self, arguments):
@@ -15,6 +16,8 @@ class ScyllaSetup:
         self._memory = arguments.memory
         self._overprovisioned = arguments.overprovisioned
         self._docker_conf_file = "/etc/scylla.d/docker.conf"
+        self._scylla_base_yaml = "/etc/scylla/scylla.yaml"
+        self._scylla_docker_yaml = "/etc/scylla/scylla.docker.yaml"
         self._is_first_boot = not os.path.exists(self._docker_conf_file)
 
     def _run(self, *args, **kwargs):
@@ -35,7 +38,8 @@ class ScyllaSetup:
             self._run(['/usr/lib/scylla/scylla_io_setup'])
 
     def scyllaYAML(self):
-        configuration = yaml.load(open('/etc/scylla/scylla.yaml'))
+        shutil.copyfile(self._scylla_base_yaml, self._scylla_docker_yaml)
+        configuration = yaml.load(open(self._scylla_docker_yaml))
         if self._listenAddress is None:
             self._listenAddress = subprocess.check_output(['hostname', '-i']).decode('ascii').strip()
         configuration['listen_address'] = self._listenAddress
@@ -53,7 +57,7 @@ class ScyllaSetup:
             configuration['broadcast_address'] = self._broadcastAddress
         if self._broadcastRpcAddress is not None:
             configuration['broadcast_rpc_address'] = self._broadcastRpcAddress
-        with open('/etc/scylla/scylla.yaml', 'w') as file:
+        with open(self._scylla_docker_yaml, 'w') as file:
             yaml.dump(configuration, file)
 
     def cqlshrc(self):
