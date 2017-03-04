@@ -14,21 +14,25 @@ class ScyllaSetup:
         self._smp = arguments.smp
         self._memory = arguments.memory
         self._overprovisioned = arguments.overprovisioned
+        self._docker_conf_file = "/etc/scylla.d/docker.conf"
+        self._is_first_boot = not os.path.exists(self._docker_conf_file)
 
     def _run(self, *args, **kwargs):
         logging.info('running: {}'.format(args))
         subprocess.check_call(*args, **kwargs)
 
     def developerMode(self):
-        self._run(['/usr/lib/scylla/scylla_dev_mode_setup', '--developer-mode', self._developerMode])
+        if self._is_first_boot:
+            self._run(['/usr/lib/scylla/scylla_dev_mode_setup', '--developer-mode', self._developerMode])
 
     def cpuSet(self):
-        if self._cpuset is None:
+        if self._cpuset is None or not self._is_first_boot:
             return
         self._run(['/usr/lib/scylla/scylla_cpuset_setup', '--cpuset', self._cpuset])
 
     def io(self):
-        self._run(['/usr/lib/scylla/scylla_io_setup'])
+        if self._is_first_boot:
+            self._run(['/usr/lib/scylla/scylla_io_setup'])
 
     def scyllaYAML(self):
         configuration = yaml.load(open('/etc/scylla/scylla.yaml'))
@@ -66,5 +70,5 @@ class ScyllaSetup:
             args += " --smp %s" % self._smp
         if self._overprovisioned == "1":
             args += " --overprovisioned"
-        with open("/etc/scylla.d/docker.conf", "w") as cqlshrc:
+        with open(self._docker_conf_file, "w") as cqlshrc:
             cqlshrc.write("SCYLLA_DOCKER_ARGS=\"%s\"\n" % args)
