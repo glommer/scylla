@@ -22,7 +22,8 @@ elif [ "$NETWORK_MODE" = "dpdk" ]; then
     done
 else # NETWORK_MODE = posix
     if [ "$SET_NIC" = "yes" ]; then
-        /usr/lib/scylla/posix_net_conf.sh $IFNAME
+        # We'll do network only here, and leave the disks for scylla-blocktune
+        /usr/lib/scylla/perftune.py --tune net --nic $NIC
     fi
 fi
 if [ "$ID" = "ubuntu" ]; then
