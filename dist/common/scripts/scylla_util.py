@@ -153,8 +153,11 @@ class scylla_cpuinfo:
         f = file("/etc/scylla.d/cpuset.conf", "ro")
         pattern = re.compile(_nocomment + r"CPUSET=\s*\"" + _reopt(_cpuset) + _reopt(_smp) + "\s*\"")
         grp = [ pattern.match(x) for x in f.readlines() if pattern.match(x) ]
-        # if more than one, use last
-        d = grp[-1].groupdict()
+        if not grp:
+            d = { "cpuset" : set(), "smp" : None }
+        else:
+            # if more than one, use last
+            d = grp[-1].groupdict()
         actual_set = set()
         if d["cpuset"]:
             groups = d["cpuset"].split(",")
