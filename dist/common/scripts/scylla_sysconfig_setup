@@ -68,7 +68,7 @@ done
 echo Setting parameters on $SYSCONFIG/scylla-server
 
 if [ $SET_NIC = "yes" ]; then
-   RPS_CPUS=$(/usr/lib/scylla/posix_net_conf.sh --cpu-mask $NIC)
+   RPS_CPUS=$(/usr/lib/scylla/perftune.py --tune disks --tune net --nic $NIC --dir $SCYLLA_HOME/data --dir $SCYLLA_HOME/commitlog --get-cpu-mask)
    if [ "$RPS_CPUS" != "" ]; then
        CPUSET=$(echo $RPS_CPUS | /usr/lib/scylla/hex2list.py)
        /usr/lib/scylla/scylla_cpuset_setup --cpuset $CPUSET
