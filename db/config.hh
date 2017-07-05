@@ -166,6 +166,9 @@ public:
      */
 
 #define _make_config_values(val)                \
+    val(background_writer_scheduling_quota, double, 1, Used, \
+            "max cpu percentage for compaction process. Not intended for setting in normal operations. Setting it to 1 or higher will disable it." \
+    )   \
     /* Initialization properties */             \
     /* The minimal properties needed for configuring a cluster. */  \
     val(cluster_name, sstring, "Test Cluster", Used,   \
