@@ -1931,10 +1931,10 @@ void components_writer::consume_end_of_stream() {
             _sst._schema, _sst.get_first_decorated_key(), _sst.get_last_decorated_key());
 }
 
-future<> sstable::write_components(memtable& mt, bool backup, const io_priority_class& pc, bool leave_unsealed) {
+future<> sstable::write_components(memtable& mt, bool backup, const io_priority_class& pc, bool leave_unsealed, seastar::thread_scheduling_group* tsg) {
     _collector.set_replay_position(mt.replay_position());
     return write_components(mt.make_flush_reader(mt.schema(), pc),
-            mt.partition_count(), mt.schema(), std::numeric_limits<uint64_t>::max(), backup, pc, leave_unsealed);
+            mt.partition_count(), mt.schema(), std::numeric_limits<uint64_t>::max(), backup, pc, leave_unsealed, tsg);
 }
 
 future<>
@@ -2053,8 +2053,10 @@ sstable_writer sstable::get_writer(const schema& s, uint64_t estimated_partition
 }
 
 future<> sstable::write_components(::mutation_reader mr,
-        uint64_t estimated_partitions, schema_ptr schema, uint64_t max_sstable_size, bool backup, const io_priority_class& pc, bool leave_unsealed) {
-    return seastar::async([this, mr = std::move(mr), estimated_partitions, schema = std::move(schema), max_sstable_size, backup, &pc, leave_unsealed] () mutable {
+        uint64_t estimated_partitions, schema_ptr schema, uint64_t max_sstable_size, bool backup, const io_priority_class& pc, bool leave_unsealed, seastar::thread_scheduling_group *tsg) {
+    seastar::thread_attributes attr;
+    attr.scheduling_group = tsg;
+    return seastar::async(std::move(attr), [this, mr = std::move(mr), estimated_partitions, schema = std::move(schema), max_sstable_size, backup, &pc, leave_unsealed] () mutable {
         auto wr = get_writer(*schema, estimated_partitions, max_sstable_size, backup, pc, leave_unsealed);
         consume_flattened_in_thread(mr, wr);
     });

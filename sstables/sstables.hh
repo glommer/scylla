@@ -51,6 +51,10 @@
 #include "disk-error-handler.hh"
 #include "atomic_deletion.hh"
 
+namespace seastar {
+class thread_scheduling_group;
+}
+
 namespace sstables {
 
 // data_consume_context is an object returned by sstable::data_consume_rows()
@@ -285,11 +289,11 @@ public:
 
     // Write sstable components from a memtable.
     future<> write_components(memtable& mt, bool backup = false,
-                              const io_priority_class& pc = default_priority_class(), bool leave_unsealed = false);
+                              const io_priority_class& pc = default_priority_class(), bool leave_unsealed = false, seastar::thread_scheduling_group *tsg = nullptr);
 
     future<> write_components(::mutation_reader mr,
             uint64_t estimated_partitions, schema_ptr schema, uint64_t max_sstable_size, bool backup = false,
-            const io_priority_class& pc = default_priority_class(), bool leave_unsealed = false);
+            const io_priority_class& pc = default_priority_class(), bool leave_unsealed = false, seastar::thread_scheduling_group* tsg = nullptr);
 
     sstable_writer get_writer(const schema& s, uint64_t estimated_partitions, uint64_t max_sstable_size,
                               bool backup = false, const io_priority_class& pc = default_priority_class(),

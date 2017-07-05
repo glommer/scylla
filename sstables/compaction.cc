@@ -224,8 +224,10 @@ public:
 // are created using the "sstable_creator" object passed by the caller.
 future<std::vector<shared_sstable>>
 compact_sstables(std::vector<shared_sstable> sstables, column_family& cf, std::function<shared_sstable()> creator,
-                 uint64_t max_sstable_size, uint32_t sstable_level, bool cleanup) {
-    return seastar::async([sstables = std::move(sstables), &cf, creator = std::move(creator), max_sstable_size, sstable_level, cleanup] () mutable {
+                 uint64_t max_sstable_size, uint32_t sstable_level, bool cleanup, seastar::thread_scheduling_group *tsg) {
+    auto attr = seastar::thread_attributes();
+    attr.scheduling_group = tsg;
+    return seastar::async(std::move(attr), [sstables = std::move(sstables), &cf, creator = std::move(creator), max_sstable_size, sstable_level, cleanup] () mutable {
         // keep a immutable copy of sstable set because selector needs it alive
         // and also sstables created after compaction shouldn't be considered.
         const sstable_set s = cf.get_sstable_set();
