@@ -406,6 +406,8 @@ public:
         ::cf_stats* cf_stats = nullptr;
         uint64_t max_cached_partition_size_in_bytes;
         seastar::thread_scheduling_group* background_writer_scheduling_group = nullptr;
+        seastar::thread_scheduling_group* memtable_scheduling_group = nullptr;
+        seastar::thread_scheduling_group* streaming_scheduling_group = nullptr;
     };
     struct no_commitlog {};
     struct stats {
@@ -999,6 +1001,8 @@ public:
         restricted_mutation_reader_config streaming_read_concurrency_config;
         ::cf_stats* cf_stats = nullptr;
         seastar::thread_scheduling_group* background_writer_scheduling_group = nullptr;
+        seastar::thread_scheduling_group* memtable_scheduling_group = nullptr;
+        seastar::thread_scheduling_group* streaming_scheduling_group = nullptr;
     };
 private:
     std::unique_ptr<locator::abstract_replication_strategy> _replication_strategy;
@@ -1070,6 +1074,57 @@ public:
     no_such_column_family(const sstring& ks_name, const sstring& cf_name);
 };
 
+// Simple proportional controller to adjust shares of memtable/streaming flushes.
+//
+// Goal is to flush as fast as we can, but not so fast that we steal all the CPU from incoming
+// requests, and at the same time minimize user-visible fluctuations in the flush quota.
+//
+// What that translates to is we'll try to keep virtual dirty's firt derivative at 0 (IOW, we keep
+// virtual dirty constant), which means that the rate of incoming writes is equal to the rate of
+// flushed bytes.
+//
+// The exact point at which the controller stops determines the desired flush CPU usage. As we
+// approach the hard dirty limit, we need to be more aggressive. We will therefore define two
+// thresholds, and increase the constant as we cross them.
+//
+//  1) the soft limit line
+//  2) halfway between soft limit and dirty limit
+//
+// The constants q1 and q2 are used to determine the proportional factor at each stage.
+class flush_cpu_controller {
+    static constexpr float hard_dirty_limit = 0.50;
+    static constexpr float q1 = 0.01;
+    static constexpr float q2 = 0.2;
+
+    float _current_quota = 0.0f;
+    float _goal;
+    std::function<float()> _current_dirty;
+    std::chrono::milliseconds _interval;
+    timer<> _update_timer;
+
+    seastar::thread_scheduling_group *_backup_scheduling_group = nullptr;
+    seastar::thread_scheduling_group _scheduling_group;
+
+    void adjust();
+public:
+    seastar::thread_scheduling_group* scheduling_group() {
+        if (_backup_scheduling_group) {
+            return _backup_scheduling_group;
+        }
+        return &_scheduling_group;
+    }
+    float current_quota() const {
+        return _current_quota;
+    }
+
+    struct disabled {
+        seastar::thread_scheduling_group *backup_group;
+    };
+    flush_cpu_controller(disabled d) : _backup_scheduling_group(d.backup_group), _scheduling_group(std::chrono::nanoseconds(0), 0) {}
+    flush_cpu_controller(std::chrono::milliseconds interval, float soft_limit, std::function<float()> current_dirty);
+    flush_cpu_controller(flush_cpu_controller&&) = default;
+};
+
 // Policy for distributed<database>:
 //   broadcast metadata writes
 //   local metadata reads
@@ -1099,11 +1154,13 @@ private:
 
     std::unique_ptr<db::config> _cfg;
 
-    seastar::thread_scheduling_group _background_writer_scheduling_group;
-
     dirty_memory_manager _system_dirty_memory_manager;
     dirty_memory_manager _dirty_memory_manager;
     dirty_memory_manager _streaming_dirty_memory_manager;
+
+    seastar::thread_scheduling_group _background_writer_scheduling_group;
+    flush_cpu_controller _memtable_cpu_controller;
+    flush_cpu_controller _streaming_cpu_controller;
 
     semaphore _read_concurrency_sem{max_concurrent_reads()};
     restricted_mutation_reader_config _read_concurrency_config;
