@@ -169,6 +169,9 @@ public:
     val(background_writer_scheduling_quota, double, .5, Used, \
             "priority for compaction process. Not intended for setting in normal operations" \
     )   \
+    val(auto_adjust_flush_quota, bool, true, Used, \
+            "true: auto-adjust quota for flush processes. false: put everyone together in the static background writer group. Not intended for setting in normal operations" \
+    )   \
     /* Initialization properties */             \
     /* The minimal properties needed for configuring a cluster. */  \
     val(cluster_name, sstring, "Test Cluster", Used,   \

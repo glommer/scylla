@@ -430,6 +430,8 @@ public:
         restricted_mutation_reader_config streaming_read_concurrency_config;
         ::cf_stats* cf_stats = nullptr;
         seastar::thread_scheduling_group* background_writer_scheduling_group = nullptr;
+        seastar::thread_scheduling_group* memtable_scheduling_group = nullptr;
+        seastar::thread_scheduling_group* streaming_scheduling_group = nullptr;
     };
     struct no_commitlog {};
     struct stats {
@@ -1068,6 +1070,8 @@ public:
         restricted_mutation_reader_config streaming_read_concurrency_config;
         ::cf_stats* cf_stats = nullptr;
         seastar::thread_scheduling_group* background_writer_scheduling_group = nullptr;
+        seastar::thread_scheduling_group* memtable_scheduling_group = nullptr;
+        seastar::thread_scheduling_group* streaming_scheduling_group = nullptr;
     };
 private:
     std::unique_ptr<locator::abstract_replication_strategy> _replication_strategy;
@@ -1139,6 +1143,85 @@ public:
     no_such_column_family(const sstring& ks_name, const sstring& cf_name);
 };
 
+// Simple PID-based controller to adjust shares of memtable/streaming flushes.
+//
+// Goal is to flush as fast as we can, but not so fast that we steal all the CPU from incoming
+// requests.
+//
+// What that translates to is we'll try to keep virtual dirty constant around
+// "virtual_dirty_soft_limit", relaxing our shares when we're below it, and increasing our shares
+// when we go above it.
+//
+// The standard PID controller can be written as:
+//
+//   u(t) = Kp e(t) + Ki Integral(0 -> t) e(tau) d(tau) + Kd d(e(t)) / dt
+//
+// We can rewrite that expression in its standard form as:
+// (https://en.wikipedia.org/wiki/PID_controller)
+//
+//   u(t) = Kp [ e(t) + 1 / Ti * Integral(0 -> t) e(tau) d(tau) + Td * d(e(t)) / dt ]
+//
+// In this expression, the constants Ti and Td acquire a clear physical meaning and represent,
+// according to the reference:
+//
+// ... The addition of the proportional and derivative components effectively predicts the error
+// value at Td seconds (or samples) in the future, assuming that the loop control remains unchanged.
+// The integral component adjusts the error value to compensate for the sum of all past errors, with
+// the intention of completely eliminating them in Ti seconds (or samples). The resulting
+// compensated single error value is scaled by the single gain Kp.
+//
+// We can then choose Ti and Td so that we have a 1 second resolution for that (4 samples at 250ms
+// update intervals). Kp is then chosen so that the proportional term grows linearly and when we
+// reach the virtual dirty hard limit, memtable shares are 50 % - the maximum we allow. Since
+// requests will forceably stop in that situation, we'd have memtables and compactions sharing each
+// 50 % of the CPU in that case. (all other actors assumed to be orthogonal for simplicity).
+//
+// With those, we have that:
+//
+//   Kp = hard_maximum / (virtual_dirty_hard_limit - virtual_dirty_goal)
+//   Ki = Kp / Ti = Kp / (1s / 250ms)
+//   Kd = Kp * Td = Kp * (1s / 250ms)
+//
+class flush_cpu_controller {
+    static constexpr float hard_dirty_limit = 0.50;
+    static constexpr float max_quota = 0.50;
+    static constexpr float min_quota = 0.05;
+
+    float _current_quota = 0;
+
+    float _last_err = 0;
+    float _total_err = 0;
+    float _goal;
+    std::function<float()> _current_dirty;
+    std::chrono::milliseconds _interval;
+    float _kp;
+    float _ti;
+    float _td;
+    timer<> _update_timer;
+
+    seastar::thread_scheduling_group *_backup_scheduling_group = nullptr;
+    seastar::thread_scheduling_group _scheduling_group;
+
+    void adjust();
+public:
+    seastar::thread_scheduling_group* scheduling_group() {
+        if (_backup_scheduling_group) {
+            return _backup_scheduling_group;
+        }
+        return &_scheduling_group;
+    }
+    float current_quota() const {
+        return _current_quota;
+    }
+
+    struct disabled {
+        seastar::thread_scheduling_group *backup_group;
+    };
+    flush_cpu_controller(disabled d) : _backup_scheduling_group(d.backup_group), _scheduling_group(std::chrono::nanoseconds(0), 0) {}
+    flush_cpu_controller(std::chrono::milliseconds interval, float soft_limit, std::function<float()> current_dirty);
+    flush_cpu_controller(flush_cpu_controller&&) = default;
+};
+
 // Policy for distributed<database>:
 //   broadcast metadata writes
 //   local metadata reads
@@ -1169,11 +1252,13 @@ private:
 
     std::unique_ptr<db::config> _cfg;
 
-    seastar::thread_scheduling_group _background_writer_scheduling_group;
-
     dirty_memory_manager _system_dirty_memory_manager;
     dirty_memory_manager _dirty_memory_manager;
     dirty_memory_manager _streaming_dirty_memory_manager;
+
+    seastar::thread_scheduling_group _background_writer_scheduling_group;
+    flush_cpu_controller _memtable_cpu_controller;
+    flush_cpu_controller _streaming_cpu_controller;
 
     semaphore _read_concurrency_sem{max_concurrent_reads()};
     restricted_mutation_reader_config _read_concurrency_config;
