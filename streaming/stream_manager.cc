@@ -50,7 +50,10 @@ extern logging::logger sslog;
 distributed<stream_manager> _the_stream_manager;
 
 
-stream_manager::stream_manager() {
+stream_manager::stream_manager()
+    : _mutation_send_memory_limit(std::max<size_t>(256ul << 20 / smp::count, 0.05 * memory::stats().total_memory()))
+    , _mutation_send_limiter(_mutation_send_memory_limit)
+{
     namespace sm = seastar::metrics;
 
     _metrics.add_group("streaming", {

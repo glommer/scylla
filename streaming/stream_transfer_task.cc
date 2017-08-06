@@ -91,9 +91,9 @@ struct send_info {
 };
 
 future<> do_send_mutations(lw_shared_ptr<send_info> si, frozen_mutation fm, bool fragmented) {
-    return get_local_stream_manager().mutation_send_limiter().wait().then([si, fragmented, fm = std::move(fm)] () mutable {
+    auto fm_size = fm.representation().size();
+    return get_local_stream_manager().mutation_send_limiter().wait(fm_size).then([si, fragmented, fm = std::move(fm), fm_size] () mutable {
         sslog.debug("[Stream #{}] SEND STREAM_MUTATION to {}, cf_id={}", si->plan_id, si->id, si->cf_id);
-        auto fm_size = fm.representation().size();
         netw::get_local_messaging_service().send_stream_mutation(si->id, si->plan_id, std::move(fm), si->dst_cpu_id, fragmented).then([si, fm_size] {
             sslog.debug("[Stream #{}] GOT STREAM_MUTATION Reply from {}", si->plan_id, si->id.addr);
             get_local_stream_manager().update_progress(si->plan_id, si->id.addr, progress_info::direction::OUT, fm_size);
@@ -106,8 +106,8 @@ future<> do_send_mutations(lw_shared_ptr<send_info> si, frozen_mutation fm, bool
                 sslog.warn("[Stream #{}] stream_transfer_task: Fail to send STREAM_MUTATION to {}: {}", si->plan_id, si->id, ep);
             }
             si->mutations_done.broken();
-        }).finally([] {
-            get_local_stream_manager().mutation_send_limiter().signal();
+        }).finally([fm_size] {
+            get_local_stream_manager().mutation_send_limiter().signal(fm_size);
         });
     });
 }
