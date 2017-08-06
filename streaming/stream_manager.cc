@@ -57,6 +57,9 @@ stream_manager::stream_manager()
     namespace sm = seastar::metrics;
 
     _metrics.add_group("streaming", {
+        sm::make_gauge("inflight_bytes", [this] { return _mutation_send_memory_limit - _mutation_send_limiter.current(); },
+                        sm::description("Amount of memory currently in flight for streaming")),
+
         sm::make_derive("total_incoming_bytes", [this] { return get_progress_on_local_shard().bytes_received; },
                         sm::description("This is a received bytes rate.")),
 
