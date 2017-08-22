@@ -1425,7 +1425,7 @@ void column_family::trigger_compaction() {
 
 void column_family::do_trigger_compaction() {
     // But only submit if we're not locked out
-    if (!_compaction_disabled) {
+    if (!_compaction_disabled && _can_autocompact) {
         _compaction_manager.submit(this);
     }
 }

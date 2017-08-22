@@ -411,6 +411,7 @@ private:
     db::commitlog* _commitlog;
     compaction_manager& _compaction_manager;
     int _compaction_disabled = 0;
+    bool _can_autocompact = true;
     utils::phased_barrier _flush_barrier;
     seastar::gate _streaming_flush_gate;
     std::vector<view_ptr> _views;
@@ -673,6 +674,10 @@ public:
     // given sstable, e.g. after node loses part of its token range because
     // of a newly added node.
     future<> cleanup_sstables(sstables::compaction_descriptor descriptor);
+
+    void set_autocompact(bool status) {
+        _can_autocompact = status;
+    }
 
     future<bool> snapshot_exists(sstring name);
 
