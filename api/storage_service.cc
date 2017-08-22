@@ -70,6 +70,22 @@ static std::vector<ss::token_range> describe_ring(const sstring& keyspace) {
     return res;
 }
 
+future<json::json_return_type> set_autocompact(http_context& ctx, std::unique_ptr<request> req, bool status) {
+    auto keyspace = validate_keyspace(ctx, req->param);
+    auto column_families = split_cf(req->get_query_param("cf"));
+    if (column_families.empty()) {
+        column_families = map_keys(ctx.db.local().find_keyspace(keyspace).metadata().get()->cf_meta_data());
+    }
+    return ctx.db.invoke_on_all([keyspace, column_families, status] (database& db) {
+        return parallel_for_each(column_families, [&db, keyspace, status](const sstring& cf) mutable {
+            db.find_column_family(keyspace, cf).set_autocompact(status);
+            return make_ready_future<>();
+        });
+    }).then([]{
+        return make_ready_future<json::json_return_type>(json_void());
+    });
+}
+
 void set_storage_service(http_context& ctx, routes& r) {
     ss::local_hostid.set(r, [](std::unique_ptr<request> req) {
         return db::system_keyspace::get_local_host_id().then([](const utils::UUID& id) {
@@ -726,19 +742,11 @@ void set_storage_service(http_context& ctx, routes& r) {
     });
 
     ss::enable_auto_compaction.set(r, [&ctx](std::unique_ptr<request> req) {
-        //TBD
-        unimplemented();
-        auto keyspace = validate_keyspace(ctx, req->param);
-        auto column_family = req->get_query_param("cf");
-        return make_ready_future<json::json_return_type>(json_void());
+        return set_autocompact(ctx, std::move(req), true);
     });
 
     ss::disable_auto_compaction.set(r, [&ctx](std::unique_ptr<request> req) {
-        //TBD
-        unimplemented();
-        auto keyspace = validate_keyspace(ctx, req->param);
-        auto column_family = req->get_query_param("cf");
-        return make_ready_future<json::json_return_type>(json_void());
+        return set_autocompact(ctx, std::move(req), false);
     });
 
     ss::deliver_hints.set(r, [](std::unique_ptr<request> req) {
