@@ -2192,11 +2192,9 @@ future<> database::drop_column_family(const sstring& ks_name, const sstring& cf_
             // Drop view mutations received after base table drop.
         }
     }
-    return truncate(ks, *cf, std::move(tsf)).then([this, cf] {
+    return truncate(ks, *cf, std::move(tsf)).finally([this, cf] {
         return cf->stop();
-    }).then([this, cf] {
-        return make_ready_future<>();
-    });
+    }).finally([cf] {});
 }
 
 const utils::UUID& database::find_uuid(const sstring& ks, const sstring& cf) const {
