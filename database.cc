@@ -1112,14 +1112,16 @@ column_family::start() {
 
 future<>
 column_family::stop() {
-    return when_all(_memtables->request_flush(), _streaming_memtables->request_flush()).discard_result().finally([this] {
-        return _compaction_manager.remove(this).then([this] {
-            // Nest, instead of using when_all, so we don't lose any exceptions.
-            return _flush_queue->close().then([this] {
-                return _streaming_flush_gate.close();
+    return _async_gate.close().then([this] {
+        return when_all(_memtables->request_flush(), _streaming_memtables->request_flush()).discard_result().finally([this] {
+            return _compaction_manager.remove(this).then([this] {
+                // Nest, instead of using when_all, so we don't lose any exceptions.
+                return _flush_queue->close().then([this] {
+                    return _streaming_flush_gate.close();
+                });
+            }).then([this] {
+                return _sstable_deletion_gate.close();
             });
-        }).then([this] {
-            return _sstable_deletion_gate.close();
         });
     });
 }
@@ -3095,40 +3097,40 @@ future<> database::truncate(sstring ksname, sstring cfname, timestamp_func tsf) 
     return truncate(ks, cf, std::move(tsf));
 }
 
-future<> database::truncate(const keyspace& ks, column_family& cf, timestamp_func tsf)
-{
-    const auto durable = ks.metadata()->durable_writes();
-    const auto auto_snapshot = get_config().auto_snapshot();
+future<> database::truncate(const keyspace& ks, column_family& cf, timestamp_func tsf) {
+    return cf.run_async([this, &ks, &cf, tsf = std::move(tsf)] () mutable {
+        const auto durable = ks.metadata()->durable_writes();
+        const auto auto_snapshot = get_config().auto_snapshot();
+        future<> f = make_ready_future<>();
+        if (durable || auto_snapshot) {
+            // TODO:
+            // this is not really a guarantee at all that we've actually
+            // gotten all things to disk. Again, need queue-ish or something.
+            f = cf.flush();
+        } else {
+            f = cf.clear();
+        }
 
-    future<> f = make_ready_future<>();
-    if (durable || auto_snapshot) {
-        // TODO:
-        // this is not really a guarantee at all that we've actually
-        // gotten all things to disk. Again, need queue-ish or something.
-        f = cf.flush();
-    } else {
-        f = cf.clear();
-    }
+        return cf.run_with_compaction_disabled([f = std::move(f), &cf, auto_snapshot, tsf = std::move(tsf)]() mutable {
+            return f.then([&cf, auto_snapshot, tsf = std::move(tsf)] {
+                dblog.debug("Discarding sstable data for truncated CF + indexes");
+                // TODO: notify truncation
 
-    return cf.run_with_compaction_disabled([f = std::move(f), &cf, auto_snapshot, tsf = std::move(tsf)]() mutable {
-        return f.then([&cf, auto_snapshot, tsf = std::move(tsf)] {
-            dblog.debug("Discarding sstable data for truncated CF + indexes");
-            // TODO: notify truncation
-
-            return tsf().then([&cf, auto_snapshot](db_clock::time_point truncated_at) {
-                future<> f = make_ready_future<>();
-                if (auto_snapshot) {
-                    auto name = sprint("%d-%s", truncated_at.time_since_epoch().count(), cf.schema()->cf_name());
-                    f = cf.snapshot(name);
-                }
-                return f.then([&cf, truncated_at] {
-                    return cf.discard_sstables(truncated_at).then([&cf, truncated_at](db::replay_position rp) {
-                        // TODO: verify that rp == db::replay_position is because we have no sstables (and no data flushed)
-                        if (rp == db::replay_position()) {
-                            return make_ready_future();
-                        }
-                        // TODO: indexes.
-                        return db::system_keyspace::save_truncation_record(cf, truncated_at, rp);
+                return tsf().then([&cf, auto_snapshot](db_clock::time_point truncated_at) {
+                    future<> f = make_ready_future<>();
+                    if (auto_snapshot) {
+                        auto name = sprint("%d-%s", truncated_at.time_since_epoch().count(), cf.schema()->cf_name());
+                        f = cf.snapshot(name);
+                    }
+                    return f.then([&cf, truncated_at] {
+                        return cf.discard_sstables(truncated_at).then([&cf, truncated_at](db::replay_position rp) {
+                            // TODO: verify that rp == db::replay_position is because we have no sstables (and no data flushed)
+                            if (rp == db::replay_position()) {
+                                return make_ready_future();
+                            }
+                            // TODO: indexes.
+                            return db::system_keyspace::save_truncation_record(cf, truncated_at, rp);
+                        });
                     });
                 });
             });

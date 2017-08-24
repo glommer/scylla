@@ -530,6 +530,14 @@ private:
     semaphore _cache_update_sem{1};
 
     std::unique_ptr<cell_locker> _counter_cell_locks;
+
+    // Operations like truncate, flush, query, etc, may depend on a column family being alive to
+    // complete.  Some of them have their own gate already (like flush), used in specialized wait
+    // logic (like the streaming_flush_gate). That is particularly useful if there is a particular
+    // order in which we need to close those gates. For all the others operations that don't have
+    // such needs, we have this generic _async_gate, which all potentially asynchronous operations
+    // have to get.  It will be closed by stop().
+    seastar::gate _async_gate;
 private:
     void update_stats_for_new_sstable(uint64_t disk_space_used_by_sstable, std::vector<unsigned>&& shards_for_the_sstable);
     // Adds new sstable to the set of sstables
@@ -590,6 +598,15 @@ private:
     std::chrono::steady_clock::time_point _sstable_writes_disabled_at;
     void do_trigger_compaction();
 public:
+    // Used for asynchronous operations that may defer and need to guarantee that the column
+    // family will be alive until their termination
+    template<typename Func, typename Futurator = futurize<std::result_of_t<Func()>>, typename... Args>
+    typename Futurator::type run_async(Func&& func, Args&&... args) {
+        return with_gate(_async_gate, [func = std::forward<Func>(func), args = std::make_tuple(std::forward<Args>(args)...)] () mutable {
+            return Futurator::apply(func, std::move(args));
+        });
+    }
+
     uint64_t failed_counter_applies_to_memtable() const {
         return _failed_counter_applies_to_memtable;
     }
