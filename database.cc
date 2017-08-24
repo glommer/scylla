@@ -2034,7 +2034,7 @@ make_flush_cpu_controller(db::config& cfg, seastar::scheduling_group sg, std::fu
     if (cfg.auto_adjust_flush_quota()) {
         return flush_cpu_controller(250ms, sg, cfg.virtual_dirty_soft_limit(), std::move(fn));
     }
-    return flush_cpu_controller(flush_cpu_controller::disabled{sg});
+    return flush_cpu_controller(backlog_cpu_controller::disabled{sg});
 }
 
 utils::UUID database::empty_version = utils::UUID_gen::get_name_UUID(bytes{});
@@ -2050,7 +2050,7 @@ database::database(const db::config& cfg, database_config dbcfg)
     , _system_dirty_memory_manager(*this, 10 << 20, cfg.virtual_dirty_soft_limit())
     , _dirty_memory_manager(*this, memory::stats().total_memory() * 0.45, cfg.virtual_dirty_soft_limit())
     , _streaming_dirty_memory_manager(*this, memory::stats().total_memory() * 0.10, cfg.virtual_dirty_soft_limit())
-    , _memtable_cpu_controller(make_flush_cpu_controller(*_cfg, dbcfg.memtable_scheduling_group, [this, limit = 2.0f * _dirty_memory_manager.throttle_threshold()] {
+    , _memtable_cpu_controller(make_flush_cpu_controller(*_cfg, dbcfg.memtable_scheduling_group, [this, limit = float(_dirty_memory_manager.throttle_threshold())] {
         return (_dirty_memory_manager.virtual_dirty_memory()) / limit;
     }))
     , _dbcfg(dbcfg)
@@ -2064,30 +2064,19 @@ database::database(const db::config& cfg, database_config dbcfg)
     dblog.info("Row: max_vector_size: {}, internal_count: {}", size_t(row::max_vector_size), size_t(row::internal_count));
 }
 
-void flush_cpu_controller::adjust() {
-    auto mid = _goal + (hard_dirty_limit - _goal) / 2;
+void backlog_cpu_controller::adjust() {
+    auto backlog = _current_backlog();
+    float current_shares = 0;
 
-    auto dirty = _current_dirty();
-    if (dirty < _goal) {
-        _current_quota = dirty * q1 / _goal;
-    } else if ((dirty >= _goal) && (dirty < mid)) {
-        _current_quota = q1 + (dirty - _goal) * (q2 - q1)/(mid - _goal);
+    if (backlog < _first_threshold) {
+        current_shares = backlog * q1 / _first_threshold;
+    } else if ((backlog >= _first_threshold) && (backlog < _second_threshold)) {
+        current_shares = q1 + (backlog - _first_threshold) * (q2 - q1)/(_second_threshold - _first_threshold);
     } else {
-        _current_quota = q2 + (dirty - mid) * (qmax - q2) / (hard_dirty_limit - mid);
+        current_shares = q2 + (backlog - _second_threshold) * (qmax - q2) / (_maximum - _second_threshold);
     }
 
-    dblog.trace("dirty {}, goal {}, mid {} quota {}", dirty, _goal, mid, _current_quota);
-    _scheduling_group.set_shares(_current_quota);
-}
-
-flush_cpu_controller::flush_cpu_controller(std::chrono::milliseconds interval, seastar::scheduling_group sg, float soft_limit, std::function<float()> current_dirty)
-    : _goal(soft_limit / 2)
-    , _current_dirty(std::move(current_dirty))
-    , _interval(interval)
-    , _update_timer([this] { adjust(); })
-    , _scheduling_group(sg)
-{
-    _update_timer.arm_periodic(_interval);
+    _scheduling_group.set_shares(current_shares);
 }
 
 void
@@ -2231,9 +2220,6 @@ database::setup_metrics() {
 
         sm::make_gauge("total_result_bytes", [this] { return get_result_memory_limiter().total_used_memory(); },
                        sm::description("Holds the current amount of memory used for results.")),
-
-        sm::make_gauge("cpu_flush_quota", [this] { return _memtable_cpu_controller.current_quota(); },
-                             sm::description("The current quota for memtable CPU scheduling group")),
 
         sm::make_derive("short_data_queries", _stats->short_data_queries,
                        sm::description("The rate of data queries (data or digest reads) that returned less rows than requested due to result size limiting.")),
