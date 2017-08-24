@@ -1112,14 +1112,16 @@ column_family::start() {
 
 future<>
 column_family::stop() {
-    return when_all(_memtables->request_flush(), _streaming_memtables->request_flush()).discard_result().finally([this] {
-        return _compaction_manager.remove(this).then([this] {
-            // Nest, instead of using when_all, so we don't lose any exceptions.
-            return _flush_queue->close().then([this] {
-                return _streaming_flush_gate.close();
+    return _async_gate.close().then([this] {
+        return when_all(_memtables->request_flush(), _streaming_memtables->request_flush()).discard_result().finally([this] {
+            return _compaction_manager.remove(this).then([this] {
+                // Nest, instead of using when_all, so we don't lose any exceptions.
+                return _flush_queue->close().then([this] {
+                    return _streaming_flush_gate.close();
+                });
+            }).then([this] {
+                return _sstable_deletion_gate.close();
             });
-        }).then([this] {
-            return _sstable_deletion_gate.close();
         });
     });
 }
@@ -2195,6 +2197,20 @@ future<> database::drop_column_family(const sstring& ks_name, const sstring& cf_
     return truncate(ks, *cf, std::move(tsf)).finally([this, cf] {
         return cf->stop();
     }).finally([cf] {});
+}
+
+template<typename Func, typename Result = futurize_t<std::result_of_t<Func()>>>
+Result column_family::run_with_compaction_disabled(Func && func) {
+    return with_gate(_async_gate, [this, func = std::forward<Func>(func)] () mutable {
+        ++_compaction_disabled;
+        return _compaction_manager.remove(this).then(std::forward<Func>(func)).finally([this, id, name] {
+            if (--_compaction_disabled == 0) {
+                // we're turning if on again, use function that does not increment
+                // the counter further.
+                do_trigger_compaction();
+            }
+        });
+    });
 }
 
 const utils::UUID& database::find_uuid(const sstring& ks, const sstring& cf) const {

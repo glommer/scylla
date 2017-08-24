@@ -530,6 +530,14 @@ private:
     semaphore _cache_update_sem{1};
 
     std::unique_ptr<cell_locker> _counter_cell_locks;
+
+    // Operations like truncate, flush, query, etc, may depend on a column family being alive to
+    // complete.  Some of them have their own gate already (like flush), used in specialized wait
+    // logic (like the streaming_flush_gate). That is particularly useful if there is a particular
+    // order in which we need to close those gates. For all the others operations that don't have
+    // such needs, we have this generic _async_gate, which all potentially asynchronous operations
+    // have to get.  It will be closed by stop().
+    seastar::gate _async_gate;
 private:
     void update_stats_for_new_sstable(uint64_t disk_space_used_by_sstable, std::vector<unsigned>&& shards_for_the_sstable);
     // Adds new sstable to the set of sstables
@@ -808,16 +816,7 @@ public:
     }
 
     template<typename Func, typename Result = futurize_t<std::result_of_t<Func()>>>
-    Result run_with_compaction_disabled(Func && func) {
-        ++_compaction_disabled;
-        return _compaction_manager.remove(this).then(std::forward<Func>(func)).finally([this] {
-            if (--_compaction_disabled == 0) {
-                // we're turning if on again, use function that does not increment
-                // the counter further.
-                do_trigger_compaction();
-            }
-        });
-    }
+    Result run_with_compaction_disabled(Func && func);
 
     void add_or_update_view(view_ptr v);
     void remove_view(view_ptr v);
