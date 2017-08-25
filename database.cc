@@ -2245,8 +2245,6 @@ database::setup_metrics() {
         sm::make_gauge("total_result_bytes", [this] { return get_result_memory_limiter().total_used_memory(); },
                        sm::description("Holds the current amount of memory used for results.")),
 
-        sm::make_gauge("cpu_flush_quota", [this] { return _memtable_cpu_controller.current_quota(); },
-                             sm::description("The current quota for memtable CPU scheduling group")),
 
         sm::make_derive("short_data_queries", _stats->short_data_queries,
                        sm::description("The rate of data queries (data or digest reads) that returned less rows than requested due to result size limiting.")),
@@ -2260,6 +2258,17 @@ database::setup_metrics() {
         sm::make_queue_length("counter_cell_lock_pending", _cl_stats->operations_waiting_for_lock,
                              sm::description("The number of counter updates waiting for a lock.")),
     });
+
+    seastar::metrics::label class_label("class");
+    auto mt = class_label("memtable");
+    auto cp = class_label("compactions");
+    _metrics.add_group("database", {
+        sm::make_gauge("cpu_quota", [this] { return _memtable_cpu_controller.current_quota(); },
+                             sm::description("The current desired quota for CPU scheduling group"))(mt),
+        sm::make_gauge("cpu_quota", [this] { return _compaction_cpu_controller.current_quota(); },
+                             sm::description("The current desired quota for CPU scheduling group"))(cp),
+    });
+
 }
 
 database::~database() {
