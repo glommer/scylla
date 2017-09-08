@@ -39,6 +39,9 @@
 
 #include <vector>
 #include <chrono>
+#include <cmath>
+#include <ctgmath>
+#include <seastar/core/shared_ptr.hh>
 
 #include "sstables.hh"
 #include "compaction.hh"
@@ -56,6 +59,7 @@
 #include "date_tiered_compaction_strategy.hh"
 #include "leveled_compaction_strategy.hh"
 #include "time_window_compaction_strategy.hh"
+#include "sstables/compaction_backlog_manager.hh"
 
 logging::logger date_tiered_manifest::logger = logging::logger("DateTieredCompactionStrategy");
 logging::logger leveled_manifest::logger("LeveledManifest");
@@ -349,6 +353,56 @@ compaction_strategy_impl::get_resharding_jobs(column_family& cf, std::vector<sst
     return jobs;
 }
 
+class unimplemented_backlog_tracker final: public compaction_backlog_tracker::impl {
+    uint64_t _total_bytes = 0;
+public:
+    virtual compaction_backlog_tracker::backlog get_backlog() override {
+        return compaction_backlog_tracker::backlog{0.5f, _total_bytes};
+    }
+
+    virtual void add_sstable(sstables::shared_sstable sst)  override {
+        _total_bytes += sst->data_size();
+    }
+    virtual void remove_sstable(sstables::shared_sstable sst)  override {
+        _total_bytes -= sst->data_size();
+    }
+    virtual void register_partially_written_sstable(lw_shared_ptr<sstable_write_progress> wp) override {}
+    virtual void seal_partially_written_sstable(lw_shared_ptr<sstable_write_progress> wp) override {}
+    void register_compacting_sstable(lw_shared_ptr<compaction_read_progress> rp) override {}
+    void finish_compacting_sstable(lw_shared_ptr<compaction_read_progress> rp) override {}
+};
+
+class null_backlog_tracker final: public compaction_backlog_tracker::impl {
+public:
+    virtual compaction_backlog_tracker::backlog get_backlog() override {
+        return compaction_backlog_tracker::backlog{0.0f, 0};
+    }
+
+    virtual void add_sstable(sstables::shared_sstable sst)  override {}
+    virtual void remove_sstable(sstables::shared_sstable sst)  override {}
+    virtual void register_partially_written_sstable(lw_shared_ptr<sstable_write_progress> wp) override {}
+    virtual void seal_partially_written_sstable(lw_shared_ptr<sstable_write_progress> wp) override {}
+    void register_compacting_sstable(lw_shared_ptr<compaction_read_progress> rp) override {}
+    void finish_compacting_sstable(lw_shared_ptr<compaction_read_progress> rp) override {}
+};
+
+template <typename Impl>
+seastar::lw_shared_ptr<compaction_backlog_tracker> make_backlog_tracker(Impl&& impl) {
+    return seastar::make_lw_shared<compaction_backlog_tracker>(std::move(impl));
+}
+
+seastar::lw_shared_ptr<compaction_backlog_tracker> get_unimplemented_backlog_tracker() {
+    static thread_local seastar::lw_shared_ptr<compaction_backlog_tracker> unimplemented = make_backlog_tracker(std::make_unique<unimplemented_backlog_tracker>());
+    return unimplemented;
+}
+
+// Just so that if we have more than one CF with NullStrategy, we don't create a lot
+// of objects to iterate over for no reason
+seastar::lw_shared_ptr<compaction_backlog_tracker> get_null_backlog_tracker() {
+    static thread_local seastar::lw_shared_ptr<compaction_backlog_tracker> nulltracker = make_backlog_tracker(std::make_unique<null_backlog_tracker>());
+    return nulltracker;
+}
+
 //
 // Null compaction strategy is the default compaction strategy.
 // As the name implies, it does nothing.
@@ -365,6 +419,10 @@ public:
 
     virtual compaction_strategy_type type() const {
         return compaction_strategy_type::null;
+    }
+
+    virtual seastar::lw_shared_ptr<compaction_backlog_tracker> get_backlog_tracker() override {
+        return get_null_backlog_tracker();
     }
 };
 
@@ -388,6 +446,10 @@ public:
 
     virtual compaction_strategy_type type() const {
         return compaction_strategy_type::major;
+    }
+
+    virtual seastar::lw_shared_ptr<compaction_backlog_tracker> get_backlog_tracker() override {
+        return get_null_backlog_tracker();
     }
 };
 
@@ -444,6 +506,10 @@ compaction_strategy::make_sstable_set(schema_ptr schema) const {
     return sstable_set(
             _compaction_strategy_impl->make_sstable_set(std::move(schema)),
             make_lw_shared<sstable_list>());
+}
+
+seastar::lw_shared_ptr<compaction_backlog_tracker> compaction_strategy::get_backlog_tracker() {
+    return _compaction_strategy_impl->get_backlog_tracker();
 }
 
 compaction_strategy make_compaction_strategy(compaction_strategy_type strategy, const std::map<sstring, sstring>& options) {

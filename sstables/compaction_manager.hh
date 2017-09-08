@@ -34,6 +34,7 @@
 #include <list>
 #include <functional>
 #include "sstables/compaction.hh"
+#include "compaction_backlog_manager.hh"
 
 class column_family;
 class compacting_sstable_registration;
@@ -126,6 +127,8 @@ private:
     // stop of transportation services. It cannot make progress anyway.
     // Returns true if error is judged not fatal, and compaction can be retried.
     inline bool maybe_stop_on_error(future<> f);
+
+    compaction_backlog_manager _backlog_manager;
 public:
     compaction_manager();
     ~compaction_manager();
@@ -191,6 +194,14 @@ public:
 
     void add_compacted_bytes(uint64_t bytes) {
         _stats.bytes_compacted += bytes;
+    }
+
+    float backlog() {
+        return _backlog_manager.backlog();
+    }
+
+    void register_backlog_tracker(seastar::lw_shared_ptr<compaction_backlog_tracker> backlog_tracker) {
+        _backlog_manager.register_backlog_tracker(std::move(backlog_tracker));
     }
 
     friend class compacting_sstable_registration;
