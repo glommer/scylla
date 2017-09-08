@@ -119,4 +119,17 @@ public:
     {}
 };
 
-
+class compaction_cpu_controller : public backlog_cpu_controller {
+    static constexpr float low_backlog = 0.05f;
+    static constexpr float mild_backlog = 0.15f;
+    static constexpr float max_backlog = 1;
+public:
+    compaction_cpu_controller(backlog_cpu_controller::disabled d) : backlog_cpu_controller(std::move(d)) {}
+    compaction_cpu_controller(std::chrono::milliseconds interval, std::function<float()> current_backlog)
+        : backlog_cpu_controller(std::move(interval),
+                                 low_backlog,
+                                 mild_backlog,
+                                 max_backlog,
+                                 std::move(current_backlog))
+    {}
+};

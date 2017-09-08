@@ -299,6 +299,7 @@ public:
         restricted_mutation_reader_config streaming_read_concurrency_config;
         ::cf_stats* cf_stats = nullptr;
         seastar::thread_scheduling_group* background_writer_scheduling_group = nullptr;
+        seastar::thread_scheduling_group* compaction_scheduling_group = nullptr;
         seastar::thread_scheduling_group* memtable_scheduling_group = nullptr;
         bool enable_metrics_reporting = false;
     };
@@ -742,8 +743,8 @@ public:
         return _config.cf_stats;
     }
 
-    seastar::thread_scheduling_group* background_writer_scheduling_group() {
-        return _config.background_writer_scheduling_group;
+    seastar::thread_scheduling_group* compaction_scheduling_group() {
+        return _config.compaction_scheduling_group;
     }
 
     compaction_manager& get_compaction_manager() const {
@@ -937,6 +938,7 @@ public:
         restricted_mutation_reader_config streaming_read_concurrency_config;
         ::cf_stats* cf_stats = nullptr;
         seastar::thread_scheduling_group* background_writer_scheduling_group = nullptr;
+        seastar::thread_scheduling_group* compaction_scheduling_group = nullptr;
         seastar::thread_scheduling_group* memtable_scheduling_group = nullptr;
         bool enable_metrics_reporting = false;
     };
@@ -1045,9 +1047,6 @@ private:
     dirty_memory_manager _dirty_memory_manager;
     dirty_memory_manager _streaming_dirty_memory_manager;
 
-    seastar::thread_scheduling_group _background_writer_scheduling_group;
-    flush_cpu_controller _memtable_cpu_controller;
-
     semaphore _read_concurrency_sem{max_concurrent_reads()};
     semaphore _streaming_concurrency_sem{max_streaming_concurrent_reads()};
     restricted_mutation_reader_config _read_concurrency_config;
@@ -1065,6 +1064,10 @@ private:
     std::unique_ptr<compaction_manager> _compaction_manager;
     seastar::metrics::metric_groups _metrics;
     bool _enable_incremental_backups = false;
+
+    seastar::thread_scheduling_group _background_writer_scheduling_group;
+    compaction_cpu_controller _compaction_cpu_controller;
+    flush_cpu_controller _memtable_cpu_controller;
 
     future<> init_commitlog();
     future<> apply_in_memory(const frozen_mutation& m, schema_ptr m_schema, db::rp_handle&&, timeout_clock::time_point timeout);

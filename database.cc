@@ -1422,7 +1422,7 @@ column_family::compact_sstables(sstables::compaction_descriptor descriptor, bool
                 return sst;
         };
         return sstables::compact_sstables(*sstables_to_compact, *this, create_sstable, descriptor.max_sstable_bytes, descriptor.level,
-                cleanup, _config.background_writer_scheduling_group).then([this, sstables_to_compact] (auto info) {
+                cleanup, _config.compaction_scheduling_group).then([this, sstables_to_compact] (auto info) {
             _compaction_strategy.notify_completion(*sstables_to_compact, info.new_sstables);
             this->rebuild_sstable_list(info.new_sstables, *sstables_to_compact);
             return info;
@@ -1817,7 +1817,7 @@ void distributed_loader::reshard(distributed<database>& db, sstring ks_name, sst
                         gc_clock::now(), default_io_error_handler_gen());
                     return sst;
                 };
-                auto f = sstables::reshard_sstables(sstables, *cf, creator, max_sstable_bytes, level, cf->background_writer_scheduling_group());
+                auto f = sstables::reshard_sstables(sstables, *cf, creator, max_sstable_bytes, level, cf->compaction_scheduling_group());
 
                 return f.then([&cf, sstables = std::move(sstables)] (std::vector<sstables::shared_sstable> new_sstables) mutable {
                     // an input sstable may belong to shard 1 and 2 and only have data which
@@ -2068,6 +2068,16 @@ future<> distributed_loader::populate_column_family(distributed<database>& db, s
 }
 
 inline
+compaction_cpu_controller
+make_compaction_cpu_controller(db::config& cfg, seastar::thread_scheduling_group* backup, std::function<float()> fn) {
+    // Soon this will be gone so let's not bother coming up with a parameter for compaction
+    if (cfg.auto_adjust_flush_quota()) {
+        return compaction_cpu_controller(250ms, std::move(fn));
+    }
+    return compaction_cpu_controller(backlog_cpu_controller::disabled{backup});
+}
+
+inline
 flush_cpu_controller
 make_flush_cpu_controller(db::config& cfg, seastar::thread_scheduling_group* backup, std::function<double()> fn) {
     if (cfg.auto_adjust_flush_quota()) {
@@ -2089,13 +2099,16 @@ database::database(const db::config& cfg)
     , _system_dirty_memory_manager(*this, 10 << 20, cfg.virtual_dirty_soft_limit())
     , _dirty_memory_manager(*this, memory::stats().total_memory() * 0.45, cfg.virtual_dirty_soft_limit())
     , _streaming_dirty_memory_manager(*this, memory::stats().total_memory() * 0.10, cfg.virtual_dirty_soft_limit())
-    , _background_writer_scheduling_group(1ms, _cfg->background_writer_scheduling_quota())
-    , _memtable_cpu_controller(make_flush_cpu_controller(*_cfg, &_background_writer_scheduling_group, [this, limit = float(_dirty_memory_manager.throttle_threshold())] {
-        return (_dirty_memory_manager.virtual_dirty_memory()) / limit;
-    }))
     , _version(empty_version)
     , _compaction_manager(std::make_unique<compaction_manager>())
     , _enable_incremental_backups(cfg.incremental_backups())
+    , _background_writer_scheduling_group(1ms, _cfg->background_writer_scheduling_quota())
+    , _compaction_cpu_controller(make_compaction_cpu_controller(*_cfg, &_background_writer_scheduling_group, [this] {
+        return _compaction_manager->backlog();
+    }))
+    , _memtable_cpu_controller(make_flush_cpu_controller(*_cfg, &_background_writer_scheduling_group, [this, limit = float(_dirty_memory_manager.throttle_threshold())] {
+        return (_dirty_memory_manager.virtual_dirty_memory()) / limit;
+    }))
 {
     _compaction_manager->start();
     setup_metrics();
@@ -2705,6 +2718,7 @@ keyspace::make_column_family_config(const schema& s, const db::config& db_config
     cfg.enable_incremental_backups = _config.enable_incremental_backups;
     cfg.background_writer_scheduling_group = _config.background_writer_scheduling_group;
     cfg.memtable_scheduling_group = _config.memtable_scheduling_group;
+    cfg.compaction_scheduling_group = _config.compaction_scheduling_group;
     cfg.enable_metrics_reporting = db_config.enable_keyspace_column_family_metrics();
 
     return cfg;
@@ -3461,6 +3475,7 @@ database::make_keyspace_config(const keyspace_metadata& ksm) {
     if (_cfg->background_writer_scheduling_quota() < 1.0f) {
         cfg.background_writer_scheduling_group = &_background_writer_scheduling_group;
         cfg.memtable_scheduling_group = _memtable_cpu_controller.scheduling_group();
+        cfg.compaction_scheduling_group = _compaction_cpu_controller.scheduling_group();
     }
     cfg.enable_metrics_reporting = _cfg->enable_keyspace_column_family_metrics();
     return cfg;
