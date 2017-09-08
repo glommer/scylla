@@ -152,6 +152,8 @@ struct compaction_read_monitor_generator final : public read_monitor_generator {
     class compaction_read_monitor final: public  sstables::read_monitor {
         sstables::shared_sstable _sst;
         compaction_manager& _compaction_manager;
+        seastar::lw_shared_ptr<compaction_backlog_tracker> _backlog_tracker;
+        seastar::lw_shared_ptr<compaction_read_progress> _read_progress;
         uint64_t _last_pos = 0;
     public:
         virtual void on_read(uint64_t pos) override {
@@ -163,12 +165,19 @@ struct compaction_read_monitor_generator final : public read_monitor_generator {
             }
             _last_pos = pos;
             _compaction_manager.add_compacted_bytes(delta);
+            _read_progress->bytes_compacted = pos;
         }
         virtual void on_fast_forward_to(uint64_t pos) override {
             // When compacting, we should always go forward.
             throw std::bad_function_call();
         }
-        compaction_read_monitor(sstables::shared_sstable sst, compaction_manager& cm) : _sst(std::move(sst)), _compaction_manager(cm) {
+        compaction_read_monitor(sstables::shared_sstable sst, compaction_manager& cm, seastar::lw_shared_ptr<compaction_backlog_tracker> bm)
+            : _sst(std::move(sst))
+            , _compaction_manager(cm)
+            , _backlog_tracker(std::move(bm))
+            , _read_progress(seastar::make_lw_shared<compaction_read_progress>(compaction_read_progress{_sst->data_size()}))
+        {
+            _backlog_tracker->register_compacting_sstable(_read_progress);
         }
 
         ~compaction_read_monitor() {
@@ -177,17 +186,39 @@ struct compaction_read_monitor_generator final : public read_monitor_generator {
             // we'll still want to notify the listeners about it. Calling on_read() with the same
             // size as it had before is legal, and will be a noop.
             on_read(_sst->data_size());
+            _backlog_tracker->finish_compacting_sstable(_read_progress);
         }
     };
 
     virtual seastar::shared_ptr<sstables::read_monitor> operator()(sstables::shared_sstable sst) override {
-        return seastar::make_shared<compaction_read_monitor>(std::move(sst), _compaction_manager);
+        return seastar::make_shared<compaction_read_monitor>(std::move(sst), _compaction_manager, _backlog_tracker);
     }
-    compaction_read_monitor_generator(compaction_manager& cm)
+    compaction_read_monitor_generator(compaction_manager& cm, seastar::lw_shared_ptr<compaction_backlog_tracker> bm)
         : _compaction_manager(cm)
+        , _backlog_tracker(std::move(bm))
         {}
 private:
      compaction_manager& _compaction_manager;
+     seastar::lw_shared_ptr<compaction_backlog_tracker> _backlog_tracker;
+};
+
+class compaction_write_monitor final : public sstables::write_monitor {
+    seastar::lw_shared_ptr<compaction_backlog_tracker> _backlog_tracker;
+    seastar::lw_shared_ptr<sstable_write_progress> _write_progress;
+public:
+    compaction_write_monitor(seastar::lw_shared_ptr<compaction_backlog_tracker> backlog_tracker)
+            : _backlog_tracker(backlog_tracker)
+            , _write_progress(seastar::make_lw_shared<sstable_write_progress>())
+    {
+        _backlog_tracker->register_partially_written_sstable(_write_progress);
+    }
+    virtual void on_write_completed() override {
+        _backlog_tracker->seal_partially_written_sstable(_write_progress);
+    }
+    virtual void on_component_written(uint64_t bytes_written) override {
+        _write_progress->bytes_written = bytes_written;
+    }
+    virtual void on_flush_completed() override { }
 };
 
 class compaction {
@@ -209,7 +240,7 @@ protected:
         , _max_sstable_size(max_sstable_size)
         , _sstable_level(sstable_level)
         , _tsg(tsg)
-        , _monitor_generator(seastar::make_shared<compaction_read_monitor_generator>(_cf.get_compaction_manager()))
+        , _monitor_generator(seastar::make_shared<compaction_read_monitor_generator>(_cf.get_compaction_manager(), _cf.get_compaction_strategy().get_backlog_tracker()))
     {
         _cf.get_compaction_manager().register_compaction(_info);
     }
@@ -428,6 +459,7 @@ public:
             auto&& priority = service::get_local_compaction_priority();
             sstable_writer_config cfg;
             cfg.max_sstable_size = _max_sstable_size;
+            cfg.monitor = seastar::make_shared<compaction_write_monitor>(_cf.get_compaction_strategy().get_backlog_tracker());
             _writer.emplace(_sst->get_writer(*_cf.schema(), partitions_per_sstable(), cfg, priority));
         }
         return &*_writer;
