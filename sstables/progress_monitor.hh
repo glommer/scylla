@@ -32,11 +32,14 @@ public:
     virtual ~write_monitor() { }
     virtual void on_write_completed() = 0;
     virtual void on_flush_completed() = 0;
+    // Total bytes written so far. Not a delta since last call.
+    virtual void on_component_written(uint64_t bytes_written) = 0;
 };
 
 struct noop_write_monitor final : public write_monitor {
     virtual void on_write_completed() override { }
     virtual void on_flush_completed() override { }
+    virtual void on_component_written(uint64_t bytes_written) override { }
 };
 
 seastar::shared_ptr<write_monitor> default_write_monitor();
