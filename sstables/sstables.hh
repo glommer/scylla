@@ -151,22 +151,16 @@ struct noop_write_monitor final : public write_monitor {
 seastar::shared_ptr<write_monitor> default_write_monitor();
 
 class read_monitor {
-    virtual void update_data_position(uint64_t pos) {}
-    friend class sstables::mutation_reader::impl;
 public:
-    virtual uint64_t current_file_position() const = 0;
+    virtual ~read_monitor() { }
+    // parameters are the current position in the data file
+    virtual void on_read(uint64_t current_pos) = 0;
+    virtual void on_fast_forward_to(uint64_t current_pos) = 0;
 };
 
-class basic_read_monitor final: public read_monitor {
-    uint64_t _current_data_position = 0;
-
-    virtual void update_data_position(uint64_t pos) override {
-        _current_data_position = pos;
-    }
-public:
-    uint64_t current_file_position() const {
-        return _current_data_position;
-    }
+struct noop_read_monitor final: public read_monitor {
+    virtual void on_read(uint64_t pos) override {}
+    virtual void on_fast_forward_to(uint64_t pos) override {}
 };
 
 seastar::shared_ptr<read_monitor> default_read_monitor();
@@ -345,7 +339,8 @@ public:
         const query::partition_slice& slice = query::full_slice,
         const io_priority_class& pc = default_priority_class(),
         streamed_mutation::forwarding fwd = streamed_mutation::forwarding::no,
-        ::mutation_reader::forwarding fwd_mr = ::mutation_reader::forwarding::yes);
+        ::mutation_reader::forwarding fwd_mr = ::mutation_reader::forwarding::yes,
+        seastar::shared_ptr<read_monitor> monitor = default_read_monitor());
 
     // read_rows() returns each of the rows in the sstable, in sequence,
     // converted to a "mutation" data structure.
@@ -360,7 +355,8 @@ public:
     // progress (i.e., returned a future which hasn't completed yet).
     mutation_reader read_rows(schema_ptr schema,
         const io_priority_class& pc = default_priority_class(),
-        streamed_mutation::forwarding fwd = streamed_mutation::forwarding::no);
+        streamed_mutation::forwarding fwd = streamed_mutation::forwarding::no,
+        seastar::shared_ptr<read_monitor> monitor = default_read_monitor());
 
     // Returns mutation_source containing all writes contained in this sstable.
     // The mutation_source shares ownership of this sstable.
