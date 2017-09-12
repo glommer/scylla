@@ -822,21 +822,25 @@ class sstable_mutation_reader : public flat_mutation_reader::impl {
     bool _single_partition_read = false;
     std::function<future<> ()> _initialize;
     streamed_mutation::forwarding _fwd;
+    read_monitor& _monitor;
     stdx::optional<dht::decorated_key> _current_partition_key;
     bool _partition_finished = true;
 public:
     sstable_mutation_reader(shared_sstable sst, schema_ptr schema,
          const io_priority_class &pc,
          reader_resource_tracker resource_tracker,
-         streamed_mutation::forwarding fwd)
+         streamed_mutation::forwarding fwd,
+         read_monitor& mon)
         : impl(std::move(schema))
         , _sst(std::move(sst))
         , _consumer(this, _schema, _schema->full_slice(), pc, std::move(resource_tracker), fwd, _sst)
         , _initialize([this] {
             _context = _sst->data_consume_rows(_consumer);
+            _monitor.on_read_started(_context->reader_position());
             return make_ready_future<>();
         })
-        , _fwd(fwd) { }
+        , _fwd(fwd)
+        , _monitor(mon) { }
     sstable_mutation_reader(shared_sstable sst,
          schema_ptr schema,
          const dht::partition_range& pr,
@@ -844,7 +848,8 @@ public:
          const io_priority_class& pc,
          reader_resource_tracker resource_tracker,
          streamed_mutation::forwarding fwd,
-         mutation_reader::forwarding fwd_mr)
+         mutation_reader::forwarding fwd_mr,
+         read_monitor& mon)
         : impl(std::move(schema))
         , _sst(std::move(sst))
         , _consumer(this, _schema, slice, pc, std::move(resource_tracker), fwd, _sst)
@@ -857,11 +862,13 @@ public:
                                              _rh_index->data_file_position()};
                 auto last_end = fwd_mr ? _sst->data_size() : drr.end;
                 _context = _sst->data_consume_rows(_consumer, std::move(drr), last_end);
+                _monitor.on_read_started(_context->reader_position());
                 _index_in_current_partition = true;
                 _will_likely_slice = will_likely_slice(slice);
             });
         })
-        , _fwd(fwd) { }
+        , _fwd(fwd)
+        , _monitor(mon) { }
     sstable_mutation_reader(shared_sstable sst,
                             schema_ptr schema,
                             dht::ring_position_view key,
@@ -869,7 +876,8 @@ public:
                             const io_priority_class& pc,
                             reader_resource_tracker resource_tracker,
                             streamed_mutation::forwarding fwd,
-                            mutation_reader::forwarding fwd_mr)
+                            mutation_reader::forwarding fwd_mr,
+                            read_monitor& mon)
         : impl(std::move(schema))
         , _sst(std::move(sst))
         , _consumer(this, _schema, slice, pc, std::move(resource_tracker), fwd, _sst)
@@ -889,17 +897,20 @@ public:
                 return f.then([this, &slice, &pc] () mutable {
                     _context = _sst->data_consume_single_partition(_consumer,
                             { _lh_index->data_file_position(), _rh_index->data_file_position() });
+                    _monitor.on_read_started(_context->reader_position());
                     _will_likely_slice = will_likely_slice(slice);
                     _index_in_current_partition = true;
                 });
             });
         })
-        , _fwd(fwd) { }
+        , _fwd(fwd)
+        , _monitor(mon) { }
 
     // Reference to _consumer is passed to data_consume_rows() in the constructor so we must not allow move/copy
     sstable_mutation_reader(sstable_mutation_reader&&) = delete;
     sstable_mutation_reader(const sstable_mutation_reader&) = delete;
     ~sstable_mutation_reader() {
+        _monitor.on_read_completed(_context->reader_position());
         auto close = [] (std::unique_ptr<index_reader>& ptr) {
             if (ptr) {
                 auto f = ptr->close();
@@ -1155,7 +1166,7 @@ public:
 };
 
 flat_mutation_reader sstable::read_rows_flat(schema_ptr schema, const io_priority_class& pc, streamed_mutation::forwarding fwd) {
-    return make_flat_mutation_reader<sstable_mutation_reader>(shared_from_this(), std::move(schema), pc, no_resource_tracking(), fwd);
+    return make_flat_mutation_reader<sstable_mutation_reader>(shared_from_this(), std::move(schema), pc, no_resource_tracking(), fwd, default_read_monitor());
 }
 
 flat_mutation_reader
@@ -1164,9 +1175,10 @@ sstables::sstable::read_row_flat(schema_ptr schema,
                                  const query::partition_slice& slice,
                                  const io_priority_class& pc,
                                  reader_resource_tracker resource_tracker,
-                                 streamed_mutation::forwarding fwd)
+                                 streamed_mutation::forwarding fwd,
+                                 read_monitor& mon)
 {
-    return make_flat_mutation_reader<sstable_mutation_reader>(shared_from_this(), std::move(schema), std::move(key), slice, pc, std::move(resource_tracker), fwd, mutation_reader::forwarding::no);
+    return make_flat_mutation_reader<sstable_mutation_reader>(shared_from_this(), std::move(schema), std::move(key), slice, pc, std::move(resource_tracker), fwd, mutation_reader::forwarding::no, mon);
 }
 
 flat_mutation_reader
@@ -1176,9 +1188,10 @@ sstable::read_range_rows_flat(schema_ptr schema,
                          const io_priority_class& pc,
                          reader_resource_tracker resource_tracker,
                          streamed_mutation::forwarding fwd,
-                         mutation_reader::forwarding fwd_mr) {
+                         mutation_reader::forwarding fwd_mr,
+                         read_monitor& mon) {
     return make_flat_mutation_reader<sstable_mutation_reader>(
-        shared_from_this(), std::move(schema), range, slice, pc, std::move(resource_tracker), fwd, fwd_mr);
+        shared_from_this(), std::move(schema), range, slice, pc, std::move(resource_tracker), fwd, fwd_mr, mon);
 }
 
 row_consumer::proceed
