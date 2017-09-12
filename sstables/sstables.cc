@@ -2031,7 +2031,8 @@ static size_t summary_byte_cost() {
 components_writer::components_writer(sstable& sst, const schema& s, file_writer& out,
                                      uint64_t estimated_partitions,
                                      const sstable_writer_config& cfg,
-                                     const io_priority_class& pc)
+                                     const io_priority_class& pc,
+                                     seastar::shared_ptr<write_monitor> mon)
     : _sst(sst)
     , _schema(s)
     , _out(out)
@@ -2040,6 +2041,7 @@ components_writer::components_writer(sstable& sst, const schema& s, file_writer&
     , _max_sstable_size(cfg.max_sstable_size)
     , _tombstone_written(false)
     , _summary_byte_cost(summary_byte_cost())
+    , _monitor(std::move(mon))
 {
     _sst._components->filter = utils::i_filter::get_filter(estimated_partitions, _schema.bloom_filter_fp_chance());
     _sst._pi_write.desired_block_size = cfg.promoted_index_block_size.value_or(get_config().column_index_size_in_kb() * 1024);
@@ -2270,7 +2272,7 @@ sstable_writer::sstable_writer(sstable& sst, const schema& s, uint64_t estimated
     _sst.create_data().get();
     _compression_enabled = !_sst.has_component(sstable::component_type::CRC);
     prepare_file_writer();
-    _components_writer.emplace(_sst, _schema, *_writer, estimated_partitions, cfg, _pc);
+    _components_writer.emplace(_sst, _schema, *_writer, estimated_partitions, cfg, _pc, _monitor);
 }
 
 void sstable_writer::consume_end_of_stream()
