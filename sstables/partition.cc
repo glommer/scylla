@@ -741,12 +741,13 @@ sstables::sstable::read_row(schema_ptr schema,
                             const query::partition_slice& slice,
                             const io_priority_class& pc,
                             reader_resource_tracker resource_tracker,
-                            streamed_mutation::forwarding fwd)
+                            streamed_mutation::forwarding fwd,
+                            seastar::shared_ptr<read_monitor> mon)
 {
     return do_with(dht::global_partitioner().decorate_key(*schema,
                 key.to_partition_key(*schema)),
-                [this, schema, &slice, &pc, resource_tracker = std::move(resource_tracker), fwd] (auto& dk) {
-                    return this->read_row(schema, dk, slice, pc, std::move(resource_tracker), fwd);
+                [this, schema, &slice, &pc, resource_tracker = std::move(resource_tracker), fwd, mon = std::move(mon)] (auto& dk) {
+                    return this->read_row(schema, dk, slice, pc, std::move(resource_tracker), fwd, mon);
                 });
 }
 
@@ -756,10 +757,11 @@ sstables::sstable::read_row_flat(schema_ptr schema,
                                  const query::partition_slice& slice,
                                  const io_priority_class& pc,
                                  reader_resource_tracker resource_tracker,
-                                 streamed_mutation::forwarding fwd)
+                                 streamed_mutation::forwarding fwd,
+                                 seastar::shared_ptr<read_monitor> mon)
 {
     auto dk = dht::global_partitioner().decorate_key(*schema, key.to_partition_key(*schema));
-    return this->read_row_flat(schema, std::move(dk), slice, pc, std::move(resource_tracker), fwd);
+    return this->read_row_flat(schema, std::move(dk), slice, pc, std::move(resource_tracker), fwd, std::move(mon));
 }
 
 static inline void ensure_len(bytes_view v, size_t len) {
@@ -842,13 +844,15 @@ class sstable_mutation_reader : public flat_mutation_reader::impl {
     bool _single_partition_read = false;
     std::function<future<> ()> _initialize;
     streamed_mutation::forwarding _fwd;
+    seastar::shared_ptr<read_monitor> _monitor;
     stdx::optional<dht::decorated_key> _current_partition_key;
     bool _partition_finished = true;
 public:
     sstable_mutation_reader(shared_sstable sst, schema_ptr schema,
          const io_priority_class &pc,
          reader_resource_tracker resource_tracker,
-         streamed_mutation::forwarding fwd)
+         streamed_mutation::forwarding fwd,
+         seastar::shared_ptr<read_monitor> mon)
         : impl(std::move(schema))
         , _sst(std::move(sst))
         , _consumer(this, _schema, _schema->full_slice(), pc, std::move(resource_tracker), fwd)
@@ -856,7 +860,8 @@ public:
             _context = _sst->data_consume_rows(_consumer);
             return make_ready_future<>();
         })
-        , _fwd(fwd) { }
+        , _fwd(fwd)
+        , _monitor(std::move(mon)) { }
     sstable_mutation_reader(shared_sstable sst,
          schema_ptr schema,
          const dht::partition_range& pr,
@@ -864,7 +869,8 @@ public:
          const io_priority_class& pc,
          reader_resource_tracker resource_tracker,
          streamed_mutation::forwarding fwd,
-         mutation_reader::forwarding fwd_mr)
+         mutation_reader::forwarding fwd_mr,
+         seastar::shared_ptr<read_monitor> mon)
         : impl(std::move(schema))
         , _sst(std::move(sst))
         , _consumer(this, _schema, slice, pc, std::move(resource_tracker), fwd)
@@ -881,7 +887,8 @@ public:
                 _will_likely_slice = will_likely_slice(slice);
             });
         })
-        , _fwd(fwd) { }
+        , _fwd(fwd)
+        , _monitor(std::move(mon)) { }
     sstable_mutation_reader(shared_sstable sst,
                             schema_ptr schema,
                             dht::ring_position_view key,
@@ -889,7 +896,8 @@ public:
                             const io_priority_class& pc,
                             reader_resource_tracker resource_tracker,
                             streamed_mutation::forwarding fwd,
-                            mutation_reader::forwarding fwd_mr)
+                            mutation_reader::forwarding fwd_mr,
+                            seastar::shared_ptr<read_monitor> mon)
         : impl(std::move(schema))
         , _sst(std::move(sst))
         , _consumer(this, _schema, slice, pc, std::move(resource_tracker), fwd)
@@ -914,7 +922,8 @@ public:
                 });
             });
         })
-        , _fwd(fwd) { }
+        , _fwd(fwd)
+        , _monitor(std::move(mon)) { }
 
     // Reference to _consumer is passed to data_consume_rows() in the constructor so we must not allow move/copy
     sstable_mutation_reader(sstable_mutation_reader&&) = delete;
@@ -985,6 +994,7 @@ private:
                 return make_ready_future<>();
             }
             on_next_partition(dht::global_partitioner().decorate_key(*_schema, std::move(mut->key)), mut->tomb);
+            _monitor->on_read(_context->position());
             return make_ready_future<>();
         });
     }
@@ -1080,16 +1090,8 @@ private:
         }
         return _initialize();
     }
-public:
-    void on_end_of_stream() {
-        if (_fwd == streamed_mutation::forwarding::yes) {
-            _end_of_stream = true;
-        } else {
-            this->push_mutation_fragment(mutation_fragment(partition_end()));
-            _partition_finished = true;
-        }
-    }
-    virtual future<> fast_forward_to(const dht::partition_range& pr) override {
+
+    virtual future<> do_fast_forward_to(const dht::partition_range& pr) {
         return ensure_initialized().then([this, &pr] {
             if (!is_initialized()) {
                 _end_of_stream = true;
@@ -1115,6 +1117,20 @@ public:
                     return make_ready_future<>();
                 });
             }
+        });
+    }
+public:
+    void on_end_of_stream() {
+        if (_fwd == streamed_mutation::forwarding::yes) {
+            _end_of_stream = true;
+        } else {
+            this->push_mutation_fragment(mutation_fragment(partition_end()));
+            _partition_finished = true;
+        }
+    }
+    virtual future<> fast_forward_to(const dht::partition_range& pr) override {
+        return do_fast_forward_to(pr).finally([this] {
+            _monitor->on_fast_forward_to(_context->position());
         });
     }
     virtual future<> fill_buffer() override {
@@ -1175,7 +1191,7 @@ public:
 };
 
 flat_mutation_reader sstable::read_rows_flat(schema_ptr schema, const io_priority_class& pc, streamed_mutation::forwarding fwd) {
-    return make_flat_mutation_reader<sstable_mutation_reader>(shared_from_this(), std::move(schema), pc, no_resource_tracking(), fwd);
+    return make_flat_mutation_reader<sstable_mutation_reader>(shared_from_this(), std::move(schema), pc, no_resource_tracking(), fwd, default_read_monitor());
 }
 
 future<streamed_mutation_opt>
@@ -1184,10 +1200,11 @@ sstables::sstable::read_row(schema_ptr schema,
     const query::partition_slice& slice,
     const io_priority_class& pc,
     reader_resource_tracker resource_tracker,
-    streamed_mutation::forwarding fwd)
+    streamed_mutation::forwarding fwd,
+    seastar::shared_ptr<read_monitor> mon)
 {
     return streamed_mutation_from_flat_mutation_reader(
-        read_row_flat(std::move(schema), std::move(key), slice, pc, std::move(resource_tracker), fwd));
+        read_row_flat(std::move(schema), std::move(key), slice, pc, std::move(resource_tracker), fwd, std::move(mon)));
 }
 
 flat_mutation_reader
@@ -1196,9 +1213,10 @@ sstables::sstable::read_row_flat(schema_ptr schema,
                                  const query::partition_slice& slice,
                                  const io_priority_class& pc,
                                  reader_resource_tracker resource_tracker,
-                                 streamed_mutation::forwarding fwd)
+                                 streamed_mutation::forwarding fwd,
+                                 seastar::shared_ptr<read_monitor> mon)
 {
-    return make_flat_mutation_reader<sstable_mutation_reader>(shared_from_this(), std::move(schema), std::move(key), slice, pc, std::move(resource_tracker), fwd, mutation_reader::forwarding::no);
+    return make_flat_mutation_reader<sstable_mutation_reader>(shared_from_this(), std::move(schema), std::move(key), slice, pc, std::move(resource_tracker), fwd, mutation_reader::forwarding::no, std::move(mon));
 }
 
 mutation_reader
@@ -1208,9 +1226,10 @@ sstable::read_range_rows(schema_ptr schema,
                          const io_priority_class& pc,
                          reader_resource_tracker resource_tracker,
                          streamed_mutation::forwarding fwd,
-                         mutation_reader::forwarding fwd_mr) {
+                         mutation_reader::forwarding fwd_mr,
+                         seastar::shared_ptr<read_monitor> mon) {
     return mutation_reader_from_flat_mutation_reader(
-        read_range_rows_flat(std::move(schema), range, slice, pc, std::move(resource_tracker), fwd, fwd_mr));
+        read_range_rows_flat(std::move(schema), range, slice, pc, std::move(resource_tracker), fwd, fwd_mr, std::move(mon)));
 }
 
 flat_mutation_reader
@@ -1220,9 +1239,10 @@ sstable::read_range_rows_flat(schema_ptr schema,
                          const io_priority_class& pc,
                          reader_resource_tracker resource_tracker,
                          streamed_mutation::forwarding fwd,
-                         mutation_reader::forwarding fwd_mr) {
+                         mutation_reader::forwarding fwd_mr,
+                         seastar::shared_ptr<read_monitor> mon) {
     return make_flat_mutation_reader<sstable_mutation_reader>(
-        shared_from_this(), std::move(schema), range, slice, pc, std::move(resource_tracker), fwd, fwd_mr);
+        shared_from_this(), std::move(schema), range, slice, pc, std::move(resource_tracker), fwd, fwd_mr, std::move(mon));
 }
 
 row_consumer::proceed
