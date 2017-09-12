@@ -812,6 +812,10 @@ public:
     // Can be called from any position.
     future<streamed_mutation_opt> read_next_partition();
     future<> fast_forward_to(const dht::partition_range&);
+
+    uint64_t current_data_position() const {
+        return _context.position();
+    }
 };
 
 class sstable_streamed_mutation : public streamed_mutation::impl {
@@ -1045,30 +1049,36 @@ class mutation_reader::impl {
 private:
     lw_shared_ptr<sstable_data_source> _ds;
     std::function<future<lw_shared_ptr<sstable_data_source>> ()> _get_data_source;
+    seastar::shared_ptr<read_monitor> _monitor;
 public:
     impl(shared_sstable sst, schema_ptr schema, sstable::disk_read_range toread, uint64_t last_end,
          const io_priority_class &pc,
-         streamed_mutation::forwarding fwd)
+         streamed_mutation::forwarding fwd,
+         seastar::shared_ptr<sstables::read_monitor> mon)
         : _get_data_source([this, sst = std::move(sst), s = std::move(schema), toread, last_end, &pc, fwd] {
             auto consumer = mp_row_consumer(s, query::full_slice, pc, fwd);
             auto ds = make_lw_shared<sstable_data_source>(std::move(s), std::move(sst), std::move(consumer), std::move(toread), last_end);
             return make_ready_future<lw_shared_ptr<sstable_data_source>>(std::move(ds));
-        }) { }
+        })
+        , _monitor(std::move(mon)) { }
     impl(shared_sstable sst, schema_ptr schema,
          const io_priority_class &pc,
-         streamed_mutation::forwarding fwd)
+         streamed_mutation::forwarding fwd,
+         seastar::shared_ptr<sstables::read_monitor> mon)
         : _get_data_source([this, sst = std::move(sst), s = std::move(schema), &pc, fwd] {
             auto consumer = mp_row_consumer(s, query::full_slice, pc, fwd);
             auto ds = make_lw_shared<sstable_data_source>(std::move(s), std::move(sst), std::move(consumer));
             return make_ready_future<lw_shared_ptr<sstable_data_source>>(std::move(ds));
-        }) { }
+        })
+        , _monitor(std::move(mon)) { }
     impl(shared_sstable sst,
          schema_ptr schema,
          const dht::partition_range& pr,
          const query::partition_slice& slice,
          const io_priority_class& pc,
          streamed_mutation::forwarding fwd,
-         ::mutation_reader::forwarding fwd_mr)
+         ::mutation_reader::forwarding fwd_mr,
+         seastar::shared_ptr<read_monitor> mon)
         : _get_data_source([this, pr, sst = std::move(sst), s = std::move(schema), &pc, &slice, fwd, fwd_mr] () mutable {
             auto lh_index = sst->get_index_reader(pc); // lh = left hand
             auto rh_index = sst->get_index_reader(pc);
@@ -1082,13 +1092,14 @@ public:
                 ds->_will_likely_slice = sstable_data_source::will_likely_slice(slice);
                 return ds;
             });
-        }) { }
+        })
+        , _monitor(std::move(mon)) { }
 
     // Reference to _consumer is passed to data_consume_rows() in the constructor so we must not allow move/copy
     impl(impl&&) = delete;
     impl(const impl&) = delete;
-
-    future<streamed_mutation_opt> read() {
+private:
+    future<streamed_mutation_opt> do_read() {
         if (_ds) {
             return _ds->read_next_partition();
         }
@@ -1100,7 +1111,7 @@ public:
         });
     }
 
-    future<> fast_forward_to(const dht::partition_range& pr) {
+    future<> do_fast_forward_to(const dht::partition_range& pr) {
         if (_ds) {
             return _ds->fast_forward_to(pr);
         }
@@ -1109,6 +1120,18 @@ public:
             // again in the future.
             _ds = std::move(ds);
             return _ds->fast_forward_to(pr);
+        });
+    }
+public:
+    future<streamed_mutation_opt> read() {
+        return do_read().finally([this] {
+            _monitor->on_read(_ds->current_data_position());
+        });
+    }
+
+    future<> fast_forward_to(const dht::partition_range& pr) {
+        return do_fast_forward_to(pr).finally([this] {
+            _monitor->on_fast_forward_to(_ds->current_data_position());
         });
     }
 };
@@ -1237,8 +1260,8 @@ future<> mutation_reader::fast_forward_to(const dht::partition_range& pr) {
     return _pimpl->fast_forward_to(pr);
 }
 
-mutation_reader sstable::read_rows(schema_ptr schema, const io_priority_class& pc, streamed_mutation::forwarding fwd) {
-    return std::make_unique<mutation_reader::impl>(shared_from_this(), schema, pc, fwd);
+mutation_reader sstable::read_rows(schema_ptr schema, const io_priority_class& pc, streamed_mutation::forwarding fwd, seastar::shared_ptr<sstables::read_monitor> mon) {
+    return std::make_unique<mutation_reader::impl>(shared_from_this(), schema, pc, fwd, std::move(mon));
 }
 
 static
@@ -1287,9 +1310,9 @@ sstable::read_range_rows(schema_ptr schema,
                          const query::partition_slice& slice,
                          const io_priority_class& pc,
                          streamed_mutation::forwarding fwd,
-                         ::mutation_reader::forwarding fwd_mr) {
+                         ::mutation_reader::forwarding fwd_mr,
+                         seastar::shared_ptr<read_monitor> mon) {
     return std::make_unique<mutation_reader::impl>(
-        shared_from_this(), std::move(schema), range, slice, pc, fwd, fwd_mr);
+        shared_from_this(), std::move(schema), range, slice, pc, fwd, fwd_mr, mon);
 }
-
 }

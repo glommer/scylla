@@ -40,4 +40,19 @@ struct noop_write_monitor final : public write_monitor {
 };
 
 seastar::shared_ptr<write_monitor> default_write_monitor();
+
+class read_monitor {
+public:
+    virtual ~read_monitor() { }
+    // parameters are the current position in the data file
+    virtual void on_read(uint64_t current_pos) = 0;
+    virtual void on_fast_forward_to(uint64_t current_pos) = 0;
+};
+
+struct noop_read_monitor final: public read_monitor {
+    virtual void on_read(uint64_t pos) override {}
+    virtual void on_fast_forward_to(uint64_t pos) override {}
+};
+
+seastar::shared_ptr<read_monitor> default_read_monitor();
 }
