@@ -96,6 +96,7 @@ public:
         _permit = sstable_write_permit::unconditional();
     }
     virtual void on_flush_completed() override { }
+    virtual void on_component_written(uint64_t bytes_written) override { }
 };
 
 static const std::unordered_set<sstring> system_keyspaces = {

@@ -2072,6 +2072,7 @@ void components_writer::consume_new_partition(const dht::decorated_key& dk) {
 
     // Write partition key into data file.
     write(_out, p_key);
+    _monitor->on_component_written(_out.offset());
 
     _tombstone_written = false;
 }
@@ -2096,6 +2097,7 @@ void components_writer::consume(tombstone t) {
     _tombstone_written = true;
     // TODO: need to verify we don't do this twice?
     _sst._pi_write.deltime = d;
+    _monitor->on_component_written(_out.offset());
 }
 
 stop_iteration components_writer::consume(static_row&& sr) {
@@ -2107,6 +2109,7 @@ stop_iteration components_writer::consume(static_row&& sr) {
 stop_iteration components_writer::consume(clustering_row&& cr) {
     ensure_tombstone_is_written();
     _sst.write_clustered_row(_out, _schema, cr);
+    _monitor->on_component_written(_out.offset());
     return stop_iteration::no;
 }
 
@@ -2123,6 +2126,7 @@ stop_iteration components_writer::consume(range_tombstone&& rt) {
     auto end_marker = bound_kind_to_end_marker(rt.end_kind);
     _sst.maybe_flush_pi_block(_out, start, {}, start_marker);
     _sst.write_range_tombstone(_out, std::move(start), start_marker, std::move(end), end_marker, {}, rt.tomb);
+    _monitor->on_component_written(_out.offset());
     return stop_iteration::no;
 }
 
@@ -2157,6 +2161,7 @@ stop_iteration components_writer::consume_end_of_partition() {
         _first_key = *_partition_key;
     }
     _last_key = std::move(*_partition_key);
+    _monitor->on_component_written(_out.offset());
 
     return get_offset() < _max_sstable_size ? stop_iteration::no : stop_iteration::yes;
 }
