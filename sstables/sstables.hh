@@ -147,6 +147,27 @@ struct noop_write_monitor final : public write_monitor {
 
 seastar::shared_ptr<write_monitor> default_write_monitor();
 
+class read_monitor {
+    virtual void update_data_position(uint64_t pos) {}
+    friend class sstables::mutation_reader::impl;
+public:
+    virtual uint64_t current_file_position() const = 0;
+};
+
+class basic_read_monitor final: public read_monitor {
+    uint64_t _current_data_position = 0;
+
+    virtual void update_data_position(uint64_t pos) override {
+        _current_data_position = pos;
+    }
+public:
+    uint64_t current_file_position() const {
+        return _current_data_position;
+    }
+};
+
+seastar::shared_ptr<read_monitor> default_read_monitor();
+
 struct sstable_writer_config {
     std::experimental::optional<size_t> promoted_index_block_size;
     uint64_t max_sstable_size = std::numeric_limits<uint64_t>::max();
@@ -812,6 +833,7 @@ class components_writer {
     uint64_t _next_data_offset_to_write_summary = 0;
     // Enforces ratio of summary to data of 1 to N.
     size_t _summary_byte_cost = default_summary_byte_cost;
+    seastar::shared_ptr<write_monitor> _monitor;
 private:
     void maybe_add_summary_entry(const dht::token& token, bytes_view key);
     uint64_t get_offset() const;
@@ -822,12 +844,12 @@ private:
         }
     }
 public:
-    components_writer(sstable& sst, const schema& s, file_writer& out, uint64_t estimated_partitions, const sstable_writer_config&, const io_priority_class& pc);
+    components_writer(sstable& sst, const schema& s, file_writer& out, uint64_t estimated_partitions, const sstable_writer_config&, const io_priority_class& pc, seastar::shared_ptr<write_monitor> mon);
     ~components_writer();
     components_writer(components_writer&& o) : _sst(o._sst), _schema(o._schema), _out(o._out), _index(std::move(o._index)),
             _index_needs_close(o._index_needs_close), _max_sstable_size(o._max_sstable_size), _tombstone_written(o._tombstone_written),
             _first_key(std::move(o._first_key)), _last_key(std::move(o._last_key)), _partition_key(std::move(o._partition_key)),
-            _next_data_offset_to_write_summary(o._next_data_offset_to_write_summary), _summary_byte_cost(o._summary_byte_cost) {
+            _next_data_offset_to_write_summary(o._next_data_offset_to_write_summary), _summary_byte_cost(o._summary_byte_cost), _monitor(std::move(o._monitor)) {
         o._index_needs_close = false;
     }
 
