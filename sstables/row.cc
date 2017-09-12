@@ -425,6 +425,10 @@ public:
     bool eof() const {
         return _ctx->eof();
     }
+
+    uint64_t position() const {
+        return _ctx->position();
+    }
 };
 
 data_consume_context::~data_consume_context() = default;
@@ -448,6 +452,11 @@ future<> data_consume_context::skip_to(indexable_element el, uint64_t begin) {
 bool data_consume_context::eof() const {
     return _pimpl->eof();
 }
+
+uint64_t data_consume_context::position() const {
+    return _pimpl->position();
+}
+
 
 data_consume_context sstable::data_consume_rows(
         row_consumer& consumer, sstable::disk_read_range toread, uint64_t last_end) {
