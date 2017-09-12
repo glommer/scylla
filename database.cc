@@ -4217,6 +4217,7 @@ write_memtable_to_sstable(memtable& mt, sstables::shared_sstable sst, sstable_wr
             _permit = sstable_write_permit::unconditional();
         }
         virtual void on_flush_completed() override { }
+        virtual void on_component_written(uint64_t bytes_written) override { }
     };
     sstables::sstable_writer_config cfg;
     cfg.replay_position = mt.replay_position();
