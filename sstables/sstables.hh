@@ -308,7 +308,8 @@ public:
         const query::partition_slice& slice = query::full_slice,
         const io_priority_class& pc = default_priority_class(),
         streamed_mutation::forwarding fwd = streamed_mutation::forwarding::no,
-        ::mutation_reader::forwarding fwd_mr = ::mutation_reader::forwarding::yes);
+        ::mutation_reader::forwarding fwd_mr = ::mutation_reader::forwarding::yes,
+        seastar::shared_ptr<read_monitor> monitor = default_read_monitor());
 
     // read_rows() returns each of the rows in the sstable, in sequence,
     // converted to a "mutation" data structure.
@@ -323,7 +324,8 @@ public:
     // progress (i.e., returned a future which hasn't completed yet).
     mutation_reader read_rows(schema_ptr schema,
         const io_priority_class& pc = default_priority_class(),
-        streamed_mutation::forwarding fwd = streamed_mutation::forwarding::no);
+        streamed_mutation::forwarding fwd = streamed_mutation::forwarding::no,
+        seastar::shared_ptr<read_monitor> monitor = default_read_monitor());
 
     // Returns mutation_source containing all writes contained in this sstable.
     // The mutation_source shares ownership of this sstable.
