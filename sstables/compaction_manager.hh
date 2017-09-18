@@ -47,6 +47,7 @@ public:
         int64_t pending_tasks = 0;
         int64_t completed_tasks = 0;
         uint64_t active_tasks = 0; // Number of compaction going on.
+        uint64_t bytes_compacted = 0;
         int64_t errors = 0;
     };
 private:
@@ -187,6 +188,10 @@ public:
 
     // Stops ongoing compaction of a given type.
     void stop_compaction(sstring type);
+
+    void add_compacted_bytes(uint64_t bytes) {
+        _stats.bytes_compacted += bytes;
+    }
 
     friend class compacting_sstable_registration;
     friend class compaction_weight_registration;
