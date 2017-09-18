@@ -22,8 +22,11 @@
 #pragma once
 
 #include "cql3/statements/property_definitions.hh"
+#include "compaction_backlog_manager.hh"
 
 namespace sstables {
+
+lw_shared_ptr<compaction_backlog_tracker> get_unimplemented_backlog_tracker();
 
 class sstable_set_impl;
 
@@ -92,6 +95,9 @@ public:
         }
         return sst->estimate_droppable_tombstone_ratio(gc_before) >= _tombstone_threshold;
     }
-};
 
+    virtual lw_shared_ptr<compaction_backlog_tracker> get_backlog_tracker() {
+        return get_unimplemented_backlog_tracker();
+    }
+};
 }
