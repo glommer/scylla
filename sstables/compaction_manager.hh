@@ -34,6 +34,7 @@
 #include <list>
 #include <functional>
 #include "sstables/compaction.hh"
+#include "compaction_backlog_manager.hh"
 
 class column_family;
 class compacting_sstable_registration;
@@ -125,6 +126,8 @@ private:
     // stop of transportation services. It cannot make progress anyway.
     // Returns true if error is judged not fatal, and compaction can be retried.
     inline bool maybe_stop_on_error(future<> f);
+
+    compaction_backlog_manager _backlog_manager;
 public:
     compaction_manager();
     ~compaction_manager();
@@ -187,6 +190,14 @@ public:
 
     // Stops ongoing compaction of a given type.
     void stop_compaction(sstring type);
+
+    float backlog() {
+        return _backlog_manager.backlog();
+    }
+
+    void register_backlog_tracker(compaction_backlog_tracker& backlog_tracker) {
+        _backlog_manager.register_backlog_tracker(backlog_tracker);
+    }
 
     friend class compacting_sstable_registration;
     friend class compaction_weight_registration;

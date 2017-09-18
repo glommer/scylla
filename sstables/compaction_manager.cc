@@ -20,6 +20,7 @@
  */
 
 #include "compaction_manager.hh"
+#include "compaction_backlog_manager.hh"
 #include "sstables/sstables.hh"
 #include "database.hh"
 #include <seastar/core/metrics.hh>
@@ -604,4 +605,74 @@ void compaction_manager::stop_compaction(sstring type) {
             info->stop("user request");
         }
     }
+}
+
+compaction_backlog_tracker::backlog compaction_backlog_tracker::get_backlog() {
+    return _impl->get_backlog();
+}
+
+void compaction_backlog_tracker::add_sstable(sstables::shared_sstable sst) {
+    _manager->_total_bytes += sst->data_size();
+    _total_bytes += sst->data_size();
+    _impl->add_sstable(std::move(sst));
+}
+
+void compaction_backlog_tracker::remove_sstable(sstables::shared_sstable sst) {
+    _manager->_total_bytes -= sst->data_size();
+    _total_bytes -= sst->data_size();
+    _impl->remove_sstable(std::move(sst));
+}
+
+void compaction_backlog_tracker::register_partially_written_sstable(const sstables::writer_offset_tracker& wp) {
+    _impl->register_partially_written_sstable(wp);
+    _changes_in_progress++;
+}
+
+void compaction_backlog_tracker::seal_partially_written_sstable(const sstables::writer_offset_tracker& wp) {
+    _impl->seal_partially_written_sstable(wp);
+    _changes_in_progress--;
+    maybe_remove();
+}
+
+void compaction_backlog_tracker::register_compacting_sstable(const sstables::reader_position_tracker& rp) {
+    _impl->register_compacting_sstable(rp);
+    _changes_in_progress++;
+}
+
+void compaction_backlog_tracker::finish_compacting_sstable(const sstables::reader_position_tracker& rp) {
+    _impl->finish_compacting_sstable(rp);
+    _changes_in_progress--;
+    maybe_remove();
+}
+
+void compaction_backlog_tracker::maybe_remove() {
+    if (_manager && _stop_requested && (_changes_in_progress == 0)) {
+        _manager->remove_backlog_tracker(*this);
+    }
+}
+
+void compaction_backlog_tracker::stop_tracking_backlog() {
+    _stop_requested = true;
+    maybe_remove();
+}
+
+void compaction_backlog_manager::remove_backlog_tracker(compaction_backlog_tracker& tracker) {
+    _backlog_trackers.erase(&tracker);
+}
+
+double compaction_backlog_manager::backlog() const {
+    double sys_backlog = 0;
+    uint64_t sys_total_bytes = 0;
+
+    for (auto& tracker: _backlog_trackers) {
+        auto b = tracker->get_backlog();
+        sys_backlog += b.backlog * b.total_bytes;
+        sys_total_bytes += b.total_bytes;
+    }
+    return sys_total_bytes ? sys_backlog / sys_total_bytes : 0;
+}
+
+void compaction_backlog_manager::register_backlog_tracker(compaction_backlog_tracker& tracker) {
+    tracker._manager = this;
+    _backlog_trackers.insert(&tracker);
 }

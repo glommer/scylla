@@ -82,7 +82,9 @@ using namespace std::chrono_literals;
 
 logging::logger dblog("database");
 
-class permit_monitor final : public sstables::write_monitor {
+// Handles permit management only, used for situations where we don't want to inform
+// the compaction manager about backlogs (i.e., tests)
+class permit_monitor : public sstables::write_monitor {
     sstable_write_permit _permit;
 public:
     permit_monitor(sstable_write_permit&& permit)
@@ -99,6 +101,28 @@ public:
         _permit = sstable_write_permit::unconditional();
     }
     virtual void on_flush_completed() override { }
+};
+
+// Handles all tasks related to sstable writing: permit management, compaction backlog updates, etc
+class database_sstable_write_monitor : public permit_monitor {
+    sstables::shared_sstable _sst;
+    compaction_manager& _compaction_manager;
+    sstables::compaction_strategy& _compaction_strategy;
+public:
+    database_sstable_write_monitor(sstable_write_permit&& permit, sstables::shared_sstable sst, compaction_manager& manager, sstables::compaction_strategy& strategy)
+            : permit_monitor(std::move(permit))
+            , _sst(std::move(sst))
+            , _compaction_manager(manager)
+            , _compaction_strategy(strategy)
+    {}
+
+    virtual void on_write_started(const sstables::writer_offset_tracker& t) override {
+        _compaction_strategy.get_backlog_tracker().register_partially_written_sstable(t);
+    }
+
+    virtual void on_data_write_completed(const sstables::writer_offset_tracker& t) override {
+        _compaction_strategy.get_backlog_tracker().seal_partially_written_sstable(t);
+    }
 };
 
 static const std::unordered_set<sstring> system_keyspaces = {
@@ -818,6 +842,7 @@ void column_family::add_sstable(sstables::shared_sstable sstable, const std::vec
     new_sstables->insert(sstable);
     _sstables = std::move(new_sstables);
     update_stats_for_new_sstable(sstable->bytes_on_disk(), shards_for_the_sstable);
+    _compaction_strategy.get_backlog_tracker().add_sstable(sstable);
 }
 
 future<>
@@ -900,7 +925,7 @@ column_family::seal_active_streaming_memtable_immediate(flush_permit&& permit) {
             // Lastly, we don't have any commitlog RP to update, and we don't need to deal manipulate the
             // memtable list, since this memtable was not available for reading up until this point.
             auto fp = permit.release_sstable_write_permit();
-            return do_with(permit_monitor(std::move(fp)), [this, newtab, old, permit = std::move(permit)] (auto &monitor) mutable {
+            return do_with(database_sstable_write_monitor(std::move(fp), newtab, _compaction_manager,_compaction_strategy), [this, newtab, old, permit = std::move(permit)] (auto &monitor) mutable {
                 auto&& priority = service::get_local_streaming_write_priority();
                 return write_memtable_to_sstable(*old, newtab, monitor, incremental_backups_enabled(), priority, false, _config.background_writer_scheduling_group).then([this, newtab, old] {
                     return newtab->open_data();
@@ -953,7 +978,7 @@ future<> column_family::seal_active_streaming_memtable_big(streaming_memtable_bi
                 newtab->set_unshared();
 
                 auto fp = permit.release_sstable_write_permit();
-                return do_with(permit_monitor(std::move(fp)), [this, newtab, old, permit = std::move(permit), &smb] (auto &monitor) mutable {
+                return do_with(database_sstable_write_monitor(std::move(fp), newtab, _compaction_manager, _compaction_strategy), [this, newtab, old, permit = std::move(permit), &smb] (auto &monitor) mutable {
                     auto&& priority = service::get_local_streaming_write_priority();
                     return write_memtable_to_sstable(*old, newtab, monitor, incremental_backups_enabled(), priority, true, _config.background_writer_scheduling_group).then([this, newtab, old, &smb, permit = std::move(permit)] {
                         smb.sstables.emplace_back(newtab);
@@ -1040,7 +1065,7 @@ column_family::try_flush_memtable_to_sstable(lw_shared_ptr<memtable> old, sstabl
     //
     // The code as is guarantees that we'll never partially backup a
     // single sstable, so that is enough of a guarantee.
-    return do_with(permit_monitor(std::move(permit)), [this, newtab, old] (auto &monitor) {
+    return do_with(database_sstable_write_monitor(std::move(permit), newtab, _compaction_manager, _compaction_strategy), [this, newtab, old] (auto &monitor) {
         auto&& priority = service::get_local_memtable_flush_priority();
         return write_memtable_to_sstable(*old, newtab, monitor, incremental_backups_enabled(), priority, false, _config.memtable_scheduling_group).then([this, newtab, old] {
             return newtab->open_data();
@@ -1071,6 +1096,7 @@ column_family::start() {
 future<>
 column_family::stop() {
     return _async_gate.close().then([this] {
+        _compaction_strategy.get_backlog_tracker().stop_tracking_backlog();
         return when_all(_memtables->request_flush(), _streaming_memtables->request_flush()).discard_result().finally([this] {
             return _compaction_manager.remove(this).then([this] {
                 // Nest, instead of using when_all, so we don't lose any exceptions.
@@ -1254,6 +1280,15 @@ void column_family::rebuild_statistics() {
 void
 column_family::rebuild_sstable_list(const std::vector<sstables::shared_sstable>& new_sstables,
                                     const std::vector<sstables::shared_sstable>& sstables_to_remove) {
+
+    for (auto& sst: sstables_to_remove) {
+        _compaction_strategy.get_backlog_tracker().remove_sstable(sst);
+    }
+
+    for (auto& sst: new_sstables) {
+        _compaction_strategy.get_backlog_tracker().add_sstable(sst);
+    }
+
     // Build a new list of _sstables: We remove from the existing list the
     // tables we compacted (by now, there might be more sstables flushed
     // later), and we add the new tables generated by the compaction.
@@ -1479,8 +1514,13 @@ future<> column_family::run_compaction(sstables::compaction_descriptor descripto
 void column_family::set_compaction_strategy(sstables::compaction_strategy_type strategy) {
     dblog.info0("Setting compaction strategy of {}.{} to {}", _schema->ks_name(), _schema->cf_name(), sstables::compaction_strategy::name(strategy));
     auto new_cs = make_compaction_strategy(strategy, _schema->compaction_strategy_options());
+
+    _compaction_strategy.get_backlog_tracker().stop_tracking_backlog();
+    _compaction_manager.register_backlog_tracker(new_cs.get_backlog_tracker());
+
     auto new_sstables = new_cs.make_sstable_set(_schema);
     for (auto&& s : *_sstables->all()) {
+        new_cs.get_backlog_tracker().add_sstable(s);
         new_sstables.insert(s);
     }
     // now exception safe:
@@ -4034,8 +4074,9 @@ future<db::replay_position> column_family::discard_sstables(db_clock::time_point
         return _cache.invalidate([p, truncated_at] {
             p->prune(truncated_at);
             dblog.debug("cleaning out row cache");
-        }).then([p]() mutable {
-            return parallel_for_each(p->remove, [](sstables::shared_sstable s) {
+        }).then([this, p]() mutable {
+            return parallel_for_each(p->remove, [this](sstables::shared_sstable s) {
+                _compaction_strategy.get_backlog_tracker().remove_sstable(s);
                 return sstables::delete_atomically({s});
             }).then([p] {
                 return make_ready_future<db::replay_position>(p->rp);

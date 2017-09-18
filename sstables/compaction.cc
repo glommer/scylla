@@ -53,6 +53,7 @@
 #include "core/pipe.hh"
 
 #include "sstables.hh"
+#include "sstables/progress_monitor.hh"
 #include "compaction.hh"
 #include "compaction_manager.hh"
 #include "database.hh"
@@ -147,6 +148,55 @@ public:
     void consume_end_of_stream();
 };
 
+struct compaction_read_monitor_generator final : public read_monitor_generator {
+    class compaction_read_monitor final: public  sstables::read_monitor {
+        sstables::shared_sstable _sst;
+        compaction_manager& _compaction_manager;
+        compaction_backlog_tracker& _backlog_tracker;
+    public:
+        virtual void on_read_started(const sstables::reader_position_tracker& tracker) override {
+            _backlog_tracker.register_compacting_sstable(tracker);
+        }
+
+        virtual void on_read_completed(const sstables::reader_position_tracker& tracker) override {
+            _backlog_tracker.finish_compacting_sstable(tracker);
+        }
+        compaction_read_monitor(sstables::shared_sstable sst, compaction_manager& cm, compaction_backlog_tracker& bt)
+            : _sst(std::move(sst)), _compaction_manager(cm), _backlog_tracker(bt) {}
+    };
+
+    virtual sstables::read_monitor& operator()(sstables::shared_sstable sst) override {
+        _generated_monitors.emplace_back(std::move(sst), _compaction_manager, _backlog_tracker);
+        return _generated_monitors.back();
+    }
+    compaction_read_monitor_generator(compaction_manager& cm, compaction_backlog_tracker& bt)
+        : _compaction_manager(cm)
+        , _backlog_tracker(bt)
+        {}
+private:
+     compaction_manager& _compaction_manager;
+     std::deque<compaction_read_monitor> _generated_monitors;
+     compaction_backlog_tracker& _backlog_tracker;
+};
+
+class compaction_write_monitor final : public sstables::write_monitor {
+    compaction_backlog_tracker& _backlog_tracker;
+public:
+    compaction_write_monitor(compaction_backlog_tracker& backlog_tracker)
+            : _backlog_tracker(backlog_tracker)
+    {}
+    virtual void on_write_started(const sstables::writer_offset_tracker& tracker) {
+        _backlog_tracker.register_partially_written_sstable(tracker);
+    }
+
+    virtual void on_data_write_completed(const sstables::writer_offset_tracker& tracker) {
+        _backlog_tracker.seal_partially_written_sstable(tracker);
+    }
+
+    virtual void on_write_completed() override { }
+    virtual void on_flush_completed() override { }
+};
+
 class compaction {
 protected:
     column_family& _cf;
@@ -158,6 +208,8 @@ protected:
     std::vector<unsigned long> _ancestors;
     db::replay_position _rp;
     seastar::thread_scheduling_group* _tsg;
+    mutable compaction_read_monitor_generator _monitor_generator;
+    compaction_write_monitor _write_monitor;
 protected:
     compaction(column_family& cf, std::vector<shared_sstable> sstables, uint64_t max_sstable_size, uint32_t sstable_level, seastar::thread_scheduling_group* tsg)
         : _cf(cf)
@@ -165,6 +217,8 @@ protected:
         , _max_sstable_size(max_sstable_size)
         , _sstable_level(sstable_level)
         , _tsg(tsg)
+        , _monitor_generator(_cf.get_compaction_manager(), _cf.get_compaction_strategy().get_backlog_tracker())
+        , _write_monitor(_cf.get_compaction_strategy().get_backlog_tracker())
     {
         _cf.get_compaction_manager().register_compaction(_info);
     }
@@ -215,7 +269,8 @@ private:
                 no_resource_tracking(),
                 nullptr,
                 ::streamed_mutation::forwarding::no,
-                ::mutation_reader::forwarding::no);
+                ::mutation_reader::forwarding::no,
+                _monitor_generator);
     }
 
     flat_mutation_reader setup() {
@@ -395,6 +450,7 @@ public:
             auto&& priority = service::get_local_compaction_priority();
             sstable_writer_config cfg;
             cfg.max_sstable_size = _max_sstable_size;
+            cfg.monitor = _write_monitor;
             _writer.emplace(_sst->get_writer(*_cf.schema(), partitions_per_sstable(), cfg, priority));
         }
         return &*_writer;
@@ -469,7 +525,8 @@ public:
                 no_resource_tracking(),
                 nullptr,
                 ::streamed_mutation::forwarding::no,
-                ::mutation_reader::forwarding::no);
+                ::mutation_reader::forwarding::no,
+                _monitor_generator);
     }
 
     void report_start(const sstring& formatted_msg) const override {
@@ -491,6 +548,7 @@ public:
 
             sstable_writer_config cfg;
             cfg.max_sstable_size = _max_sstable_size;
+            cfg.monitor = _write_monitor;
             auto&& priority = service::get_local_compaction_priority();
             writer.emplace(sst->get_writer(*_cf.schema(), partitions_per_sstable(), cfg, priority, _shard));
         }
