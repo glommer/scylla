@@ -30,11 +30,12 @@ namespace api {
 namespace cm = httpd::compaction_manager_json;
 using namespace json;
 
+template <typename Integer>
 static future<json::json_return_type> get_cm_stats(http_context& ctx,
-        int64_t compaction_manager::stats::*f) {
+        Integer compaction_manager::stats::*f) {
     return ctx.db.map_reduce0([f](database& db) {
         return db.get_compaction_manager().get_stats().*f;
-    }, int64_t(0), std::plus<int64_t>()).then([](const int64_t& res) {
+    }, Integer(0), std::plus<Integer>()).then([](const Integer& res) {
         return make_ready_future<json::json_return_type>(res);
     });
 }
@@ -95,11 +96,8 @@ void set_compaction_manager(http_context& ctx, routes& r) {
         return make_ready_future<json::json_return_type>(0);
     });
 
-    cm::get_bytes_compacted.set(r, [] (std::unique_ptr<request> req) {
-        //TBD
-        // FIXME
-        warn(unimplemented::cause::API);
-        return make_ready_future<json::json_return_type>(0);
+    cm::get_bytes_compacted.set(r, [&ctx] (std::unique_ptr<request> req) {
+        return get_cm_stats(ctx, &compaction_manager::stats::bytes_compacted);
     });
 
     cm::get_compaction_history.set(r, [] (std::unique_ptr<request> req) {
