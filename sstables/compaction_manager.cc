@@ -374,6 +374,8 @@ void compaction_manager::register_metrics() {
     _metrics.add_group("compaction_manager", {
         sm::make_gauge("compactions", [this] { return _stats.active_tasks; },
                        sm::description("Holds the number of currently active compactions.")),
+        sm::make_derive("bytes_compacted", [this] { return _stats.bytes_compacted; },
+                       sm::description("Holds the number of bytes compacted since start up.")),
     });
 }
 

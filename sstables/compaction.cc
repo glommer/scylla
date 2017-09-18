@@ -53,6 +53,7 @@
 #include "core/pipe.hh"
 
 #include "sstables.hh"
+#include "sstables/progress_monitor.hh"
 #include "compaction.hh"
 #include "compaction_manager.hh"
 #include "database.hh"
@@ -147,6 +148,48 @@ public:
     void consume_end_of_stream();
 };
 
+struct compaction_read_monitor_generator final : public read_monitor_generator {
+    class compaction_read_monitor final: public  sstables::read_monitor {
+        sstables::shared_sstable _sst;
+        compaction_manager& _compaction_manager;
+        uint64_t _last_pos = 0;
+    public:
+        virtual void on_read(uint64_t pos) override {
+            int64_t delta = pos - _last_pos;
+            if (delta == 0) {
+                return;
+            } else if (delta < 0) {
+                throw std::runtime_error(sprint("Saw compaction reading backwards. Was %ld now %ld for %s", _last_pos, pos, _sst->get_filename()));
+            }
+            _last_pos = pos;
+            _compaction_manager.add_compacted_bytes(delta);
+        }
+        virtual void on_fast_forward_to(uint64_t pos) override {
+            // When compacting, we should always go forward.
+            throw std::bad_function_call();
+        }
+        compaction_read_monitor(sstables::shared_sstable sst, compaction_manager& cm) : _sst(std::move(sst)), _compaction_manager(cm) {
+        }
+
+        ~compaction_read_monitor() {
+            // Read the rest when the object is destroyed. It could be that the final range in this
+            // sstable does not belong to this shard, in which case it is legal to skip it. But
+            // we'll still want to notify the listeners about it. Calling on_read() with the same
+            // size as it had before is legal, and will be a noop.
+            on_read(_sst->data_size());
+        }
+    };
+
+    virtual seastar::shared_ptr<sstables::read_monitor> operator()(sstables::shared_sstable sst) override {
+        return seastar::make_shared<compaction_read_monitor>(std::move(sst), _compaction_manager);
+    }
+    compaction_read_monitor_generator(compaction_manager& cm)
+        : _compaction_manager(cm)
+        {}
+private:
+     compaction_manager& _compaction_manager;
+};
+
 class compaction {
 protected:
     column_family& _cf;
@@ -158,6 +201,7 @@ protected:
     std::vector<unsigned long> _ancestors;
     db::replay_position _rp;
     seastar::thread_scheduling_group* _tsg;
+    seastar::shared_ptr<compaction_read_monitor_generator> _monitor_generator;
 protected:
     compaction(column_family& cf, std::vector<shared_sstable> sstables, uint64_t max_sstable_size, uint32_t sstable_level, seastar::thread_scheduling_group* tsg)
         : _cf(cf)
@@ -165,6 +209,7 @@ protected:
         , _max_sstable_size(max_sstable_size)
         , _sstable_level(sstable_level)
         , _tsg(tsg)
+        , _monitor_generator(seastar::make_shared<compaction_read_monitor_generator>(_cf.get_compaction_manager()))
     {
         _cf.get_compaction_manager().register_compaction(_info);
     }
@@ -245,7 +290,8 @@ private:
                 no_resource_tracking(),
                 nullptr,
                 ::streamed_mutation::forwarding::no,
-                ::mutation_reader::forwarding::no);
+                ::mutation_reader::forwarding::no,
+                _monitor_generator);
     }
 
     compaction_info finish(std::chrono::time_point<db_clock> started_at, std::chrono::time_point<db_clock> ended_at) {

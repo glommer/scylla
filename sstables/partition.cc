@@ -989,12 +989,12 @@ private:
         return _context->read().then([this] {
             auto& consumer = _consumer;
             auto mut = consumer.get_mutation();
+            _monitor->on_read(_context->position());
             if (!mut) {
                 sstlog.trace("reader {}: eof", this);
                 return make_ready_future<>();
             }
             on_next_partition(dht::global_partitioner().decorate_key(*_schema, std::move(mut->key)), mut->tomb);
-            _monitor->on_read(_context->position());
             return make_ready_future<>();
         });
     }
