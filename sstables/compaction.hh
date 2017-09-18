@@ -93,6 +93,7 @@ namespace sstables {
         int64_t ended_at;
         std::vector<shared_sstable> new_sstables;
         sstring stop_requested;
+        bool tracking = true;
 
         bool is_stop_requested() const {
             return stop_requested.size() > 0;
@@ -100,6 +101,10 @@ namespace sstables {
 
         void stop(sstring reason) {
             stop_requested = std::move(reason);
+        }
+
+        void stop_tracking() {
+            tracking = false;
         }
     };
 
