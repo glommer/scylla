@@ -741,6 +741,10 @@ public:
         return _config.background_writer_scheduling_group;
     }
 
+    compaction_manager& get_compaction_manager() {
+        return _compaction_manager;
+    }
+
     compaction_manager& get_compaction_manager() const {
         return _compaction_manager;
     }
