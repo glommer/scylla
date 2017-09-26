@@ -114,6 +114,7 @@ public:
 
 class size_tiered_compaction_strategy : public compaction_strategy_impl {
     size_tiered_compaction_strategy_options _options;
+    seastar::lw_shared_ptr<compaction_backlog_tracker> _backlog_tracker;
 
     // Return a list of pair of shared_sstable and its respective size.
     std::vector<std::pair<sstables::shared_sstable, uint64_t>> create_sstable_and_length_pairs(const std::vector<sstables::shared_sstable>& sstables) const;
@@ -149,8 +150,9 @@ class size_tiered_compaction_strategy : public compaction_strategy_impl {
     }
 public:
     size_tiered_compaction_strategy() = default;
-    size_tiered_compaction_strategy(const std::map<sstring, sstring>& options) :
-        compaction_strategy_impl(options), _options(options) {}
+
+    size_tiered_compaction_strategy(const std::map<sstring, sstring>& options);
+
     explicit size_tiered_compaction_strategy(const size_tiered_compaction_strategy_options& options) :
         _options(options) {}
 
@@ -166,6 +168,10 @@ public:
     static std::vector<sstables::shared_sstable>
     most_interesting_bucket(const std::vector<sstables::shared_sstable>& candidates, int min_threshold, int max_threshold,
         size_tiered_compaction_strategy_options options = {});
+
+    virtual seastar::lw_shared_ptr<compaction_backlog_tracker> get_backlog_tracker() override {
+        return _backlog_tracker;
+    }
 };
 
 inline std::vector<std::pair<sstables::shared_sstable, uint64_t>>
