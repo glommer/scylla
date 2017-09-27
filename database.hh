@@ -304,6 +304,7 @@ public:
         seastar::scheduling_group commitlog_scheduling_group;
         seastar::scheduling_group query_scheduling_group;
         seastar::scheduling_group streaming_scheduling_group;
+        seastar::scheduling_group update_cache_scheduling_group;
         bool enable_metrics_reporting = false;
     };
     struct no_commitlog {};
@@ -948,6 +949,7 @@ public:
         seastar::scheduling_group commitlog_scheduling_group;
         seastar::scheduling_group query_scheduling_group;
         seastar::scheduling_group streaming_scheduling_group;
+        seastar::scheduling_group update_cache_scheduling_group;
         bool enable_metrics_reporting = false;
     };
 private:
@@ -1027,6 +1029,7 @@ struct database_config {
     seastar::scheduling_group commitlog_scheduling_group;
     seastar::scheduling_group query_scheduling_group;
     seastar::scheduling_group streaming_scheduling_group;
+    seastar::scheduling_group update_cache_scheduling_group;
 };
 
 // Policy for distributed<database>:
@@ -1069,6 +1072,7 @@ private:
     dirty_memory_manager _streaming_dirty_memory_manager;
 
     flush_cpu_controller _memtable_cpu_controller;
+    update_cache_cpu_controller _update_cache_cpu_controller;
 
     semaphore _read_concurrency_sem{max_memory_concurrent_reads()};
     semaphore _streaming_concurrency_sem{max_memory_streaming_concurrent_reads()};

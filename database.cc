@@ -154,7 +154,7 @@ column_family::column_family(schema_ptr schema, config config, db::commitlog* cl
     , _streaming_memtables(_config.enable_disk_writes ? make_streaming_memtable_list() : make_memory_only_memtable_list())
     , _compaction_strategy(make_compaction_strategy(_schema->compaction_strategy(), _schema->compaction_strategy_options()))
     , _sstables(make_lw_shared(_compaction_strategy.make_sstable_set(_schema)))
-    , _cache(_schema, sstables_as_snapshot_source(), global_cache_tracker(), is_continuous::yes)
+    , _cache(_schema, sstables_as_snapshot_source(), global_cache_tracker(), is_continuous::yes, _config.update_cache_scheduling_group)
     , _commitlog(cl)
     , _compaction_manager(compaction_manager)
     , _index_manager(*this)
@@ -2037,6 +2037,15 @@ make_flush_cpu_controller(db::config& cfg, seastar::scheduling_group sg, std::fu
     return flush_cpu_controller(backlog_cpu_controller::disabled{sg});
 }
 
+inline
+update_cache_cpu_controller
+make_update_cache_cpu_controller(db::config& cfg, seastar::scheduling_group sg, std::function<double()> fn) {
+    if (cfg.auto_adjust_flush_quota()) {
+        return update_cache_cpu_controller(250ms, sg, std::move(fn));
+    }
+    return update_cache_cpu_controller(backlog_cpu_controller::disabled{sg});
+}
+
 utils::UUID database::empty_version = utils::UUID_gen::get_name_UUID(bytes{});
 
 database::database() : database(db::config(), database_config())
@@ -2052,6 +2061,9 @@ database::database(const db::config& cfg, database_config dbcfg)
     , _streaming_dirty_memory_manager(*this, memory::stats().total_memory() * 0.10, cfg.virtual_dirty_soft_limit())
     , _memtable_cpu_controller(make_flush_cpu_controller(*_cfg, dbcfg.memtable_scheduling_group, [this, limit = float(_dirty_memory_manager.throttle_threshold())] {
         return (_dirty_memory_manager.virtual_dirty_memory()) / limit;
+    }))
+    , _update_cache_cpu_controller(make_update_cache_cpu_controller(*_cfg, dbcfg.update_cache_scheduling_group, [this, limit = 2.0f * _dirty_memory_manager.throttle_threshold()] {
+        return (_dirty_memory_manager.real_dirty_memory()) / limit;
     }))
     , _dbcfg(dbcfg)
     , _version(empty_version)
@@ -2697,6 +2709,7 @@ keyspace::make_column_family_config(const schema& s, const db::config& db_config
     cfg.streaming_scheduling_group = _config.streaming_scheduling_group;
     cfg.query_scheduling_group = _config.query_scheduling_group;
     cfg.commitlog_scheduling_group = _config.commitlog_scheduling_group;
+    cfg.update_cache_scheduling_group = _config.update_cache_scheduling_group;
     cfg.enable_metrics_reporting = db_config.enable_keyspace_column_family_metrics();
 
     return cfg;
@@ -3461,6 +3474,7 @@ database::make_keyspace_config(const keyspace_metadata& ksm) {
     cfg.streaming_scheduling_group = _dbcfg.streaming_scheduling_group;
     cfg.query_scheduling_group = _dbcfg.query_scheduling_group;
     cfg.commitlog_scheduling_group = _dbcfg.commitlog_scheduling_group;
+    cfg.update_cache_scheduling_group = _dbcfg.update_cache_scheduling_group;
     cfg.enable_metrics_reporting = _cfg->enable_keyspace_column_family_metrics();
     return cfg;
 }

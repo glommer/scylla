@@ -453,6 +453,7 @@ int main(int ac, char** av) {
             dbcfg.query_scheduling_group = make_sched_group("query", 100);
             dbcfg.memtable_scheduling_group = make_sched_group("memtable", 100);
             dbcfg.commitlog_scheduling_group = make_sched_group("commitlog", 100);
+            dbcfg.update_cache_scheduling_group = make_sched_group("update_cache", 20);
             db.start(std::ref(*cfg), dbcfg).get();
             engine().at_exit([&db, &return_value] {
                 // A shared sstable must be compacted by all shards before it can be deleted.

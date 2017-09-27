@@ -110,3 +110,31 @@ public:
                                  std::move(current_dirty))
     {}
 };
+
+// Update cache flush controller.
+//
+// Akin to other controllers, we want cache to updates not to disrupt foreground load, but without
+// lagging behind too much.
+//
+// What we have to protect against with cache updates that are lagging, is the fact that although we
+// track virtual dirty for rate limit purposes, the memory of existing memtables is only *really*
+// freed when the cache is finally updated, and therefore the memtable is gone.
+//
+// So while in the memtable flush controller we control for virtual dirty, in the update cache
+// controller we control for real dirty.
+class update_cache_cpu_controller : public backlog_cpu_controller {
+    static constexpr float low_backlog = 0.8f;   // memtables themselves can commonly use 50 % of real dirty.
+                                                 // We don't even need to worry until a bit further
+    static constexpr float mild_backlog = 0.9f;  // approaching the limit, go aggressive
+    static constexpr float hard_dirty_limit = 1.0f; // requests blocked.
+public:
+    update_cache_cpu_controller(backlog_cpu_controller::disabled d) : backlog_cpu_controller(std::move(d)) {}
+    update_cache_cpu_controller(update_cache_cpu_controller&&) = default;
+    update_cache_cpu_controller(std::chrono::milliseconds interval, seastar::scheduling_group sg, std::function<float()> current_dirty)
+        : backlog_cpu_controller(std::move(interval), sg,
+                                 low_backlog,
+                                 mild_backlog,
+                                 hard_dirty_limit,
+                                 std::move(current_dirty))
+    {}
+};
