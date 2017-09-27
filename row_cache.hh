@@ -247,6 +247,8 @@ public:
 // Returns a reference to shard-wide cache_tracker.
 cache_tracker& global_cache_tracker();
 
+seastar::thread_scheduling_group* default_row_cache_update_scheduling_group();
+
 //
 // A data source which wraps another data source such that data obtained from the underlying data source
 // is cached in-memory in order to serve queries faster.
@@ -328,6 +330,8 @@ private:
 
     snapshot_source _snapshot_source;
 
+    seastar::thread_scheduling_group* _update_thread_scheduling_group;
+
     // There can be at most one update in progress.
     seastar::semaphore _update_sem = {1};
 
@@ -346,7 +350,6 @@ private:
     void invalidate_locked(const dht::decorated_key&);
     void invalidate_unwrapped(const dht::partition_range&);
     void clear_now() noexcept;
-    static thread_local seastar::thread_scheduling_group _update_thread_scheduling_group;
 
     struct previous_entry_pointer {
         stdx::optional<dht::decorated_key> _key;
@@ -428,7 +431,7 @@ private:
     future<> do_update(external_updater eu, internal_updater iu) noexcept;
 public:
     ~row_cache();
-    row_cache(schema_ptr, snapshot_source, cache_tracker&, is_continuous = is_continuous::no);
+    row_cache(schema_ptr, snapshot_source, cache_tracker&, is_continuous = is_continuous::no, seastar::thread_scheduling_group *tsg = default_row_cache_update_scheduling_group());
     row_cache(row_cache&&) = default;
     row_cache(const row_cache&) = delete;
     row_cache& operator=(row_cache&&) = default;

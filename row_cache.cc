@@ -42,7 +42,10 @@ using namespace cache;
 
 static logging::logger clogger("cache");
 
-thread_local seastar::thread_scheduling_group row_cache::_update_thread_scheduling_group(1ms, 0.2);
+seastar::thread_scheduling_group* default_row_cache_update_scheduling_group() {
+    static thread_local seastar::thread_scheduling_group default_scheduling_group(1ms, 0.2);
+    return &default_scheduling_group;
+}
 
 mutation_reader
 row_cache::create_underlying_reader(read_context& ctx, mutation_source& src, const dht::partition_range& pr) {
@@ -765,7 +768,7 @@ future<> row_cache::do_update(external_updater eu, memtable& m, Updater updater)
         STAP_PROBE(scylla, row_cache_update_end);
     });
     auto attr = seastar::thread_attributes();
-    attr.scheduling_group = &_update_thread_scheduling_group;
+    attr.scheduling_group = _update_thread_scheduling_group;
     auto t = seastar::thread(attr, [this, &m, updater = std::move(updater)] () mutable {
         // In case updater fails, we must bring the cache to consistency without deferring.
         auto cleanup = defer([&m, this] {
@@ -933,12 +936,13 @@ void row_cache::invalidate_unwrapped(const dht::partition_range& range) {
     });
 }
 
-row_cache::row_cache(schema_ptr s, snapshot_source src, cache_tracker& tracker, is_continuous cont)
+row_cache::row_cache(schema_ptr s, snapshot_source src, cache_tracker& tracker, is_continuous cont, seastar::thread_scheduling_group *tsg)
     : _tracker(tracker)
     , _schema(std::move(s))
     , _partitions(cache_entry::compare(_schema))
     , _underlying(src())
     , _snapshot_source(std::move(src))
+    , _update_thread_scheduling_group(tsg)
 {
     with_allocator(_tracker.allocator(), [this, cont] {
         cache_entry* entry = current_allocator().construct<cache_entry>(cache_entry::dummy_entry_tag());
