@@ -299,6 +299,7 @@ public:
         ::cf_stats* cf_stats = nullptr;
         seastar::thread_scheduling_group* background_writer_scheduling_group = nullptr;
         seastar::thread_scheduling_group* memtable_scheduling_group = nullptr;
+        seastar::thread_scheduling_group* update_cache_scheduling_group = nullptr;
         bool enable_metrics_reporting = false;
     };
     struct no_commitlog {};
@@ -932,6 +933,7 @@ public:
         ::cf_stats* cf_stats = nullptr;
         seastar::thread_scheduling_group* background_writer_scheduling_group = nullptr;
         seastar::thread_scheduling_group* memtable_scheduling_group = nullptr;
+        seastar::thread_scheduling_group* update_cache_scheduling_group = nullptr;
         bool enable_metrics_reporting = false;
     };
 private:
@@ -1041,6 +1043,7 @@ private:
 
     seastar::thread_scheduling_group _background_writer_scheduling_group;
     flush_cpu_controller _memtable_cpu_controller;
+    update_cache_cpu_controller _update_cache_cpu_controller;
 
     semaphore _read_concurrency_sem{max_concurrent_reads()};
     semaphore _streaming_concurrency_sem{max_streaming_concurrent_reads()};

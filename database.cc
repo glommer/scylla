@@ -153,7 +153,7 @@ column_family::column_family(schema_ptr schema, config config, db::commitlog* cl
     , _streaming_memtables(_config.enable_disk_writes ? make_streaming_memtable_list() : make_memory_only_memtable_list())
     , _compaction_strategy(make_compaction_strategy(_schema->compaction_strategy(), _schema->compaction_strategy_options()))
     , _sstables(make_lw_shared(_compaction_strategy.make_sstable_set(_schema)))
-    , _cache(_schema, sstables_as_snapshot_source(), global_cache_tracker(), is_continuous::yes)
+    , _cache(_schema, sstables_as_snapshot_source(), global_cache_tracker(), is_continuous::yes, _config.update_cache_scheduling_group)
     , _commitlog(cl)
     , _compaction_manager(compaction_manager)
     , _counter_cell_locks(std::make_unique<cell_locker>(_schema, cl_stats))
@@ -2006,6 +2006,15 @@ make_flush_cpu_controller(db::config& cfg, seastar::thread_scheduling_group* bac
     return flush_cpu_controller(backlog_cpu_controller::disabled{backup});
 }
 
+inline
+update_cache_cpu_controller
+make_update_cache_cpu_controller(db::config& cfg, seastar::thread_scheduling_group* backup, std::function<double()> fn) {
+    if (cfg.auto_adjust_flush_quota()) {
+        return update_cache_cpu_controller(250ms, std::move(fn));
+    }
+    return update_cache_cpu_controller(backlog_cpu_controller::disabled{backup});
+}
+
 utils::UUID database::empty_version = utils::UUID_gen::get_name_UUID(bytes{});
 
 database::database() : database(db::config())
@@ -2022,6 +2031,9 @@ database::database(const db::config& cfg)
     , _background_writer_scheduling_group(1ms, _cfg->background_writer_scheduling_quota())
     , _memtable_cpu_controller(make_flush_cpu_controller(*_cfg, &_background_writer_scheduling_group, [this, limit = float(_dirty_memory_manager.throttle_threshold())] {
         return (_dirty_memory_manager.virtual_dirty_memory()) / limit;
+    }))
+    , _update_cache_cpu_controller(make_update_cache_cpu_controller(*_cfg, &_background_writer_scheduling_group, [this, limit = 2.0f * _dirty_memory_manager.throttle_threshold()] {
+        return (_dirty_memory_manager.real_dirty_memory()) / limit;
     }))
     , _version(empty_version)
     , _compaction_manager(std::make_unique<compaction_manager>())
@@ -2162,9 +2174,6 @@ database::setup_metrics() {
         sm::make_gauge("total_result_bytes", [this] { return get_result_memory_limiter().total_used_memory(); },
                        sm::description("Holds the current amount of memory used for results.")),
 
-        sm::make_gauge("cpu_flush_quota", [this] { return _memtable_cpu_controller.current_quota(); },
-                             sm::description("The current quota for memtable CPU scheduling group")),
-
         sm::make_derive("short_data_queries", _stats->short_data_queries,
                        sm::description("The rate of data queries (data or digest reads) that returned less rows than requested due to result size limiting.")),
 
@@ -2176,6 +2185,16 @@ database::setup_metrics() {
 
         sm::make_queue_length("counter_cell_lock_pending", _cl_stats->operations_waiting_for_lock,
                              sm::description("The number of counter updates waiting for a lock.")),
+    });
+
+    seastar::metrics::label class_label("class");
+    auto mt = class_label("memtable");
+    auto up = class_label("update_cache");
+    _metrics.add_group("database", {
+        sm::make_gauge("cpu_quota", [this] { return _memtable_cpu_controller.current_quota(); },
+                              sm::description("The current desired quota for CPU scheduling group"))(mt),
+        sm::make_gauge("cpu_quota", [this] { return _update_cache_cpu_controller.current_quota(); },
+                             sm::description("The current desired quota for CPU scheduling group"))(up),
     });
 }
 
@@ -2635,6 +2654,7 @@ keyspace::make_column_family_config(const schema& s, const db::config& db_config
     cfg.enable_incremental_backups = _config.enable_incremental_backups;
     cfg.background_writer_scheduling_group = _config.background_writer_scheduling_group;
     cfg.memtable_scheduling_group = _config.memtable_scheduling_group;
+    cfg.update_cache_scheduling_group = _config.update_cache_scheduling_group;
     cfg.enable_metrics_reporting = db_config.enable_keyspace_column_family_metrics();
 
     return cfg;
@@ -3390,6 +3410,7 @@ database::make_keyspace_config(const keyspace_metadata& ksm) {
     if (_cfg->background_writer_scheduling_quota() < 1.0f) {
         cfg.background_writer_scheduling_group = &_background_writer_scheduling_group;
         cfg.memtable_scheduling_group = _memtable_cpu_controller.scheduling_group();
+        cfg.update_cache_scheduling_group = _update_cache_cpu_controller.scheduling_group();
     }
     cfg.enable_metrics_reporting = _cfg->enable_keyspace_column_family_metrics();
     return cfg;
