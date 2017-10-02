@@ -449,13 +449,12 @@ public:
         inflight_component partial = partial_backlog();
         inflight_component compacted = compacted_backlog();
 
-        auto total_bytes = _total_bytes + partial.total_bytes;
-        auto effective_total_bytes = total_bytes - compacted.total_bytes;
-        if ((total_bytes == 0) || (effective_total_bytes == 0)) {
-            return compaction_backlog_tracker::backlog{0.0f, effective_total_bytes};
+        auto total_bytes = _total_bytes + partial.total_bytes - compacted.total_bytes;
+        if ((total_bytes == 0)) {
+            return compaction_backlog_tracker::backlog{0.0f, total_bytes};
         }
         auto sstables_contribution = _sstables_backlog_contribution + partial.contribution - compacted.contribution;
-        return compaction_backlog_tracker::backlog{((effective_total_bytes * log4(total_bytes)) - sstables_contribution) / (10 * effective_total_bytes) , effective_total_bytes};
+        return compaction_backlog_tracker::backlog{((total_bytes * log4(total_bytes)) - sstables_contribution) / (10 * total_bytes) , total_bytes};
     }
 
     virtual void add_sstable(sstables::shared_sstable sst)  override {
