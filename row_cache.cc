@@ -778,21 +778,18 @@ row_cache::phase_type row_cache::phase_of(dht::ring_position_view pos) {
 template <typename Updater>
 future<> row_cache::do_update(external_updater eu, memtable& m, Updater updater) {
   return do_update(std::move(eu), [this, &m, updater = std::move(updater)] {
-    m.on_detach_from_region_group();
-    _tracker.region().merge(m); // Now all data in memtable belongs to cache
-    STAP_PROBE(scylla, row_cache_update_start);
-    auto cleanup = defer([&m, this] {
-        invalidate_sync(m);
-        STAP_PROBE(scylla, row_cache_update_end);
-    });
     auto attr = seastar::thread_attributes();
     attr.scheduling_group = &_update_thread_scheduling_group;
-    auto t = seastar::thread(attr, [this, &m, updater = std::move(updater)] () mutable {
+    return seastar::async(std::move(attr), [this, &m, updater = std::move(updater)] () mutable {
+        m.on_detach_from_region_group();
+        _tracker.region().merge(m); // Now all data in memtable belongs to cache
+        STAP_PROBE(scylla, row_cache_update_start);
         // In case updater fails, we must bring the cache to consistency without deferring.
         auto cleanup = defer([&m, this] {
             invalidate_sync(m);
             _prev_snapshot_pos = {};
             _prev_snapshot = {};
+            STAP_PROBE(scylla, row_cache_update_end);
         });
         partition_presence_checker is_present = _prev_snapshot->make_partition_presence_checker();
         while (!m.partitions.empty()) {
@@ -839,9 +836,6 @@ future<> row_cache::do_update(external_updater eu, memtable& m, Updater updater)
             seastar::thread::yield();
         }
     });
-    return do_with(std::move(t), [] (seastar::thread& t) {
-        return t.join();
-    }).then([cleanup = std::move(cleanup)] {});
   });
 }
 
