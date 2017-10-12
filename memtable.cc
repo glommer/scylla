@@ -348,9 +348,7 @@ public:
         assert(_mt._flushed_memory <= _mt.occupancy().used_space());
     }
     void account_component(memtable_entry& e) {
-        auto delta = _mt.allocator().object_memory_size_in_allocator(&e)
-                     + e.external_memory_usage_without_rows();
-        update_bytes_read(delta);
+        update_bytes_read(e.total_size_in_allocator(_mt.allocator()));
     }
     void account_component(partition_snapshot& snp) {
         update_bytes_read(_mt.allocator().object_memory_size_in_allocator(&*snp.version()));
