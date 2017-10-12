@@ -35,6 +35,7 @@
 #include "cache_streamed_mutation.hh"
 #include "read_context.hh"
 #include "schema_upgrader.hh"
+#include "dirty_memory_manager.hh"
 
 using namespace std::chrono_literals;
 using namespace cache;
@@ -781,14 +782,19 @@ future<> row_cache::do_update(external_updater eu, memtable& m, Updater updater)
     auto attr = seastar::thread_attributes();
     attr.scheduling_group = &_update_thread_scheduling_group;
     return seastar::async(std::move(attr), [this, &m, updater = std::move(updater)] () mutable {
+        auto& mgr = m.get_dirty_memory_manager();
+        auto used_space = m.occupancy().used_space();
+        mgr.pin_real_dirty_memory(used_space);
         m.on_detach_from_region_group();
+
         _tracker.region().merge(m); // Now all data in memtable belongs to cache
         STAP_PROBE(scylla, row_cache_update_start);
         // In case updater fails, we must bring the cache to consistency without deferring.
-        auto cleanup = defer([&m, this] {
+        auto cleanup = defer([&m, this, &mgr, &used_space] {
             invalidate_sync(m);
             _prev_snapshot_pos = {};
             _prev_snapshot = {};
+            mgr.unpin_real_dirty_memory(used_space);
             STAP_PROBE(scylla, row_cache_update_end);
         });
         partition_presence_checker is_present = _prev_snapshot->make_partition_presence_checker();
@@ -809,9 +815,18 @@ future<> row_cache::do_update(external_updater eu, memtable& m, Updater updater)
                           with_linearized_managed_bytes([&] {
                            {
                             memtable_entry& mem_e = *i;
+                            auto snp = mem_e.partition().read(m.region(), _schema);
+
+                            auto size_entry = mem_e.total_size_in_allocator(m.allocator())
+                                            + m.allocator().object_memory_size_in_allocator(&*snp->version())
+                                            + snp->version()->partition().external_memory_usage();
                             // FIXME: Optimize knowing we lookup in-order.
                             auto cache_i = _partitions.lower_bound(mem_e.key(), cmp);
                             updater(cache_i, mem_e, is_present);
+
+                            mgr.unpin_real_dirty_memory(size_entry);
+                            used_space -= size_entry;
+
                             i = m.partitions.erase(i);
                             current_allocator().destroy(&mem_e);
                             --quota;
