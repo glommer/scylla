@@ -1179,6 +1179,23 @@ size_t row::external_memory_usage() const {
     return mem;
 }
 
+size_t mutation_partition::external_memory_usage() const {
+    size_t sum = 0;
+    auto& s = static_row();
+    sum += s.external_memory_usage();
+    for (auto& clr: clustered_rows()) {
+        sum += clr.row().cells().external_memory_usage();
+        sum += clr.key().external_memory_usage();
+        sum += sizeof(rows_entry);
+    }
+
+    for (auto& rtb: row_tombstones()) {
+        sum += rtb.external_memory_usage();
+    }
+
+    return sum;
+}
+
 template<bool reversed, typename Func>
 void mutation_partition::trim_rows(const schema& s,
     const std::vector<query::clustering_range>& row_ranges,
