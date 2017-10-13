@@ -35,6 +35,7 @@
 #include "cache_streamed_mutation.hh"
 #include "read_context.hh"
 #include "schema_upgrader.hh"
+#include "dirty_memory_manager.hh"
 
 using namespace std::chrono_literals;
 using namespace cache;
@@ -775,9 +776,35 @@ row_cache::phase_type row_cache::phase_of(dht::ring_position_view pos) {
     return _underlying_phase - 1;
 }
 
+// makes sure that cache updates handles real dirty memory correctly.
+class real_dirty_memory_accounter {
+  dirty_memory_manager& _mgr;
+  uint64_t _bytes;
+public:
+  real_dirty_memory_accounter(memtable& m)
+    : _mgr(m.get_dirty_memory_manager())
+    , _bytes(m.occupancy().used_space()) {
+    _mgr.pin_real_dirty_memory(_bytes);
+  }
+  ~real_dirty_memory_accounter() {
+    _mgr.unpin_real_dirty_memory(_bytes);
+  }
+
+  real_dirty_memory_accounter(real_dirty_memory_accounter&& c) : _mgr(c._mgr), _bytes(c._bytes) {
+    c._bytes = 0;
+  }
+  real_dirty_memory_accounter(const real_dirty_memory_accounter& c) = delete;
+
+  void unpin_memory(uint64_t bytes) {
+    _bytes -= bytes;
+    _mgr.unpin_real_dirty_memory(bytes);
+  }
+};
+
 template <typename Updater>
 future<> row_cache::do_update(external_updater eu, memtable& m, Updater updater) {
   return do_update(std::move(eu), [this, &m, updater = std::move(updater)] {
+    real_dirty_memory_accounter real_dirty_acc(m);
     m.on_detach_from_region_group();
     _tracker.region().merge(m); // Now all data in memtable belongs to cache
     STAP_PROBE(scylla, row_cache_update_start);
@@ -788,7 +815,7 @@ future<> row_cache::do_update(external_updater eu, memtable& m, Updater updater)
 
     auto attr = seastar::thread_attributes();
     attr.scheduling_group = &_update_thread_scheduling_group;
-    return seastar::async(std::move(attr), [this, &m, updater = std::move(updater)] () mutable {
+    return seastar::async(std::move(attr), [this, &m, updater = std::move(updater), real_dirty_acc = std::move(real_dirty_acc)] () mutable {
         // In case updater fails, we must bring the cache to consistency without deferring.
         auto cleanup = defer([&m, this] {
             invalidate_sync(m);
@@ -813,9 +840,12 @@ future<> row_cache::do_update(external_updater eu, memtable& m, Updater updater)
                           with_linearized_managed_bytes([&] {
                            {
                             memtable_entry& mem_e = *i;
+                            auto size_entry = mem_e.size_in_allocator(_tracker.allocator());
+
                             // FIXME: Optimize knowing we lookup in-order.
                             auto cache_i = _partitions.lower_bound(mem_e.key(), cmp);
                             updater(cache_i, mem_e, is_present);
+                            real_dirty_acc.unpin_memory(size_entry);
                             i = m.partitions.erase(i);
                             current_allocator().destroy(&mem_e);
                             --quota;
