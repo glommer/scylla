@@ -35,6 +35,7 @@
 #include "cache_streamed_mutation.hh"
 #include "read_context.hh"
 #include "schema_upgrader.hh"
+#include "dirty_memory_manager.hh"
 
 using namespace std::chrono_literals;
 using namespace cache;
@@ -781,6 +782,8 @@ future<> row_cache::do_update(external_updater eu, memtable& m, Updater updater)
     m.on_detach_from_region_group();
     _tracker.region().merge(m); // Now all data in memtable belongs to cache
     STAP_PROBE(scylla, row_cache_update_start);
+
+    auto used_space = m.occupancy().used_space();
     auto cleanup = defer([&m, this] {
         invalidate_sync(m);
         STAP_PROBE(scylla, row_cache_update_end);
@@ -788,12 +791,23 @@ future<> row_cache::do_update(external_updater eu, memtable& m, Updater updater)
 
     auto attr = seastar::thread_attributes();
     attr.scheduling_group = &_update_thread_scheduling_group;
-    return seastar::async(std::move(attr), [this, &m, updater = std::move(updater)] () mutable {
+    return seastar::async(std::move(attr), [this, &m, updater = std::move(updater), used_space] () mutable {
+        auto& mgr = m.get_dirty_memory_manager();
+        mgr.pin_real_dirty_memory(used_space);
         // In case updater fails, we must bring the cache to consistency without deferring.
-        auto cleanup = defer([&m, this] {
+        //
+        // We will also revert the real dirty pinning when we are done with this function. If we
+        // fail to create the seastar thread and therefore fail to get here we will just remove all
+        // the dirty memory at once because it will never pinned. There is a small period of time in
+        // which dirty memory goes down before it goes up again when we pin here (the time it takes
+        // to create the thread) but it should be fine. That simplifies the design a lot because we
+        // don't have to worry about creating pointers (that can throw) to hold the current value
+        // updated before we enter the thread.
+        auto cleanup = defer([&m, this, &mgr, &used_space] {
             invalidate_sync(m);
             _prev_snapshot_pos = {};
             _prev_snapshot = {};
+            mgr.unpin_real_dirty_memory(used_space);
         });
         partition_presence_checker is_present = _prev_snapshot->make_partition_presence_checker();
         while (!m.partitions.empty()) {
@@ -813,9 +827,13 @@ future<> row_cache::do_update(external_updater eu, memtable& m, Updater updater)
                           with_linearized_managed_bytes([&] {
                            {
                             memtable_entry& mem_e = *i;
+                            auto size_entry = mem_e.size_in_allocator(_tracker.allocator());
+
                             // FIXME: Optimize knowing we lookup in-order.
                             auto cache_i = _partitions.lower_bound(mem_e.key(), cmp);
                             updater(cache_i, mem_e, is_present);
+                            mgr.unpin_real_dirty_memory(size_entry);
+                            used_space -= size_entry;
                             i = m.partitions.erase(i);
                             current_allocator().destroy(&mem_e);
                             --quota;
