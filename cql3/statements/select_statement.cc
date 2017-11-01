@@ -364,13 +364,16 @@ select_statement::execute_internal(distributed<service::storage_proxy>& proxy,
             return map_reduce(prs.begin(), prs.end(), [this, &proxy, &state, command] (auto pr) {
                 dht::partition_range_vector prange { pr };
                 auto cmd = ::make_lw_shared<query::read_command>(*command);
-                return proxy.local().query(_schema, cmd, std::move(prange), db::consistency_level::ONE, state.get_trace_state());
+                return proxy.local().query(_schema, cmd, std::move(prange), db::consistency_level::ONE, state.get_trace_state(),
+                                           service::storage_proxy::no_timeout);
             }, std::move(merger));
         }).then([command, this, &options, now] (auto result) {
             return this->process_results(std::move(result), command, options, now);
         }).finally([command] { });
     } else {
-        return proxy.local().query(_schema, command, std::move(partition_ranges), db::consistency_level::ONE, state.get_trace_state()).then([command, this, &options, now] (auto result) {
+        auto query = proxy.local().query(_schema, command, std::move(partition_ranges), db::consistency_level::ONE, state.get_trace_state(),
+                                         service::storage_proxy::clock_type::time_point::max());
+        return query.then([command, this, &options, now] (auto result) {
             return this->process_results(std::move(result), command, options, now);
         }).finally([command] {});
     }
