@@ -72,6 +72,7 @@
 #include "message/messaging_service.hh"
 #include "mutation_query.hh"
 #include "db/size_estimates_virtual_reader.hh"
+#include "db/timeout_clock.hh"
 #include "sstables/sstables.hh"
 
 using days = std::chrono::duration<int, std::ratio<24 * 3600>>;
@@ -1653,7 +1654,7 @@ query_mutations(distributed<service::storage_proxy>& proxy, const sstring& ks_na
     auto slice = partition_slice_builder(*schema).build();
     auto cmd = make_lw_shared<query::read_command>(schema->id(), schema->version(),
         std::move(slice), std::numeric_limits<uint32_t>::max());
-    return proxy.local().query_mutations_locally(std::move(schema), std::move(cmd), query::full_partition_range)
+    return proxy.local().query_mutations_locally(std::move(schema), std::move(cmd), query::full_partition_range, db::no_timeout)
             .then([] (foreign_ptr<lw_shared_ptr<reconcilable_result>> rr, auto ht) { return std::move(rr); });
 }
 
@@ -1664,7 +1665,7 @@ query(distributed<service::storage_proxy>& proxy, const sstring& ks_name, const 
     auto slice = partition_slice_builder(*schema).build();
     auto cmd = make_lw_shared<query::read_command>(schema->id(), schema->version(),
         std::move(slice), std::numeric_limits<uint32_t>::max());
-    return proxy.local().query(schema, cmd, {query::full_partition_range}, db::consistency_level::ONE, nullptr).then([schema, cmd] (auto&& result) {
+    return proxy.local().query(schema, cmd, {query::full_partition_range}, db::consistency_level::ONE, nullptr, db::no_timeout).then([schema, cmd] (auto&& result) {
         return make_lw_shared(query::result_set::from_raw_result(schema, cmd->slice, *result));
     });
 }
@@ -1678,7 +1679,8 @@ query(distributed<service::storage_proxy>& proxy, const sstring& ks_name, const 
         .with_range(std::move(row_range))
         .build();
     auto cmd = make_lw_shared<query::read_command>(schema->id(), schema->version(), std::move(slice), query::max_rows);
-    return proxy.local().query(schema, cmd, {dht::partition_range::make_singular(key)}, db::consistency_level::ONE, nullptr).then([schema, cmd] (auto&& result) {
+
+    return proxy.local().query(schema, cmd, {dht::partition_range::make_singular(key)}, db::consistency_level::ONE, nullptr, db::no_timeout).then([schema, cmd] (auto&& result) {
         return make_lw_shared(query::result_set::from_raw_result(schema, cmd->slice, *result));
     });
 }
