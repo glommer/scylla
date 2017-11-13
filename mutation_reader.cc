@@ -354,13 +354,14 @@ class restricting_mutation_reader : public mutation_reader::impl {
         schema_ptr _s;
         std::reference_wrapper<const dht::partition_range> _range;
         std::reference_wrapper<const query::partition_slice> _slice;
+        db::timeout_clock::time_point _timeout;
         std::reference_wrapper<const io_priority_class> _pc;
         tracing::trace_state_ptr _trace_state;
         streamed_mutation::forwarding _fwd;
         mutation_reader::forwarding _fwd_mr;
 
         mutation_reader operator()() {
-            return _ms(std::move(_s), _range.get(), _slice.get(), _pc.get(), std::move(_trace_state), _fwd, _fwd_mr);
+            return _ms(std::move(_s), _range.get(), _slice.get(), _timeout, _pc.get(), std::move(_trace_state), _fwd, _fwd_mr);
         }
     };
 
@@ -400,7 +401,7 @@ public:
         : _config(config)
         , _timeout(timeout)
         , _reader_or_mutation_source(
-                mutation_source_and_params{std::move(ms), std::move(s), range, slice, pc, std::move(trace_state), fwd, fwd_mr}) {
+                mutation_source_and_params{std::move(ms), std::move(s), range, slice, _timeout, pc, std::move(trace_state), fwd, fwd_mr}) {
         if (_config.resources_sem->waiters() >= _config.max_queue_length) {
             _config.raise_queue_overloaded_exception();
         }
@@ -460,6 +461,7 @@ mutation_source make_empty_mutation_source() {
     return mutation_source([](schema_ptr s,
             const dht::partition_range& pr,
             const query::partition_slice& slice,
+            db::timeout_clock::time_point timeout,
             const io_priority_class& pc,
             tracing::trace_state_ptr tr,
             streamed_mutation::forwarding fwd) {
@@ -471,13 +473,14 @@ mutation_source make_combined_mutation_source(std::vector<mutation_source> adden
     return mutation_source([addends = std::move(addends)] (schema_ptr s,
             const dht::partition_range& pr,
             const query::partition_slice& slice,
+            db::timeout_clock::time_point timeout,
             const io_priority_class& pc,
             tracing::trace_state_ptr tr,
             streamed_mutation::forwarding fwd) {
         std::vector<mutation_reader> rd;
         rd.reserve(addends.size());
         for (auto&& ms : addends) {
-            rd.emplace_back(ms(s, pr, slice, pc, tr, fwd));
+            rd.emplace_back(ms(s, pr, slice, timeout, pc, tr, fwd));
         }
         return make_combined_reader(std::move(rd), mutation_reader::forwarding::yes);
     });

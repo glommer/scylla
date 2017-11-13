@@ -29,6 +29,7 @@
 #include "mutation_reader.hh"
 #include "db/commitlog/replay_position.hh"
 #include "db/commitlog/rp_set.hh"
+#include "db/timeout_clock.hh"
 #include "utils/logalloc.hh"
 #include "partition_version.hh"
 #include "flat_mutation_reader.hh"
@@ -197,6 +198,7 @@ public:
     mutation_reader make_reader(schema_ptr,
                                 const dht::partition_range& range,
                                 const query::partition_slice& slice,
+                                db::timeout_clock::time_point timeout = db::no_timeout,
                                 const io_priority_class& pc = default_priority_class(),
                                 tracing::trace_state_ptr trace_state_ptr = nullptr,
                                 streamed_mutation::forwarding fwd = streamed_mutation::forwarding::no,
@@ -210,6 +212,7 @@ public:
     flat_mutation_reader make_flat_reader(schema_ptr,
                                           const dht::partition_range& range,
                                           const query::partition_slice& slice,
+                                          db::timeout_clock::time_point timeout = db::no_timeout,
                                           const io_priority_class& pc = default_priority_class(),
                                           tracing::trace_state_ptr trace_state_ptr = nullptr,
                                           streamed_mutation::forwarding fwd = streamed_mutation::forwarding::no,

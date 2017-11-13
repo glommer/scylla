@@ -1981,6 +1981,7 @@ future<> data_query(
         const mutation_source& source,
         const dht::partition_range& range,
         const query::partition_slice& slice,
+        db::timeout_clock::time_point timeout,
         uint32_t row_limit,
         uint32_t partition_limit,
         gc_clock::time_point query_time,
@@ -1997,7 +1998,7 @@ future<> data_query(
     auto cfq = make_stable_flattened_mutations_consumer<compact_for_query<emit_only_live_rows::yes, query_result_builder>>(
             *s, query_time, slice, row_limit, partition_limit, std::move(qrb));
 
-    return do_with(source.make_flat_mutation_reader(s, range, slice, service::get_local_sstable_query_read_priority(), std::move(trace_ptr),
+    return do_with(source.make_flat_mutation_reader(s, range, slice, timeout, service::get_local_sstable_query_read_priority(), std::move(trace_ptr),
                                                     streamed_mutation::forwarding::no, mutation_reader::forwarding::no),
                    [cfq = std::move(cfq), is_reversed] (flat_mutation_reader& reader) mutable {
         return reader.consume(std::move(cfq), flat_mutation_reader::consume_reversed_partitions(is_reversed));
@@ -2088,6 +2089,7 @@ static do_mutation_query(schema_ptr s,
                mutation_source source,
                const dht::partition_range& range,
                const query::partition_slice& slice,
+               db::timeout_clock::time_point timeout,
                uint32_t row_limit,
                uint32_t partition_limit,
                gc_clock::time_point query_time,
@@ -2104,7 +2106,7 @@ static do_mutation_query(schema_ptr s,
     auto cfq = make_stable_flattened_mutations_consumer<compact_for_query<emit_only_live_rows::no, reconcilable_result_builder>>(
             *s, query_time, slice, row_limit, partition_limit, std::move(rrb));
 
-    return do_with(source.make_flat_mutation_reader(s, range, slice, service::get_local_sstable_query_read_priority(), std::move(trace_ptr),
+    return do_with(source.make_flat_mutation_reader(s, range, slice, timeout, service::get_local_sstable_query_read_priority(), std::move(trace_ptr),
                                                     streamed_mutation::forwarding::no, mutation_reader::forwarding::no),
                    [cfq = std::move(cfq), is_reversed] (flat_mutation_reader& reader) mutable {
         return reader.consume(std::move(cfq), flat_mutation_reader::consume_reversed_partitions(is_reversed));
@@ -2118,13 +2120,14 @@ mutation_query(schema_ptr s,
                mutation_source source,
                const dht::partition_range& range,
                const query::partition_slice& slice,
+               db::timeout_clock::time_point timeout,
                uint32_t row_limit,
                uint32_t partition_limit,
                gc_clock::time_point query_time,
                query::result_memory_accounter&& accounter,
                tracing::trace_state_ptr trace_ptr)
 {
-    return mutation_query_stage(std::move(s), std::move(source), seastar::cref(range), seastar::cref(slice),
+    return mutation_query_stage(std::move(s), std::move(source), seastar::cref(range), seastar::cref(slice), timeout,
                                 row_limit, partition_limit, query_time, std::move(accounter), std::move(trace_ptr));
 }
 
@@ -2252,6 +2255,7 @@ mutation_partition::fully_discontinuous(const schema& s, const position_range& r
 future<mutation_opt> counter_write_query(schema_ptr s, const mutation_source& source,
                                          const dht::decorated_key& dk,
                                          const query::partition_slice& slice,
+                                         db::timeout_clock::time_point timeout,
                                          tracing::trace_state_ptr trace_ptr)
 {
     struct range_and_reader {
@@ -2264,16 +2268,17 @@ future<mutation_opt> counter_write_query(schema_ptr s, const mutation_source& so
         range_and_reader(schema_ptr s, const mutation_source& source,
                          const dht::decorated_key& dk,
                          const query::partition_slice& slice,
+                         db::timeout_clock::time_point timeout,
                          tracing::trace_state_ptr trace_ptr)
             : range(dht::partition_range::make_singular(dk))
-            , reader(source.make_flat_mutation_reader(s, range, slice, service::get_local_sstable_query_read_priority(),
+            , reader(source.make_flat_mutation_reader(s, range, slice, timeout, service::get_local_sstable_query_read_priority(),
                                                       std::move(trace_ptr), streamed_mutation::forwarding::no,
                                                       mutation_reader::forwarding::no))
         { }
     };
 
     // do_with() doesn't support immovable objects
-    auto r_a_r = std::make_unique<range_and_reader>(s, source, dk, slice, std::move(trace_ptr));
+    auto r_a_r = std::make_unique<range_and_reader>(s, source, dk, slice, timeout, std::move(trace_ptr));
     auto cwqrb = counter_write_query_result_builder(*s);
     auto cfq = make_stable_flattened_mutations_consumer<compact_for_query<emit_only_live_rows::yes, counter_write_query_result_builder>>(
             *s, gc_clock::now(), slice, query::max_rows, query::max_rows, std::move(cwqrb));

@@ -36,6 +36,7 @@
 #include "read_context.hh"
 #include "schema_upgrader.hh"
 #include "dirty_memory_manager.hh"
+#include "db/timeout_clock.hh"
 
 namespace cache {
 
@@ -51,7 +52,7 @@ thread_local seastar::thread_scheduling_group row_cache::_update_thread_scheduli
 mutation_reader
 row_cache::create_underlying_reader(read_context& ctx, mutation_source& src, const dht::partition_range& pr) {
     ctx.on_underlying_created();
-    return src(_schema, pr, ctx.slice(), ctx.pc(), ctx.trace_state(), streamed_mutation::forwarding::yes);
+    return src(_schema, pr, ctx.slice(), ctx.timeout(), ctx.pc(), ctx.trace_state(), streamed_mutation::forwarding::yes);
 }
 
 cache_tracker& global_cache_tracker() {
@@ -637,12 +638,13 @@ mutation_reader
 row_cache::make_reader(schema_ptr s,
                        const dht::partition_range& range,
                        const query::partition_slice& slice,
+                       db::timeout_clock::time_point timeout,
                        const io_priority_class& pc,
                        tracing::trace_state_ptr trace_state,
                        streamed_mutation::forwarding fwd,
                        mutation_reader::forwarding fwd_mr)
 {
-    auto ctx = make_lw_shared<read_context>(*this, std::move(s), range, slice, pc, trace_state, fwd, fwd_mr);
+    auto ctx = make_lw_shared<read_context>(*this, std::move(s), range, slice, timeout, pc, trace_state, fwd, fwd_mr);
 
     if (!ctx->is_range_query()) {
         return _read_section(_tracker.region(), [&] {

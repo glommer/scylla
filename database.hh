@@ -506,6 +506,7 @@ private:
                                         lw_shared_ptr<sstables::sstable_set> sstables,
                                         const dht::partition_range& range,
                                         const query::partition_slice& slice,
+                                        db::timeout_clock::time_point timeout,
                                         const io_priority_class& pc,
                                         tracing::trace_state_ptr trace_state,
                                         streamed_mutation::forwarding fwd,
@@ -571,6 +572,7 @@ public:
     mutation_reader make_reader(schema_ptr schema,
             const dht::partition_range& range,
             const query::partition_slice& slice,
+            db::timeout_clock::time_point timeout = db::no_timeout,
             const io_priority_class& pc = default_priority_class(),
             tracing::trace_state_ptr trace_state = nullptr,
             streamed_mutation::forwarding fwd = streamed_mutation::forwarding::no,
@@ -769,7 +771,7 @@ public:
     void add_or_update_view(view_ptr v);
     void remove_view(view_ptr v);
     const std::vector<view_ptr>& views() const;
-    future<> push_view_replica_updates(const schema_ptr& s, const frozen_mutation& fm) const;
+    future<> push_view_replica_updates(const schema_ptr& s, const frozen_mutation& fm, db::timeout_clock::time_point timeout) const;
     void add_coordinator_read_latency(utils::estimated_histogram::duration latency);
     std::chrono::milliseconds get_coordinator_read_latency_percentile(double percentile);
 
@@ -831,6 +833,10 @@ public:
     // Iterate over all partitions.  Protocol is the same as std::all_of(),
     // so that iteration can be stopped by returning false.
     future<bool> for_all_partitions_slow(schema_ptr, std::function<bool (const dht::decorated_key&, const mutation_partition&)> func) const;
+
+    db::timeout_clock::time_point default_read_request_timeout() const {
+        return _config.read_concurrency_config.request_timeout();
+    }
 
     friend std::ostream& operator<<(std::ostream& out, const column_family& cf);
     // Testing purposes.

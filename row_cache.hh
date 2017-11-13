@@ -442,6 +442,7 @@ public:
     mutation_reader make_reader(schema_ptr,
                                 const dht::partition_range&,
                                 const query::partition_slice&,
+                                db::timeout_clock::time_point timeout = db::no_timeout,
                                 const io_priority_class& = default_priority_class(),
                                 tracing::trace_state_ptr trace_state = nullptr,
                                 streamed_mutation::forwarding fwd = streamed_mutation::forwarding::no,

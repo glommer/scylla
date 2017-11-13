@@ -68,6 +68,7 @@ private:
             readers.push_back(mt->make_reader(new_mt->schema(),
                  query::full_partition_range,
                  new_mt->schema()->full_slice(),
+                 db::no_timeout,
                  default_priority_class(),
                  nullptr,
                  streamed_mutation::forwarding::no,

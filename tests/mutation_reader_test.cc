@@ -519,7 +519,7 @@ class tracking_reader : public mutation_reader::impl {
     std::size_t _call_count{0};
     std::size_t _ff_count{0};
 public:
-    tracking_reader(semaphore* resources_sem, schema_ptr schema, lw_shared_ptr<sstables::sstable> sst)
+    tracking_reader(db::timeout_semaphore* resources_sem, schema_ptr schema, lw_shared_ptr<sstables::sstable> sst)
         : _reader(sst->read_range_rows(
                         schema,
                         query::full_partition_range,
@@ -592,13 +592,13 @@ public:
 };
 
 struct restriction_data {
-    std::unique_ptr<semaphore> reader_semaphore;
+    std::unique_ptr<db::timeout_semaphore> reader_semaphore;
     restricted_mutation_reader_config config;
 
     restriction_data(std::size_t units,
-            std::chrono::nanoseconds timeout = {},
+            db::timeout_clock::time_point::duration timeout = {},
             std::size_t max_queue_length = std::numeric_limits<std::size_t>::max())
-        : reader_semaphore(std::make_unique<semaphore>(units)) {
+        : reader_semaphore(std::make_unique<db::timeout_semaphore>(units)) {
         config.resources_sem = reader_semaphore.get();
         config.timeout = timeout;
         config.max_queue_length = max_queue_length;
@@ -770,7 +770,7 @@ SEASTAR_TEST_CASE(restricted_reader_reading) {
 
 SEASTAR_TEST_CASE(restricted_reader_timeout) {
     return async([&] {
-        restriction_data rd(new_reader_base_cost, std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::milliseconds{10}));
+        restriction_data rd(new_reader_base_cost, std::chrono::duration_cast<db::timeout_clock::time_point::duration>(std::chrono::milliseconds{10}));
 
         {
             simple_schema s;

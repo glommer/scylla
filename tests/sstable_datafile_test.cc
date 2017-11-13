@@ -3687,6 +3687,7 @@ SEASTAR_TEST_CASE(test_skipping_using_index) {
         auto rd = ms(table.schema(),
             query::full_partition_range,
             table.schema()->full_slice(),
+            db::no_timeout,
             default_priority_class(),
             nullptr,
             streamed_mutation::forwarding::yes,

@@ -108,7 +108,7 @@ snapshot_source make_decorated_snapshot_source(snapshot_source src, std::functio
 }
 
 mutation_source make_source_with(mutation m) {
-    return mutation_source([m] (schema_ptr s, const dht::partition_range&, const query::partition_slice&, const io_priority_class&, tracing::trace_state_ptr, streamed_mutation::forwarding fwd) {
+    return mutation_source([m] (schema_ptr s, const dht::partition_range&, const query::partition_slice&, db::timeout_clock::time_point timeout, const io_priority_class&, tracing::trace_state_ptr, streamed_mutation::forwarding fwd) {
         assert(m.schema() == s);
         return make_reader_returning(m, std::move(fwd));
     });
@@ -181,7 +181,7 @@ SEASTAR_TEST_CASE(test_cache_delegates_to_underlying_only_once_empty_full_range)
         auto s = make_schema();
         int secondary_calls_count = 0;
         cache_tracker tracker;
-        row_cache cache(s, snapshot_source_from_snapshot(mutation_source([&secondary_calls_count] (schema_ptr s, const dht::partition_range& range, const query::partition_slice&, const io_priority_class&, tracing::trace_state_ptr, streamed_mutation::forwarding fwd) {
+        row_cache cache(s, snapshot_source_from_snapshot(mutation_source([&secondary_calls_count] (schema_ptr s, const dht::partition_range& range, const query::partition_slice&, db::timeout_clock::time_point timeout, const io_priority_class&, tracing::trace_state_ptr, streamed_mutation::forwarding fwd) {
             return make_counting_reader(make_empty_reader(), secondary_calls_count);
         })), tracker);
 
@@ -205,7 +205,7 @@ SEASTAR_TEST_CASE(test_cache_delegates_to_underlying_only_once_empty_single_part
         auto s = make_schema();
         int secondary_calls_count = 0;
         cache_tracker tracker;
-        row_cache cache(s, snapshot_source_from_snapshot(mutation_source([&secondary_calls_count] (schema_ptr s, const dht::partition_range& range, const query::partition_slice&, const io_priority_class&, tracing::trace_state_ptr, streamed_mutation::forwarding fwd) {
+        row_cache cache(s, snapshot_source_from_snapshot(mutation_source([&secondary_calls_count] (schema_ptr s, const dht::partition_range& range, const query::partition_slice&, db::timeout_clock::time_point timeout, const io_priority_class&, tracing::trace_state_ptr, streamed_mutation::forwarding fwd) {
             return make_counting_reader(make_empty_reader(), secondary_calls_count);
         })), tracker);
         auto range = make_single_partition_range(s, 100);
@@ -223,7 +223,7 @@ SEASTAR_TEST_CASE(test_cache_uses_continuity_info_for_single_partition_query) {
         auto s = make_schema();
         int secondary_calls_count = 0;
         cache_tracker tracker;
-        row_cache cache(s, snapshot_source_from_snapshot(mutation_source([&secondary_calls_count] (schema_ptr s, const dht::partition_range& range, const query::partition_slice&, const io_priority_class&, tracing::trace_state_ptr, streamed_mutation::forwarding fwd) {
+        row_cache cache(s, snapshot_source_from_snapshot(mutation_source([&secondary_calls_count] (schema_ptr s, const dht::partition_range& range, const query::partition_slice&, db::timeout_clock::time_point timeout, const io_priority_class&, tracing::trace_state_ptr, streamed_mutation::forwarding fwd) {
             return make_counting_reader(make_empty_reader(), secondary_calls_count);
         })), tracker);
 
@@ -245,7 +245,7 @@ void test_cache_delegates_to_underlying_only_once_with_single_partition(schema_p
                                                                         int calls_to_secondary) {
     int secondary_calls_count = 0;
     cache_tracker tracker;
-    row_cache cache(s, snapshot_source_from_snapshot(mutation_source([m, &secondary_calls_count] (schema_ptr s, const dht::partition_range& range, const query::partition_slice&, const io_priority_class&, tracing::trace_state_ptr, streamed_mutation::forwarding fwd) {
+    row_cache cache(s, snapshot_source_from_snapshot(mutation_source([m, &secondary_calls_count] (schema_ptr s, const dht::partition_range& range, const query::partition_slice&, db::timeout_clock::time_point timeout, const io_priority_class&, tracing::trace_state_ptr, streamed_mutation::forwarding fwd) {
         assert(m.schema() == s);
         if (range.contains(dht::ring_position(m.decorated_key()), dht::ring_position_comparator(*s))) {
             return make_counting_reader(make_reader_returning(m, std::move(fwd)), secondary_calls_count);
@@ -342,8 +342,9 @@ SEASTAR_TEST_CASE(test_cache_delegates_to_underlying_only_once_multiple_mutation
 
         auto make_cache = [&tracker, &mt](schema_ptr s, int& secondary_calls_count) -> lw_shared_ptr<row_cache> {
             auto secondary = mutation_source([&mt, &secondary_calls_count] (schema_ptr s, const dht::partition_range& range,
-                    const query::partition_slice& slice, const io_priority_class& pc, tracing::trace_state_ptr trace, streamed_mutation::forwarding fwd) {
-                return make_counting_reader(mt->as_data_source()(s, range, slice, pc, std::move(trace), std::move(fwd)), secondary_calls_count);
+                    const query::partition_slice& slice, db::timeout_clock::time_point timeout,
+                    const io_priority_class& pc, tracing::trace_state_ptr trace, streamed_mutation::forwarding fwd) {
+                return make_counting_reader(mt->as_data_source()(s, range, slice, timeout, pc, std::move(trace), std::move(fwd)), secondary_calls_count);
             });
 
             return make_lw_shared<row_cache>(s, snapshot_source_from_snapshot(secondary), tracker);
@@ -352,8 +353,9 @@ SEASTAR_TEST_CASE(test_cache_delegates_to_underlying_only_once_multiple_mutation
         auto make_ds = [&make_cache](schema_ptr s, int& secondary_calls_count) -> mutation_source {
             auto cache = make_cache(s, secondary_calls_count);
             return mutation_source([cache] (schema_ptr s, const dht::partition_range& range,
-                    const query::partition_slice& slice, const io_priority_class& pc, tracing::trace_state_ptr trace, streamed_mutation::forwarding fwd) {
-                return cache->make_reader(s, range, slice, pc, std::move(trace), std::move(fwd));
+                    const query::partition_slice& slice, db::timeout_clock::time_point timeout,
+                    const io_priority_class& pc, tracing::trace_state_ptr trace, streamed_mutation::forwarding fwd) {
+                return cache->make_reader(s, range, slice, timeout, pc, std::move(trace), std::move(fwd));
             });
         };
 
@@ -477,8 +479,9 @@ SEASTAR_TEST_CASE(test_cache_delegates_to_underlying_only_once_multiple_mutation
 
             auto cache = make_cache(s, secondary_calls_count);
             auto ds = mutation_source([cache] (schema_ptr s, const dht::partition_range& range,
-                    const query::partition_slice& slice, const io_priority_class& pc, tracing::trace_state_ptr trace, streamed_mutation::forwarding fwd) {
-                    return cache->make_reader(s, range, slice, pc, std::move(trace), std::move(fwd));
+                    const query::partition_slice& slice, db::timeout_clock::time_point timeout,
+                    const io_priority_class& pc, tracing::trace_state_ptr trace, streamed_mutation::forwarding fwd) {
+                    return cache->make_reader(s, range, slice, timeout, pc, std::move(trace), std::move(fwd));
             });
 
             test(ds, query::full_partition_range, partitions.size() + 1);
@@ -606,11 +609,12 @@ SEASTAR_TEST_CASE(test_row_cache_conforms_to_mutation_source) {
             return mutation_source([cache] (schema_ptr s,
                     const dht::partition_range& range,
                     const query::partition_slice& slice,
+                    db::timeout_clock::time_point timeout,
                     const io_priority_class& pc,
                     tracing::trace_state_ptr trace_state,
                     streamed_mutation::forwarding fwd,
                     mutation_reader::forwarding fwd_mr) {
-                return cache->make_reader(s, range, slice, pc, std::move(trace_state), fwd, fwd_mr);
+                return cache->make_reader(s, range, slice, timeout, pc, std::move(trace_state), fwd, fwd_mr);
             });
         });
     });
@@ -1052,8 +1056,9 @@ private:
         { }
 
         mutation_reader make_reader(schema_ptr s, const dht::partition_range& pr,
-                const query::partition_slice& slice, const io_priority_class& pc, tracing::trace_state_ptr trace, streamed_mutation::forwarding fwd) {
-            return make_mutation_reader<reader>(_throttle, _underlying(s, pr, slice, pc, std::move(trace), std::move(fwd)));
+                const query::partition_slice& slice, db::timeout_clock::time_point timeout,
+                const io_priority_class& pc, tracing::trace_state_ptr trace, streamed_mutation::forwarding fwd) {
+            return make_mutation_reader<reader>(_throttle, _underlying(s, pr, slice, timeout, pc, std::move(trace), std::move(fwd)));
         }
     };
     lw_shared_ptr<impl> _impl;
@@ -1064,8 +1069,9 @@ public:
 
     operator mutation_source() const {
         return mutation_source([impl = _impl] (schema_ptr s, const dht::partition_range& pr,
-                const query::partition_slice& slice, const io_priority_class& pc, tracing::trace_state_ptr trace, streamed_mutation::forwarding fwd) {
-            return impl->make_reader(std::move(s), pr, slice, pc, std::move(trace), std::move(fwd));
+                const query::partition_slice& slice, db::timeout_clock::time_point timeout,
+                const io_priority_class& pc, tracing::trace_state_ptr trace, streamed_mutation::forwarding fwd) {
+            return impl->make_reader(std::move(s), pr, slice, timeout, pc, std::move(trace), std::move(fwd));
         });
     }
 };

@@ -125,6 +125,7 @@ class read_context final : public enable_lw_shared_from_this<read_context> {
     schema_ptr _schema;
     const dht::partition_range& _range;
     const query::partition_slice& _slice;
+    db::timeout_clock::time_point _timeout;
     const io_priority_class& _pc;
     tracing::trace_state_ptr _trace_state;
     streamed_mutation::forwarding _fwd;
@@ -152,6 +153,7 @@ public:
             schema_ptr schema,
             const dht::partition_range& range,
             const query::partition_slice& slice,
+            db::timeout_clock::time_point timeout,
             const io_priority_class& pc,
             tracing::trace_state_ptr trace_state,
             streamed_mutation::forwarding fwd,
@@ -160,6 +162,7 @@ public:
         , _schema(std::move(schema))
         , _range(range)
         , _slice(slice)
+        , _timeout(timeout)
         , _pc(pc)
         , _trace_state(std::move(trace_state))
         , _fwd(fwd)
@@ -183,6 +186,7 @@ public:
     const schema_ptr& schema() const { return _schema; }
     const dht::partition_range& range() const { return _range; }
     const query::partition_slice& slice() const { return _slice; }
+    const db::timeout_clock::time_point& timeout() const { return _timeout; }
     const io_priority_class& pc() const { return _pc; }
     tracing::trace_state_ptr trace_state() const { return _trace_state; }
     streamed_mutation::forwarding fwd() const { return _fwd; }
