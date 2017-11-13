@@ -108,11 +108,11 @@ public:
      */
 
 #define _make_config_values(val)                \
-    val(background_writer_scheduling_quota, double, 1.0, Used, \
+    val(background_writer_scheduling_quota, double, 1.0, Unused, \
             "max cpu usage ratio (between 0 and 1) for compaction process. Not intended for setting in normal operations. Setting it to 1 or higher will disable it, recommended operational setting is 0.5." \
     )   \
-    val(auto_adjust_flush_quota, bool, false, Used, \
-            "true: auto-adjust quota for flush processes. false: put everyone together in the static background writer group - if background writer group is enabled. Not intended for setting in normal operations" \
+    val(auto_adjust_flush_quota, bool, true, Used, \
+            "true: auto-adjust memtable shares for flush processes" \
     )   \
     /* Initialization properties */             \
     /* The minimal properties needed for configuring a cluster. */  \
@@ -717,6 +717,7 @@ public:
     val(enable_keyspace_column_family_metrics, bool, false, Used, "Enable per keyspace and per column family metrics reporting") \
     val(enable_sstable_data_integrity_check, bool, false, Used, "Enable interposer which checks for integrity of every sstable write." \
         " Performance is affected to some extent as a result. Useful to help debugging problems that may arise at another layers.") \
+    val(cpu_scheduler, bool, false, Used, "Enable cpu scheduling (experimental)") \
     /* done! */
 
 #define _make_value_member(name, type, deflt, status, desc, ...)    \
