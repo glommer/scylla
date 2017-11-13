@@ -573,6 +573,7 @@ public:
     mutation_reader make_reader(schema_ptr schema,
             const dht::partition_range& range,
             const query::partition_slice& slice,
+            restricted_mutation_reader_config read_concurrency_config,
             const io_priority_class& pc = default_priority_class(),
             tracing::trace_state_ptr trace_state = nullptr,
             streamed_mutation::forwarding fwd = streamed_mutation::forwarding::no,
@@ -580,7 +581,7 @@ public:
 
     mutation_reader make_reader(schema_ptr schema, const dht::partition_range& range = query::full_partition_range) const {
         auto& full_slice = schema->full_slice();
-        return make_reader(std::move(schema), range, full_slice);
+        return make_reader(std::move(schema), range, full_slice, _config.read_concurrency_config);
     }
 
     // The streaming mutation reader differs from the regular mutation reader in that:
@@ -591,7 +592,11 @@ public:
     flat_mutation_reader make_streaming_reader(schema_ptr schema,
             const dht::partition_range_vector& ranges) const;
 
-    mutation_source as_mutation_source() const;
+    mutation_source as_mutation_source(restricted_mutation_reader_config cfg) const;
+
+    mutation_source as_mutation_source() const {
+        return as_mutation_source(_config.read_concurrency_config);
+    }
 
     void set_virtual_reader(mutation_source virtual_reader) {
         _virtual_reader = std::move(virtual_reader);

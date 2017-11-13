@@ -630,6 +630,7 @@ mutation_reader
 column_family::make_reader(schema_ptr s,
                            const dht::partition_range& range,
                            const query::partition_slice& slice,
+                           restricted_mutation_reader_config read_concurrency_config,
                            const io_priority_class& pc,
                            tracing::trace_state_ptr trace_state,
                            streamed_mutation::forwarding fwd,
@@ -668,7 +669,7 @@ column_family::make_reader(schema_ptr s,
     if (_config.enable_cache) {
         readers.emplace_back(_cache.make_reader(s, range, slice, pc, std::move(trace_state), fwd, fwd_mr));
     } else {
-        readers.emplace_back(make_sstable_reader(s, _sstables, range, slice, pc, std::move(trace_state), fwd, fwd_mr, _config.read_concurrency_config));
+        readers.emplace_back(make_sstable_reader(s, _sstables, range, slice, pc, std::move(trace_state), fwd, fwd_mr, std::move(read_concurrency_config)));
     }
 
     return make_combined_reader(std::move(readers), fwd_mr);
@@ -2908,7 +2909,7 @@ column_family::query(schema_ptr s, const query::read_command& cmd, query::result
         auto& qs = *qs_ptr;
         return do_until(std::bind(&query_state::done, &qs), [this, &qs, trace_state = std::move(trace_state)] {
             auto&& range = *qs.current_partition_range++;
-            return data_query(qs.schema, as_mutation_source(), range, qs.cmd.slice, qs.remaining_rows(),
+            return data_query(qs.schema, as_mutation_source(_config.read_concurrency_config), range, qs.cmd.slice, qs.remaining_rows(),
                               qs.remaining_partitions(), qs.cmd.timestamp, qs.builder, trace_state);
         }).then([qs_ptr = std::move(qs_ptr), &qs] {
             return make_ready_future<lw_shared_ptr<query::result>>(
@@ -2923,15 +2924,15 @@ column_family::query(schema_ptr s, const query::read_command& cmd, query::result
 }
 
 mutation_source
-column_family::as_mutation_source() const {
-    return mutation_source([this] (schema_ptr s,
+column_family::as_mutation_source(restricted_mutation_reader_config cfg) const {
+    return mutation_source([this, cfg = std::move(cfg)] (schema_ptr s,
                                    const dht::partition_range& range,
                                    const query::partition_slice& slice,
                                    const io_priority_class& pc,
                                    tracing::trace_state_ptr trace_state,
                                    streamed_mutation::forwarding fwd,
                                    mutation_reader::forwarding fwd_mr) {
-        return this->make_reader(std::move(s), range, slice, pc, std::move(trace_state), fwd, fwd_mr);
+        return this->make_reader(std::move(s), range, slice, cfg, pc, std::move(trace_state), fwd, fwd_mr);
     });
 }
 
