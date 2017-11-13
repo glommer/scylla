@@ -364,7 +364,7 @@ class restricting_mutation_reader : public mutation_reader::impl {
         }
     };
 
-    const restricted_mutation_reader_config& _config;
+    const restricted_mutation_reader_config _config;
     boost::variant<mutation_source_and_params, mutation_reader> _reader_or_mutation_source;
 
     static const std::size_t new_reader_base_cost{16 * 1024};
