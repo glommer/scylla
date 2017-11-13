@@ -506,6 +506,7 @@ private:
                                         lw_shared_ptr<sstables::sstable_set> sstables,
                                         const dht::partition_range& range,
                                         const query::partition_slice& slice,
+                                        db::timeout_clock::time_point timeout,
                                         const io_priority_class& pc,
                                         tracing::trace_state_ptr trace_state,
                                         streamed_mutation::forwarding fwd,
@@ -571,6 +572,7 @@ public:
     mutation_reader make_reader(schema_ptr schema,
             const dht::partition_range& range,
             const query::partition_slice& slice,
+            db::timeout_clock::time_point timeout = db::no_timeout,
             const io_priority_class& pc = default_priority_class(),
             tracing::trace_state_ptr trace_state = nullptr,
             streamed_mutation::forwarding fwd = streamed_mutation::forwarding::no,
@@ -578,7 +580,7 @@ public:
 
     mutation_reader make_reader(schema_ptr schema, const dht::partition_range& range = query::full_partition_range) const {
         auto& full_slice = schema->full_slice();
-        return make_reader(std::move(schema), range, full_slice);
+        return make_reader(std::move(schema), range, full_slice, db::no_timeout);
     }
 
     // The streaming mutation reader differs from the regular mutation reader in that:
@@ -831,6 +833,10 @@ public:
     // Iterate over all partitions.  Protocol is the same as std::all_of(),
     // so that iteration can be stopped by returning false.
     future<bool> for_all_partitions_slow(schema_ptr, std::function<bool (const dht::decorated_key&, const mutation_partition&)> func) const;
+
+    db::timeout_clock::time_point default_read_request_timeout() const {
+        return _config.read_concurrency_config.request_timeout();
+    }
 
     friend std::ostream& operator<<(std::ostream& out, const column_family& cf);
     // Testing purposes.

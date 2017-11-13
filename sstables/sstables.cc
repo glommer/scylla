@@ -3026,6 +3026,7 @@ mutation_source sstable::as_mutation_source() {
     return mutation_source([sst = shared_from_this()] (schema_ptr s,
             const dht::partition_range& range,
             const query::partition_slice& slice,
+            db::timeout_clock::time_point timeout,
             const io_priority_class& pc,
             tracing::trace_state_ptr trace_ptr,
             streamed_mutation::forwarding fwd,

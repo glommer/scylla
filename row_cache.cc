@@ -36,6 +36,7 @@
 #include "read_context.hh"
 #include "schema_upgrader.hh"
 #include "dirty_memory_manager.hh"
+#include "db/timeout_clock.hh"
 
 namespace cache {
 
@@ -51,7 +52,7 @@ thread_local seastar::thread_scheduling_group row_cache::_update_thread_scheduli
 mutation_reader
 row_cache::create_underlying_reader(read_context& ctx, mutation_source& src, const dht::partition_range& pr) {
     ctx.on_underlying_created();
-    return src(_schema, pr, ctx.slice(), ctx.pc(), ctx.trace_state(), streamed_mutation::forwarding::yes);
+    return src(_schema, pr, ctx.slice(), db::no_timeout, ctx.pc(), ctx.trace_state(), streamed_mutation::forwarding::yes);
 }
 
 cache_tracker& global_cache_tracker() {

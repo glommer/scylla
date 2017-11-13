@@ -78,7 +78,7 @@ static void test_streamed_mutation_forwarding_is_consistent_with_slicing(populat
         }();
 
         streamed_mutation fwd_sm = [&] {
-            mutation_reader rd = ms(m.schema(), prange, full_slice, default_priority_class(), nullptr, streamed_mutation::forwarding::yes);
+            mutation_reader rd = ms(m.schema(), prange, full_slice, db::no_timeout, default_priority_class(), nullptr, streamed_mutation::forwarding::yes);
             streamed_mutation_opt smo = rd().get0();
             BOOST_REQUIRE(bool(smo));
             return std::move(*smo);
@@ -128,6 +128,7 @@ static void test_streamed_mutation_forwarding_guarantees(populate_fn populate) {
         mutation_reader rd = ms(s,
             query::full_partition_range,
             s->full_slice(),
+            db::no_timeout,
             default_priority_class(),
             nullptr,
             streamed_mutation::forwarding::yes);
@@ -265,6 +266,7 @@ static void test_fast_forwarding_across_partitions_to_empty_range(populate_fn po
     mutation_reader rd = ms(s,
         pr,
         s->full_slice(),
+        db::no_timeout,
         default_priority_class(),
         nullptr,
         streamed_mutation::forwarding::no,
@@ -469,6 +471,7 @@ static void test_streamed_mutation_forwarding_across_range_tombstones(populate_f
     mutation_reader rd = ms(s,
         query::full_partition_range,
         s->full_slice(),
+        db::no_timeout,
         default_priority_class(),
         nullptr,
         streamed_mutation::forwarding::yes);
@@ -742,7 +745,7 @@ static void test_clustering_slices(populate_fn populate) {
     {
         auto slice = partition_slice_builder(*s)
             .build();
-        auto rd = ds(s, pr, slice, default_priority_class(), nullptr, streamed_mutation::forwarding::yes);
+        auto rd = ds(s, pr, slice, db::no_timeout, default_priority_class(), nullptr, streamed_mutation::forwarding::yes);
         auto smo = rd().get0();
         assert_that_stream(std::move(*smo))
           .fwd_to(position_range(position_in_partition::for_key(ck1), position_in_partition::after_key(ck2)))
@@ -754,7 +757,7 @@ static void test_clustering_slices(populate_fn populate) {
     {
         auto slice = partition_slice_builder(*s)
             .build();
-        auto rd = ds(s, pr, slice, default_priority_class(), nullptr, streamed_mutation::forwarding::yes);
+        auto rd = ds(s, pr, slice, db::no_timeout, default_priority_class(), nullptr, streamed_mutation::forwarding::yes);
         auto smo = rd().get0();
         assert_that_stream(std::move(*smo))
           .produces_end_of_stream()
@@ -898,12 +901,13 @@ void run_conversion_to_mutation_reader_tests(populate_fn populate) {
         return mutation_source([source] (schema_ptr s,
                                          const dht::partition_range& range,
                                          const query::partition_slice& slice,
+                                         db::timeout_clock::time_point timeout,
                                          const io_priority_class& pc,
                                          tracing::trace_state_ptr trace_state,
                                          streamed_mutation::forwarding fwd,
                                          mutation_reader::forwarding fwd_mr)
                                {
-                                   auto&& res = source.make_flat_mutation_reader(std::move(s), range, slice, pc, std::move(trace_state), fwd, fwd_mr);
+                                   auto&& res = source.make_flat_mutation_reader(std::move(s), range, slice, timeout, pc, std::move(trace_state), fwd, fwd_mr);
                                    return mutation_reader_from_flat_mutation_reader(std::move(res));
                                });
     };

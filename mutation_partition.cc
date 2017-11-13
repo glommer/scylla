@@ -1981,6 +1981,7 @@ future<> data_query(
         const mutation_source& source,
         const dht::partition_range& range,
         const query::partition_slice& slice,
+        db::timeout_clock::time_point timeout,
         uint32_t row_limit,
         uint32_t partition_limit,
         gc_clock::time_point query_time,
@@ -1997,7 +1998,7 @@ future<> data_query(
     auto cfq = make_stable_flattened_mutations_consumer<compact_for_query<emit_only_live_rows::yes, query_result_builder>>(
             *s, query_time, slice, row_limit, partition_limit, std::move(qrb));
 
-    auto reader = source(s, range, slice, service::get_local_sstable_query_read_priority(), std::move(trace_ptr));
+    auto reader = source(s, range, slice, timeout, service::get_local_sstable_query_read_priority(), std::move(trace_ptr));
     return consume_flattened(std::move(reader), std::move(cfq), is_reversed);
 }
 
@@ -2085,6 +2086,7 @@ static do_mutation_query(schema_ptr s,
                mutation_source source,
                const dht::partition_range& range,
                const query::partition_slice& slice,
+               db::timeout_clock::time_point timeout,
                uint32_t row_limit,
                uint32_t partition_limit,
                gc_clock::time_point query_time,
@@ -2101,7 +2103,7 @@ static do_mutation_query(schema_ptr s,
     auto cfq = make_stable_flattened_mutations_consumer<compact_for_query<emit_only_live_rows::no, reconcilable_result_builder>>(
             *s, query_time, slice, row_limit, partition_limit, std::move(rrb));
 
-    auto reader = source(s, range, slice, service::get_local_sstable_query_read_priority(), std::move(trace_ptr));
+    auto reader = source(s, range, slice, timeout, service::get_local_sstable_query_read_priority(), std::move(trace_ptr));
     return consume_flattened(std::move(reader), std::move(cfq), is_reversed);
 }
 
@@ -2112,13 +2114,14 @@ mutation_query(schema_ptr s,
                mutation_source source,
                const dht::partition_range& range,
                const query::partition_slice& slice,
+               db::timeout_clock::time_point timeout,
                uint32_t row_limit,
                uint32_t partition_limit,
                gc_clock::time_point query_time,
                query::result_memory_accounter&& accounter,
                tracing::trace_state_ptr trace_ptr)
 {
-    return mutation_query_stage(std::move(s), std::move(source), seastar::cref(range), seastar::cref(slice),
+    return mutation_query_stage(std::move(s), std::move(source), seastar::cref(range), seastar::cref(slice), timeout,
                                 row_limit, partition_limit, query_time, std::move(accounter), std::move(trace_ptr));
 }
 
@@ -2252,7 +2255,7 @@ future<mutation_opt> counter_write_query(schema_ptr s, const mutation_source& so
         auto cwqrb = counter_write_query_result_builder(*s);
         auto cfq = make_stable_flattened_mutations_consumer<compact_for_query<emit_only_live_rows::yes, counter_write_query_result_builder>>(
                 *s, gc_clock::now(), slice, query::max_rows, query::max_rows, std::move(cwqrb));
-        auto reader = source(s, prange, slice,
+        auto reader = source(s, prange, slice, db::no_timeout,
                              service::get_local_sstable_query_read_priority(), std::move(trace_ptr));
         return consume_flattened(std::move(reader), std::move(cfq), false);
     });
