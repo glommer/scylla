@@ -481,14 +481,20 @@ mutation_source make_empty_mutation_source();
 snapshot_source make_empty_snapshot_source();
 
 struct restricted_mutation_reader_config {
-    semaphore* resources_sem = nullptr;
+    db::timeout_semaphore* resources_sem = nullptr;
     uint64_t* active_reads = nullptr;
-    std::chrono::nanoseconds timeout = {};
+    db::timeout_clock::time_point::duration timeout = {};
     size_t max_queue_length = std::numeric_limits<size_t>::max();
     std::function<void ()> raise_queue_overloaded_exception = default_raise_queue_overloaded_exception;
 
     static void default_raise_queue_overloaded_exception() {
         throw std::runtime_error("restricted mutation reader queue overload");
+    }
+    db::timeout_clock::time_point request_timeout() const {
+        if (timeout.count() == 0) {
+            return db::no_timeout;
+        }
+        return db::timeout_clock::now() + timeout;
     }
 };
 
@@ -506,10 +512,24 @@ mutation_reader make_restricted_reader(const restricted_mutation_reader_config& 
         schema_ptr s,
         const dht::partition_range& range,
         const query::partition_slice& slice,
+        db::timeout_clock::time_point timeout,
         const io_priority_class& pc = default_priority_class(),
         tracing::trace_state_ptr trace_state = nullptr,
         streamed_mutation::forwarding fwd = streamed_mutation::forwarding::no,
         mutation_reader::forwarding fwd_mr = mutation_reader::forwarding::yes);
+
+inline
+mutation_reader make_restricted_reader(const restricted_mutation_reader_config& config,
+        mutation_source ms,
+        schema_ptr s,
+        const dht::partition_range& range,
+        const query::partition_slice& slice,
+        const io_priority_class& pc = default_priority_class(),
+        tracing::trace_state_ptr trace_state = nullptr,
+        streamed_mutation::forwarding fwd = streamed_mutation::forwarding::no,
+        mutation_reader::forwarding fwd_mr = mutation_reader::forwarding::yes) {
+    return make_restricted_reader(config, std::move(ms), std::move(s), range, slice, config.request_timeout(), pc, trace_state, fwd, fwd_mr);
+}
 
 inline mutation_reader make_restricted_reader(const restricted_mutation_reader_config& config,
         mutation_source ms,

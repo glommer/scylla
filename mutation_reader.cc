@@ -259,13 +259,13 @@ mutation_reader make_empty_reader() {
 // operations.
 class tracking_file_impl : public file_impl {
     file _tracked_file;
-    semaphore* _semaphore;
+    db::timeout_semaphore* _semaphore;
 
     // Shouldn't be called if semaphore is NULL.
     temporary_buffer<uint8_t> make_tracked_buf(temporary_buffer<uint8_t> buf) {
         return seastar::temporary_buffer<uint8_t>(buf.get_write(),
                 buf.size(),
-                make_deleter(buf.release(), std::bind(&semaphore::signal, _semaphore, buf.size())));
+                make_deleter(buf.release(), std::bind(&db::timeout_semaphore::signal, _semaphore, buf.size())));
     }
 
 public:
@@ -365,13 +365,14 @@ class restricting_mutation_reader : public mutation_reader::impl {
     };
 
     const restricted_mutation_reader_config& _config;
+    db::timeout_clock::time_point _timeout;
     boost::variant<mutation_source_and_params, mutation_reader> _reader_or_mutation_source;
 
     static const std::size_t new_reader_base_cost{16 * 1024};
 
     future<> create_reader() {
-        auto f = _config.timeout.count() != 0
-                ? _config.resources_sem->wait(_config.timeout, new_reader_base_cost)
+        auto f = _timeout != db::no_timeout
+                ? _config.resources_sem->wait(_timeout, new_reader_base_cost)
                 : _config.resources_sem->wait(new_reader_base_cost);
 
         return f.then([this] {
@@ -394,8 +395,10 @@ public:
             const io_priority_class& pc,
             tracing::trace_state_ptr trace_state,
             streamed_mutation::forwarding fwd,
-            mutation_reader::forwarding fwd_mr)
+            mutation_reader::forwarding fwd_mr,
+            db::timeout_clock::time_point timeout)
         : _config(config)
+        , _timeout(timeout)
         , _reader_or_mutation_source(
                 mutation_source_and_params{std::move(ms), std::move(s), range, slice, pc, std::move(trace_state), fwd, fwd_mr}) {
         if (_config.resources_sem->waiters() >= _config.max_queue_length) {
@@ -439,11 +442,12 @@ make_restricted_reader(const restricted_mutation_reader_config& config,
         schema_ptr s,
         const dht::partition_range& range,
         const query::partition_slice& slice,
+        db::timeout_clock::time_point timeout,
         const io_priority_class& pc,
         tracing::trace_state_ptr trace_state,
         streamed_mutation::forwarding fwd,
         mutation_reader::forwarding fwd_mr) {
-    return make_mutation_reader<restricting_mutation_reader>(config, std::move(ms), std::move(s), range, slice, pc, std::move(trace_state), fwd, fwd_mr);
+    return make_mutation_reader<restricting_mutation_reader>(config, std::move(ms), std::move(s), range, slice, pc, std::move(trace_state), fwd, fwd_mr, timeout);
 }
 
 snapshot_source make_empty_snapshot_source() {

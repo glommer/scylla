@@ -1056,10 +1056,10 @@ private:
     seastar::thread_scheduling_group _background_writer_scheduling_group;
     flush_cpu_controller _memtable_cpu_controller;
 
-    semaphore _read_concurrency_sem{max_memory_concurrent_reads()};
-    semaphore _streaming_concurrency_sem{max_memory_streaming_concurrent_reads()};
+    db::timeout_semaphore _read_concurrency_sem{max_memory_concurrent_reads()};
+    db::timeout_semaphore _streaming_concurrency_sem{max_memory_streaming_concurrent_reads()};
     restricted_mutation_reader_config _read_concurrency_config;
-    semaphore _system_read_concurrency_sem{max_memory_system_concurrent_reads()};
+    db::timeout_semaphore _system_read_concurrency_sem{max_memory_system_concurrent_reads()};
     restricted_mutation_reader_config _system_read_concurrency_config;
 
     semaphore _sstable_load_concurrency_sem{max_concurrent_sstable_loads()};
@@ -1228,7 +1228,7 @@ public:
     std::unordered_set<sstring> get_initial_tokens();
     std::experimental::optional<gms::inet_address> get_replace_address();
     bool is_replacing();
-    semaphore& system_keyspace_read_concurrency_sem() {
+    db::timeout_semaphore& system_keyspace_read_concurrency_sem() {
         return _system_read_concurrency_sem;
     }
     semaphore& sstable_load_concurrency_sem() {
