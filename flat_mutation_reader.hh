@@ -31,6 +31,8 @@
 
 #include <seastar/util/gcc6-concepts.hh>
 
+#include "db/timeout_clock.hh"
+
 using seastar::future;
 
 class mutation_source;
