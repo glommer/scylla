@@ -78,6 +78,8 @@
 #include "checked-file-impl.hh"
 #include "disk-error-handler.hh"
 
+#include "db/timeout_clock.hh"
+
 using namespace std::chrono_literals;
 
 logging::logger dblog("database");
@@ -694,7 +696,7 @@ column_family::make_streaming_reader(schema_ptr s,
     return make_flat_multi_range_reader(s, std::move(source), ranges, slice, pc, nullptr, streamed_mutation::forwarding::no, mutation_reader::forwarding::no);
 }
 
-future<std::vector<locked_cell>> column_family::lock_counter_cells(const mutation& m, timeout_clock::time_point timeout) {
+future<std::vector<locked_cell>> column_family::lock_counter_cells(const mutation& m, db::timeout_clock::time_point timeout) {
     assert(m.schema() == _counter_cell_locks->schema());
     return _counter_cell_locks->lock_cells(m.decorated_key(), partition_cells_range(m.partition()), timeout);
 }
@@ -3089,7 +3091,7 @@ column_family::apply(const frozen_mutation& m, const schema_ptr& m_schema, db::r
 }
 
 future<mutation> database::do_apply_counter_update(column_family& cf, const frozen_mutation& fm, schema_ptr m_schema,
-                                                   timeout_clock::time_point timeout,tracing::trace_state_ptr trace_state) {
+                                                   db::timeout_clock::time_point timeout,tracing::trace_state_ptr trace_state) {
     auto m = fm.unfreeze(m_schema);
     m.upgrade(cf.schema());
 
@@ -3275,7 +3277,7 @@ void dirty_memory_manager::start_reclaiming() noexcept {
     _should_flush.signal();
 }
 
-future<> database::apply_in_memory(const frozen_mutation& m, schema_ptr m_schema, db::rp_handle&& h, timeout_clock::time_point timeout) {
+future<> database::apply_in_memory(const frozen_mutation& m, schema_ptr m_schema, db::rp_handle&& h, db::timeout_clock::time_point timeout) {
     auto& cf = find_column_family(m.column_family_id());
     return cf.dirty_memory_region_group().run_when_memory_available([this, &m, m_schema = std::move(m_schema), h = std::move(h)]() mutable {
         try {
@@ -3287,13 +3289,13 @@ future<> database::apply_in_memory(const frozen_mutation& m, schema_ptr m_schema
     }, timeout);
 }
 
-future<> database::apply_in_memory(const mutation& m, column_family& cf, db::rp_handle&& h, timeout_clock::time_point timeout) {
+future<> database::apply_in_memory(const mutation& m, column_family& cf, db::rp_handle&& h, db::timeout_clock::time_point timeout) {
     return cf.dirty_memory_region_group().run_when_memory_available([this, &m, &cf, h = std::move(h)]() mutable {
         cf.apply(m, std::move(h));
     }, timeout);
 }
 
-future<mutation> database::apply_counter_update(schema_ptr s, const frozen_mutation& m, timeout_clock::time_point timeout, tracing::trace_state_ptr trace_state) {
+future<mutation> database::apply_counter_update(schema_ptr s, const frozen_mutation& m, db::timeout_clock::time_point timeout, tracing::trace_state_ptr trace_state) {
   return update_write_metrics(seastar::futurize_apply([&] {
     if (!s->is_synced()) {
         throw std::runtime_error(sprint("attempted to mutate using not synced schema of %s.%s, version=%s",
@@ -3320,7 +3322,7 @@ static future<> maybe_handle_reorder(std::exception_ptr exp) {
     }
 }
 
-future<> database::apply_with_commitlog(column_family& cf, const mutation& m, timeout_clock::time_point timeout) {
+future<> database::apply_with_commitlog(column_family& cf, const mutation& m, db::timeout_clock::time_point timeout) {
     if (cf.commitlog() != nullptr) {
         return do_with(freeze(m), [this, &m, &cf, timeout] (frozen_mutation& fm) {
             commitlog_entry_writer cew(m.schema(), fm);
@@ -3332,7 +3334,7 @@ future<> database::apply_with_commitlog(column_family& cf, const mutation& m, ti
     return apply_in_memory(m, cf, {}, timeout);
 }
 
-future<> database::apply_with_commitlog(schema_ptr s, column_family& cf, utils::UUID uuid, const frozen_mutation& m, timeout_clock::time_point timeout) {
+future<> database::apply_with_commitlog(schema_ptr s, column_family& cf, utils::UUID uuid, const frozen_mutation& m, db::timeout_clock::time_point timeout) {
     auto cl = cf.commitlog();
     if (cl != nullptr) {
         commitlog_entry_writer cew(s, m);
@@ -3343,7 +3345,7 @@ future<> database::apply_with_commitlog(schema_ptr s, column_family& cf, utils::
     return apply_in_memory(m, std::move(s), {}, timeout);
 }
 
-future<> database::do_apply(schema_ptr s, const frozen_mutation& m, timeout_clock::time_point timeout) {
+future<> database::do_apply(schema_ptr s, const frozen_mutation& m, db::timeout_clock::time_point timeout) {
     // I'm doing a nullcheck here since the init code path for db etc
     // is a little in flux and commitlog is created only when db is
     // initied from datadir.
@@ -3386,7 +3388,7 @@ Future database::update_write_metrics(Future&& f) {
     });
 }
 
-future<> database::apply(schema_ptr s, const frozen_mutation& m, timeout_clock::time_point timeout) {
+future<> database::apply(schema_ptr s, const frozen_mutation& m, db::timeout_clock::time_point timeout) {
     if (dblog.is_enabled(logging::log_level::trace)) {
         dblog.trace("apply {}", m.pretty_printer(s));
     }
