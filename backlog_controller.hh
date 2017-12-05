@@ -159,3 +159,11 @@ public:
                                  std::move(current_dirty))
     {}
 };
+
+class compaction_io_controller : public backlog_io_controller {
+public:
+    static constexpr unsigned normalization_factor = 10;
+    compaction_io_controller(const ::io_priority_class& iop, std::chrono::milliseconds interval, std::function<float()> current_backlog)
+        : backlog_io_controller(iop, std::move(interval), backlog_controller::thresholds{0.5f, 1.5f, normalization_factor}, std::move(current_backlog))
+    {}
+};
