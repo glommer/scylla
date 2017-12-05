@@ -4269,10 +4269,11 @@ mutation_reader make_local_shard_sstable_reader(schema_ptr s,
         reader_resource_tracker resource_tracker,
         tracing::trace_state_ptr trace_state,
         streamed_mutation::forwarding fwd,
-        mutation_reader::forwarding fwd_mr)
+        mutation_reader::forwarding fwd_mr,
+        sstables::read_monitor_generator& monitor_generator)
 {
-    auto reader_factory_fn = [s, &slice, &pc, resource_tracker, fwd, fwd_mr] (sstables::shared_sstable& sst, const dht::partition_range& pr) {
-        mutation_reader reader = mutation_reader_from_flat_mutation_reader(sst->read_range_rows_flat(s, pr, slice, pc, resource_tracker, fwd, fwd_mr));
+    auto reader_factory_fn = [s, &slice, &pc, resource_tracker, fwd, fwd_mr, &monitor_generator] (sstables::shared_sstable& sst, const dht::partition_range& pr) {
+        mutation_reader reader = mutation_reader_from_flat_mutation_reader(sst->read_range_rows_flat(s, pr, slice, pc, resource_tracker, fwd, fwd_mr, monitor_generator(sst)));
         if (sst->is_shared()) {
             using sig = bool (&)(const streamed_mutation&);
             reader = make_filtering_reader(std::move(reader), sig(belongs_to_current_shard));
@@ -4302,10 +4303,11 @@ mutation_reader make_range_sstable_reader(schema_ptr s,
         reader_resource_tracker resource_tracker,
         tracing::trace_state_ptr trace_state,
         streamed_mutation::forwarding fwd,
-        mutation_reader::forwarding fwd_mr)
+        mutation_reader::forwarding fwd_mr,
+        sstables::read_monitor_generator& monitor_generator)
 {
-    auto reader_factory_fn = [s, &slice, &pc, resource_tracker, fwd, fwd_mr] (sstables::shared_sstable& sst, const dht::partition_range& pr) {
-        return mutation_reader_from_flat_mutation_reader(sst->read_range_rows_flat(s, pr, slice, pc, resource_tracker, fwd, fwd_mr));
+    auto reader_factory_fn = [s, &slice, &pc, resource_tracker, fwd, fwd_mr, &monitor_generator] (sstables::shared_sstable& sst, const dht::partition_range& pr) {
+        return mutation_reader_from_flat_mutation_reader(sst->read_range_rows_flat(s, pr, slice, pc, resource_tracker, fwd, fwd_mr, monitor_generator(sst)));
     };
     return mutation_reader_from_flat_mutation_reader(
             make_flat_mutation_reader<combined_mutation_reader>(s, std::make_unique<incremental_reader_selector>(s,
