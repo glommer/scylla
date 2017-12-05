@@ -152,3 +152,10 @@ public:
                                  std::move(current_dirty))
     {}
 };
+
+class compaction_io_controller : public backlog_io_controller {
+public:
+    compaction_io_controller(const ::io_priority_class& iop, std::chrono::milliseconds interval, std::function<float()> current_backlog)
+        : backlog_io_controller(iop, std::move(interval), backlog_controller::thresholds{0.05f, 0.15f, 1.0f}, std::move(current_backlog))
+    {}
+};
