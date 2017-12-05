@@ -2129,6 +2129,10 @@ void backlog_cpu_controller::update_controller(float quota) {
     _scheduling_group.update_usage(_current_quota);
 }
 
+void backlog_io_controller::update_controller(float shares) {
+    engine().update_shares_for_class(_io_priority, uint32_t(shares));
+}
+
 void
 dirty_memory_manager::setup_collectd(sstring namestr) {
     namespace sm = seastar::metrics;
