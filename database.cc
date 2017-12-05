@@ -2064,6 +2064,7 @@ database::database(const db::config& cfg)
     , _version(empty_version)
     , _compaction_manager(std::make_unique<compaction_manager>())
     , _enable_incremental_backups(cfg.incremental_backups())
+    , _compaction_io_controller(service::get_local_compaction_priority(), 250ms, [this] { return _compaction_manager->backlog(); })
 {
     _compaction_manager->start();
     setup_metrics();
@@ -3574,6 +3575,8 @@ database::stop() {
         return _dirty_memory_manager.shutdown();
     }).then([this] {
         return _streaming_dirty_memory_manager.shutdown();
+    }).then([this] {
+        return _compaction_io_controller.shutdown();
     });
 }
 
