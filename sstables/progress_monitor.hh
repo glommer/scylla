@@ -24,7 +24,7 @@
 
 
 #include <seastar/core/shared_ptr.hh>
-#include <seastar/core/shared_ptr_incomplete.hh>
+#include "shared_sstable.hh"
 
 namespace sstables {
 
@@ -67,4 +67,17 @@ struct noop_read_monitor final: public read_monitor {
 };
 
 shared_ptr<read_monitor> default_read_monitor();
+
+struct read_monitor_generator {
+    virtual shared_ptr<sstables::read_monitor> operator()(sstables::shared_sstable sst) = 0;
+    virtual ~read_monitor_generator() {}
+};
+
+struct no_read_monitoring final : public read_monitor_generator {
+    virtual shared_ptr<sstables::read_monitor> operator()(sstables::shared_sstable sst) override {
+        return sstables::default_read_monitor();
+    };
+};
+
+read_monitor_generator& default_read_monitor_generator();
 }
