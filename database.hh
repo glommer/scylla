@@ -69,6 +69,7 @@
 #include "utils/histogram.hh"
 #include "utils/estimated_histogram.hh"
 #include "sstables/sstable_set.hh"
+#include "sstables/progress_monitor.hh"
 #include "sstables/version.hh"
 #include <seastar/core/rwlock.hh>
 #include <seastar/core/shared_future.hh>
@@ -849,7 +850,8 @@ mutation_reader make_range_sstable_reader(schema_ptr s,
         reader_resource_tracker resource_tracker,
         tracing::trace_state_ptr trace_state,
         streamed_mutation::forwarding fwd,
-        mutation_reader::forwarding fwd_mr);
+        mutation_reader::forwarding fwd_mr,
+        seastar::shared_ptr<sstables::read_monitor_generator> monitor_generator = sstables::default_read_monitor_generator());
 
 class user_types_metadata {
     std::unordered_map<bytes, user_type> _user_types;

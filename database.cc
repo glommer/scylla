@@ -387,10 +387,14 @@ class incremental_reader_selector : public reader_selector {
     mutation_reader::forwarding _fwd_mr;
     sstables::sstable_set::incremental_selector _selector;
     std::unordered_set<sstables::shared_sstable> _read_sstables;
+    seastar::shared_ptr<sstables::read_monitor_generator> _monitor_generator;
+    // Provides lifetime management for monitors.
+    std::vector<seastar::shared_ptr<sstables::read_monitor>> _monitors;
 
     mutation_reader create_reader(sstables::shared_sstable sst) {
         tracing::trace(_trace_state, "Reading partition range {} from sstable {}", *_pr, seastar::value_of([&sst] { return sst->get_filename(); }));
-        mutation_reader reader = sst->read_range_rows(_s, *_pr, _slice, _pc, _resource_tracker, _fwd, _fwd_mr);
+        _monitors.push_back((*_monitor_generator)(sst));
+        mutation_reader reader = sst->read_range_rows(_s, *_pr, _slice, _pc, _resource_tracker, _fwd, _fwd_mr, _monitors.back());
         if (sst->is_shared()) {
             reader = make_filtering_reader(std::move(reader), belongs_to_current_shard);
         }
@@ -406,7 +410,8 @@ public:
             reader_resource_tracker resource_tracker,
             tracing::trace_state_ptr trace_state,
             streamed_mutation::forwarding fwd,
-            mutation_reader::forwarding fwd_mr)
+            mutation_reader::forwarding fwd_mr,
+            seastar::shared_ptr<sstables::read_monitor_generator> mon = sstables::default_read_monitor_generator())
         : _s(s)
         , _pr(&pr)
         , _sstables(std::move(sstables))
@@ -416,7 +421,8 @@ public:
         , _trace_state(std::move(trace_state))
         , _fwd(fwd)
         , _fwd_mr(fwd_mr)
-        , _selector(_sstables->make_incremental_selector()) {
+        , _selector(_sstables->make_incremental_selector())
+        , _monitor_generator(std::move(mon)) {
         _selector_position = _pr->start() ? _pr->start()->value().token() : dht::minimum_token();
 
         dblog.trace("incremental_reader_selector {}: created for range: {} with {} sstables",
@@ -4276,7 +4282,8 @@ mutation_reader make_range_sstable_reader(schema_ptr s,
         reader_resource_tracker resource_tracker,
         tracing::trace_state_ptr trace_state,
         streamed_mutation::forwarding fwd,
-        mutation_reader::forwarding fwd_mr)
+        mutation_reader::forwarding fwd_mr,
+        seastar::shared_ptr<sstables::read_monitor_generator> monitor_generator)
 {
     return make_mutation_reader<combined_mutation_reader>(std::make_unique<incremental_reader_selector>(std::move(s),
                 std::move(sstables),
@@ -4286,7 +4293,7 @@ mutation_reader make_range_sstable_reader(schema_ptr s,
                 std::move(resource_tracker),
                 std::move(trace_state),
                 fwd,
-                fwd_mr), fwd_mr);
+                fwd_mr, std::move(monitor_generator)), fwd_mr);
 }
 
 future<>
