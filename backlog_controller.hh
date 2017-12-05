@@ -115,6 +115,17 @@ protected:
         , _current_scheduling_group(d.backup) {}
 };
 
+struct backlog_io_controller: public backlog_controller {
+    const ::io_priority_class& _io_priority;
+
+    backlog_io_controller(const ::io_priority_class& iop, std::chrono::milliseconds interval, thresholds t, std::function<float()> backlog)
+        : backlog_controller(interval, t, backlog_controller::slopes{10, 100, 1000}, backlog)
+        , _io_priority(iop)
+    {}
+
+    void update_controller(float shares) override;
+};
+
 // memtable flush CPU controller.
 //
 // - First threshold is the soft limit line,
