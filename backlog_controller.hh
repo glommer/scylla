@@ -22,6 +22,7 @@
 #pragma once
 #include <seastar/core/thread.hh>
 #include <seastar/core/timer.hh>
+#include <seastar/core/gate.hh>
 #include <chrono>
 
 // Simple proportional controller to adjust shares for processes for which a backlog can be clearly
@@ -113,6 +114,23 @@ protected:
         : backlog_controller()
         , _scheduling_group(std::chrono::nanoseconds(0), 0)
         , _current_scheduling_group(d.backup) {}
+};
+
+struct backlog_io_controller: public backlog_controller {
+    const ::io_priority_class& _io_priority;
+    // updating shares for an I/O class may contact another shard and returns a future.
+    seastar::gate _update_gate;
+
+    backlog_io_controller(const ::io_priority_class& iop, std::chrono::milliseconds interval, thresholds t, std::function<float()> backlog)
+        : backlog_controller(interval, t, backlog_controller::slopes{10, 100, 1000}, backlog)
+        , _io_priority(iop)
+    {}
+
+    void update_controller(float shares) override;
+
+    future<> shutdown() {
+        return _update_gate.close();
+    }
 };
 
 // memtable flush CPU controller.
