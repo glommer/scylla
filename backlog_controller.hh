@@ -160,6 +160,15 @@ public:
     {}
 };
 
+class flush_io_controller : public backlog_io_controller {
+    static constexpr float hard_dirty_limit = 1.0f;
+public:
+    flush_io_controller(const ::io_priority_class& iop, std::chrono::milliseconds interval, float soft_limit, std::function<float()> current_backlog)
+        : backlog_io_controller(iop, std::move(interval),
+                                backlog_controller::thresholds{soft_limit, soft_limit + (hard_dirty_limit - soft_limit) / 2, hard_dirty_limit}, std::move(current_backlog))
+    {}
+};
+
 class compaction_io_controller : public backlog_io_controller {
 public:
     static constexpr unsigned normalization_factor = 10;
