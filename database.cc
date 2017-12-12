@@ -2064,6 +2064,9 @@ database::database(const db::config& cfg)
     , _version(empty_version)
     , _compaction_manager(std::make_unique<compaction_manager>())
     , _enable_incremental_backups(cfg.incremental_backups())
+    , _flush_io_controller(service::get_local_memtable_flush_priority(), 250ms, cfg.virtual_dirty_soft_limit(), [this, limit = float(_dirty_memory_manager.throttle_threshold())] {
+        return _dirty_memory_manager.virtual_dirty_memory() / limit;
+    })
     , _compaction_io_controller(service::get_local_compaction_priority(), 250ms, [this] { return _compaction_manager->backlog(); })
 {
     _compaction_manager->start();
@@ -3575,6 +3578,8 @@ database::stop() {
         return _dirty_memory_manager.shutdown();
     }).then([this] {
         return _streaming_dirty_memory_manager.shutdown();
+    }).then([this] {
+        return _flush_io_controller.shutdown();
     }).then([this] {
         return _compaction_io_controller.shutdown();
     });
