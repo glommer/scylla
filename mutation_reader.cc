@@ -252,7 +252,7 @@ combined_mutation_reader::combined_mutation_reader(schema_ptr schema,
     , _fwd_sm(fwd_sm) {
 }
 
-future<> combined_mutation_reader::fill_buffer() {
+future<> combined_mutation_reader::fill_buffer(db::timeout_clock::time_point timeout) {
     return repeat([this] {
         return _producer().then([this] (mutation_fragment_opt mfo) {
             if (!mfo) {
@@ -616,9 +616,9 @@ public:
         }
     }
 
-    virtual future<> fill_buffer() override {
-        return with_reader([this] (flat_mutation_reader& reader) {
-            return reader.fill_buffer().then([this, &reader] {
+    virtual future<> fill_buffer(db::timeout_clock::time_point timeout) override {
+        return with_reader([this, timeout] (flat_mutation_reader& reader) {
+            return reader.fill_buffer(timeout).then([this, &reader] {
                 _end_of_stream = reader.is_end_of_stream();
                 while (!reader.is_buffer_empty()) {
                     push_mutation_fragment(reader.pop_mutation_fragment());
@@ -720,7 +720,7 @@ mutation_reader mutation_reader_from_flat_mutation_reader(flat_mutation_reader&&
                     , _mr(std::move(mr))
                 { }
 
-                virtual future<> fill_buffer() override {
+                virtual future<> fill_buffer(db::timeout_clock::time_point timeout) override {
                     if (_end_of_stream) {
                         return make_ready_future<>();
                     }
@@ -733,7 +733,7 @@ mutation_reader mutation_reader_from_flat_mutation_reader(flat_mutation_reader&&
                             this->push_mutation_fragment(std::move(*mfopt));
                             return is_buffer_full() ? stop_iteration::yes : stop_iteration::no;
                         }
-                    }).then([this] {
+                    }, timeout).then([this] {
                         if (_mr->is_end_of_stream() && _mr->is_buffer_empty()) {
                             _end_of_stream = true;
                         }

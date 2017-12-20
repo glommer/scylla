@@ -338,7 +338,7 @@ public:
             std::unique_ptr<reader_selector> selector,
             streamed_mutation::forwarding fwd_sm,
             mutation_reader::forwarding fwd_mr);
-    virtual future<> fill_buffer() override;
+    virtual future<> fill_buffer(db::timeout_clock::time_point timeout) override;
     virtual void next_partition() override;
     virtual future<> fast_forward_to(const dht::partition_range& pr) override;
     virtual future<> fast_forward_to(position_range pr) override;
@@ -391,9 +391,9 @@ public:
         , _rd(std::move(rd))
         , _filter(std::forward<MutationFilter>(filter)) {
     }
-    virtual future<> fill_buffer() override {
-        return do_until([this] { return is_buffer_full() || is_end_of_stream(); }, [this] {
-            return _rd.fill_buffer().then([this] {
+    virtual future<> fill_buffer(db::timeout_clock::time_point timeout) override {
+        return do_until([this] { return is_buffer_full() || is_end_of_stream(); }, [this, timeout] {
+            return _rd.fill_buffer(timeout).then([this] {
                 while (!_rd.is_buffer_empty()) {
                     auto mf = _rd.pop_mutation_fragment();
                     if (mf.is_partition_start()) {
