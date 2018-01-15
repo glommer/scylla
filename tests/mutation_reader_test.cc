@@ -1048,11 +1048,14 @@ SEASTAR_TEST_CASE(restricted_reader_timeout) {
             auto reader2 = reader_wrapper(rd.config, s.schema(), sst, timeout);
             auto read_fut = reader2();
 
-            seastar::sleep(std::chrono::milliseconds(20)).get();
+            seastar::sleep(std::chrono::milliseconds(30)).get();
 
             // The read should have timed out.
             BOOST_REQUIRE(read_fut.failed());
             BOOST_REQUIRE_THROW(std::rethrow_exception(read_fut.get_exception()), timed_out_error);
+
+            read_fut.get(); // make sure we don't crash with a use-after-free if the test fails
+
         }
 
         // All units should have been deposited back.
