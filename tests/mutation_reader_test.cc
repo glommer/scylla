@@ -1048,10 +1048,14 @@ SEASTAR_TEST_CASE(restricted_reader_timeout) {
             auto reader2 = reader_wrapper(rd.config, s.schema(), sst, timeout);
             auto read_fut = reader2();
 
-            seastar::sleep(std::chrono::milliseconds(20)).get();
+            seastar::sleep<db::timeout_clock>(std::chrono::milliseconds(40)).get();
 
             // The read should have timed out.
             BOOST_REQUIRE(read_fut.failed());
+            assert(read_fut.failed()); // If this isn't true, the test already failed. But since we can't
+                                       // cancel existing requests, if the test keeps going it will
+                                       // SIGSEGV when accessing destroyed memory. This is just
+                                       // cleaner.
             BOOST_REQUIRE_THROW(std::rethrow_exception(read_fut.get_exception()), timed_out_error);
         }
 
