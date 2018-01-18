@@ -372,8 +372,10 @@ private:
     // plan memtables and the resulting sstables are not made visible until
     // the streaming is complete.
     struct monitored_sstable {
-        shared_ptr<sstables::write_monitor> monitor;
+        std::unique_ptr<sstables::write_monitor> monitor;
         sstables::shared_sstable sstable;
+        monitored_sstable(monitored_sstable&&) = default;
+        monitored_sstable(const monitored_sstable&) = delete;
     };
 
     struct streaming_memtable_big {

@@ -947,15 +947,20 @@ future<> column_family::seal_active_streaming_memtable_big(streaming_memtable_bi
                 newtab->set_unshared();
 
                 auto fp = permit.release_sstable_write_permit();
-                auto monitor = make_shared<database_sstable_write_monitor>(std::move(fp), newtab, _compaction_manager, _compaction_strategy);
+                auto monitor = std::make_unique<database_sstable_write_monitor>(std::move(fp), newtab, _compaction_manager, _compaction_strategy);
                 auto&& priority = service::get_local_streaming_write_priority();
-                return write_memtable_to_sstable(*old, newtab, *monitor, incremental_backups_enabled(), priority, true, _config.background_writer_scheduling_group).then([this, newtab, old, &smb, permit = std::move(permit), monitor] {
-                    smb.sstables.push_back(monitored_sstable{std::move(monitor), newtab});
-                }).handle_exception([newtab, monitor] (auto ep) {
-                    monitor->write_failed();
-                    newtab->mark_for_deletion();
-                    dblog.error("failed to write streamed sstable: {}", ep);
-                    return make_exception_future<>(ep);
+                auto fut = write_memtable_to_sstable(*old, newtab, *monitor, incremental_backups_enabled(), priority, true, _config.background_writer_scheduling_group);
+                return fut.then_wrapped([this, newtab, old, &smb, permit = std::move(permit), monitor = std::move(monitor)] (future<> f) mutable {
+                    if (!f.failed()) {
+                        smb.sstables.push_back(monitored_sstable{std::move(monitor), newtab});
+                        return make_ready_future<>();
+                    } else {
+                        monitor->write_failed();
+                        newtab->mark_for_deletion();
+                        auto ep = f.get_exception();
+                        dblog.error("failed to write streamed sstable: {}", ep);
+                        return make_exception_future<>(ep);
+                    }
                 });
             });
         });
@@ -3990,19 +3995,22 @@ future<> column_family::flush_streaming_mutations(utils::UUID plan_id, dht::part
 future<std::vector<column_family::monitored_sstable>> column_family::flush_streaming_big_mutations(utils::UUID plan_id) {
     auto it = _streaming_memtables_big.find(plan_id);
     if (it == _streaming_memtables_big.end()) {
-        return make_ready_future<std::vector<monitored_sstable>>(std::vector<monitored_sstable>());
+        return make_ready_future<std::vector<monitored_sstable>>();
     }
     auto entry = it->second;
     _streaming_memtables_big.erase(it);
+    auto sstables = std::move(entry->sstables);
     return entry->memtables->request_flush().then([entry] {
         return entry->flush_in_progress.close();
-    }).then([this, entry] {
-        return parallel_for_each(entry->sstables, [this] (auto& sst) {
-            return sst.sstable->seal_sstable(this->incremental_backups_enabled()).then([sst] {
+    }).then([this, sstables = std::move(sstables)] () mutable {
+        auto fut = parallel_for_each(sstables, [this] (auto& sst) {
+            auto f = sst.sstable->seal_sstable(this->incremental_backups_enabled());
+            return f.then([sst = std::move(sst)] {
                 return sst.sstable->open_data();
             });
-        }).then([this, entry] {
-            return std::move(entry->sstables);
+        });
+        return fut.then([sstables = std::move(sstables)] () mutable {
+            return make_ready_future<std::vector<monitored_sstable>>(std::move(sstables));
         });
     });
 }
