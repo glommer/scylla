@@ -2082,7 +2082,7 @@ database::database(const db::config& cfg, database_config dbcfg)
     , _dirty_memory_manager(*this, memory::stats().total_memory() * 0.45, cfg.virtual_dirty_soft_limit())
     , _streaming_dirty_memory_manager(*this, memory::stats().total_memory() * 0.10, cfg.virtual_dirty_soft_limit())
     , _dbcfg(dbcfg)
-    , _memtable_cpu_controller(make_flush_cpu_controller(*_cfg, dbcfg.memtable_scheduling_group, [this, limit = 2.0f * _dirty_memory_manager.throttle_threshold()] {
+    , _memtable_cpu_controller(make_flush_cpu_controller(*_cfg, dbcfg.memtable_scheduling_group, [this, limit = float(_dirty_memory_manager.throttle_threshold())] {
         return (_dirty_memory_manager.virtual_dirty_memory()) / limit;
     }))
     , _data_query_stage("data_query", _dbcfg.query_scheduling_group, &column_family::query)
