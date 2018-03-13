@@ -689,7 +689,10 @@ future<> parse(random_access_reader& in, summary& s) {
 
                     // position is little-endian encoded
                     entry.position = seastar::read_le<uint64_t>(buf.get());
-                    entry.token = dht::global_partitioner().get_token(entry.get_key());
+
+                    auto token = dht::global_partitioner().get_token(entry.get_key());
+                    auto token_data_ptr = s.add_summary_data(bytes_view(token._data));
+                    entry.token = token_view{token._kind, token._data.size(), token_data_ptr};
 
                     return make_ready_future<>();
                 });
@@ -2056,8 +2059,9 @@ void components_writer::maybe_add_summary_entry(summary& s, const dht::token& to
     if (data_offset >= state.next_data_offset_to_write_summary) {
         auto entry_size = 8 + 2 + key.size();  // offset + key_size.size + key.size
         state.next_data_offset_to_write_summary += state.summary_byte_cost * entry_size;
+        auto token_data_ptr = s.add_summary_data(bytes_view(token._data));
         auto key_data_ptr = s.add_summary_data(key);
-        s.entries.push_back({ token, bytes_view(key_data_ptr, key.size()), index_offset });
+        s.entries.push_back({ token_view{token._kind, token._data.size(), token_data_ptr}, bytes_view(key_data_ptr, key.size()), index_offset });
     }
 }
 

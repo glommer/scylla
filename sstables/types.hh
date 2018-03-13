@@ -131,9 +131,18 @@ private:
 
 using promoted_index_blocks = seastar::circular_buffer<promoted_index_block>;
 
+struct token_view {
+    dht::token::kind kind;
+    unsigned token_size;
+    int8_t* token_data;
+    dht::token token() const {
+        return dht::token(kind, managed_bytes(token_data, token_size));
+    }
+};
+
 class summary_entry {
 public:
-    dht::token token;
+    token_view token;
     bytes_view key;
     uint64_t position;
 
@@ -142,7 +151,7 @@ public:
     }
 
     decorated_key_view get_decorated_key() const {
-        return decorated_key_view(token, get_key());
+        return decorated_key_view(token.token(), get_key());
     }
 
     bool operator==(const summary_entry& x) const {
