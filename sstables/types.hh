@@ -131,9 +131,10 @@ private:
 
 using promoted_index_blocks = seastar::circular_buffer<promoted_index_block>;
 
-struct summary_entry {
+class summary_entry {
+public:
     dht::token token;
-    bytes key;
+    bytes_view key;
     uint64_t position;
 
     key_view get_key() const {
@@ -205,6 +206,25 @@ struct summary_ka {
     explicit operator bool() const {
         return entries.size();
     }
+
+    bytes_view::value_type* add_summary_data(bytes_view data) {
+        if (_summary_data.empty() || (_summary_index_pos + data.size() > _summary_data.back().size())) {
+            _buffer_size = std::min(_buffer_size << 1, 128u << 10);
+            // Keys are 64kB max, so it might be one key may not fit in a buffer
+            _buffer_size = std::max(_buffer_size, unsigned(data.size()));
+            _summary_data.emplace_back(bytes::initialized_later{}, _buffer_size);
+            _summary_index_pos = 0;
+        }
+
+        auto addr = _summary_data.back().data() + _summary_index_pos;
+        _summary_index_pos += data.size();
+        memcpy(addr, data.data(), data.size());
+        return addr;
+    }
+private:
+    unsigned _buffer_size = 1 << 10;
+    std::vector<bytes> _summary_data;
+    unsigned _summary_index_pos = 0;
 };
 using summary = summary_ka;
 
