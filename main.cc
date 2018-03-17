@@ -473,7 +473,7 @@ int main(int ac, char** av) {
             dbcfg.query_scheduling_group = make_sched_group("query", 1000);
             dbcfg.memtable_scheduling_group = make_sched_group("memtable", 1000);
             dbcfg.memtable_to_cache_scheduling_group = make_sched_group("memtable_to_cache", 200);
-            dbcfg.commitlog_scheduling_group = make_sched_group("commitlog", 1000);
+            dbcfg.write_scheduling_group = make_sched_group("write", 1000);
             db.start(std::ref(*cfg), dbcfg).get();
             engine().at_exit([&db, &return_value] {
                 // #293 - do not stop anything - not even db (for real)

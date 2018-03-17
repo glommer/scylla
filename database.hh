@@ -305,7 +305,7 @@ public:
         seastar::scheduling_group memtable_scheduling_group;
         seastar::scheduling_group memtable_to_cache_scheduling_group;
         seastar::scheduling_group compaction_scheduling_group;
-        seastar::scheduling_group commitlog_scheduling_group;
+        seastar::scheduling_group write_scheduling_group;
         seastar::scheduling_group query_scheduling_group;
         seastar::scheduling_group streaming_scheduling_group;
         bool enable_metrics_reporting = false;
@@ -985,7 +985,7 @@ public:
         seastar::scheduling_group memtable_scheduling_group;
         seastar::scheduling_group memtable_to_cache_scheduling_group;
         seastar::scheduling_group compaction_scheduling_group;
-        seastar::scheduling_group commitlog_scheduling_group;
+        seastar::scheduling_group write_scheduling_group;
         seastar::scheduling_group query_scheduling_group;
         seastar::scheduling_group streaming_scheduling_group;
         bool enable_metrics_reporting = false;
@@ -1065,7 +1065,7 @@ struct database_config {
     seastar::scheduling_group memtable_scheduling_group;
     seastar::scheduling_group memtable_to_cache_scheduling_group; // FIXME: merge with memtable_scheduling_group
     seastar::scheduling_group compaction_scheduling_group;
-    seastar::scheduling_group commitlog_scheduling_group;
+    seastar::scheduling_group write_scheduling_group;
     seastar::scheduling_group query_scheduling_group;
     seastar::scheduling_group streaming_scheduling_group;
 };

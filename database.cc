@@ -2810,7 +2810,7 @@ keyspace::make_column_family_config(const schema& s, const db::config& db_config
     cfg.memtable_to_cache_scheduling_group = _config.memtable_to_cache_scheduling_group;
     cfg.streaming_scheduling_group = _config.streaming_scheduling_group;
     cfg.query_scheduling_group = _config.query_scheduling_group;
-    cfg.commitlog_scheduling_group = _config.commitlog_scheduling_group;
+    cfg.write_scheduling_group = _config.write_scheduling_group;
     cfg.enable_metrics_reporting = db_config.enable_keyspace_column_family_metrics();
     cfg.large_partition_warning_threshold_bytes = db_config.compaction_large_partition_warning_threshold_mb()*1024*1024;
 
@@ -3485,25 +3485,27 @@ future<> database::apply_with_commitlog(schema_ptr s, column_family& cf, utils::
 }
 
 future<> database::do_apply(schema_ptr s, const frozen_mutation& m, db::timeout_clock::time_point timeout) {
-    // I'm doing a nullcheck here since the init code path for db etc
-    // is a little in flux and commitlog is created only when db is
-    // initied from datadir.
-    auto uuid = m.column_family_id();
-    auto& cf = find_column_family(uuid);
-    if (!s->is_synced()) {
-        throw std::runtime_error(sprint("attempted to mutate using not synced schema of %s.%s, version=%s",
-                                 s->ks_name(), s->cf_name(), s->version()));
-    }
-    if (cf.views().empty()) {
-        return apply_with_commitlog(std::move(s), cf, std::move(uuid), m, timeout);
-    }
-    future<row_locker::lock_holder> f = cf.push_view_replica_updates(s, m);
-    return f.then([this, s = std::move(s), uuid = std::move(uuid), &m, timeout] (row_locker::lock_holder lock) {
+    return with_scheduling_group(_dbcfg.write_scheduling_group, [this, s = std::move(s), &m, timeout] () mutable {
+        // I'm doing a nullcheck here since the init code path for db etc
+        // is a little in flux and commitlog is created only when db is
+        // initied from datadir.
+        auto uuid = m.column_family_id();
         auto& cf = find_column_family(uuid);
-        return apply_with_commitlog(std::move(s), cf, std::move(uuid), m, timeout).finally(
-                // Hold the local lock on the base-table partition or row
-                // taken before the read, until the update is done.
-                [lock = std::move(lock)] { });
+        if (!s->is_synced()) {
+            throw std::runtime_error(sprint("attempted to mutate using not synced schema of %s.%s, version=%s",
+                                     s->ks_name(), s->cf_name(), s->version()));
+        }
+        if (cf.views().empty()) {
+            return apply_with_commitlog(std::move(s), cf, std::move(uuid), m, timeout);
+        }
+        future<row_locker::lock_holder> f = cf.push_view_replica_updates(s, m);
+        return f.then([this, s = std::move(s), uuid = std::move(uuid), &m, timeout] (row_locker::lock_holder lock) {
+            auto& cf = find_column_family(uuid);
+            return apply_with_commitlog(std::move(s), cf, std::move(uuid), m, timeout).finally(
+                    // Hold the local lock on the base-table partition or row
+                    // taken before the read, until the update is done.
+                    [lock = std::move(lock)] { });
+        });
     });
 }
 
@@ -3581,7 +3583,7 @@ database::make_keyspace_config(const keyspace_metadata& ksm) {
     cfg.memtable_to_cache_scheduling_group = _dbcfg.memtable_to_cache_scheduling_group;
     cfg.streaming_scheduling_group = _dbcfg.streaming_scheduling_group;
     cfg.query_scheduling_group = _dbcfg.query_scheduling_group;
-    cfg.commitlog_scheduling_group = _dbcfg.commitlog_scheduling_group;
+    cfg.write_scheduling_group = _dbcfg.write_scheduling_group;
     cfg.enable_metrics_reporting = _cfg->enable_keyspace_column_family_metrics();
     return cfg;
 }
