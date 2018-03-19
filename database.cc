@@ -3088,55 +3088,65 @@ std::chrono::milliseconds column_family::get_coordinator_read_latency_percentile
 future<lw_shared_ptr<query::result>, cache_temperature>
 database::query(schema_ptr s, const query::read_command& cmd, query::result_options opts, const dht::partition_range_vector& ranges,
                 tracing::trace_state_ptr trace_state, uint64_t max_result_size, db::timeout_clock::time_point timeout) {
-    column_family& cf = find_column_family(cmd.cf_id);
-    querier_cache_context cache_ctx(_querier_cache, cmd.query_uuid, cmd.is_first_page);
-    return _data_query_stage(&cf,
-            std::move(s),
-            seastar::cref(cmd),
-            opts,
-            seastar::cref(ranges),
-            std::move(trace_state),
-            seastar::ref(get_result_memory_limiter()),
-            max_result_size,
-            timeout,
-            std::move(cache_ctx)).then_wrapped([this, s = _stats, hit_rate = cf.get_global_cache_hit_rate()] (auto f) {
-        if (f.failed()) {
-            ++s->total_reads_failed;
-            return make_exception_future<lw_shared_ptr<query::result>, cache_temperature>(f.get_exception());
-        } else {
-            ++s->total_reads;
-            auto result = f.get0();
-            s->short_data_queries += bool(result->is_short_read());
-            return make_ready_future<lw_shared_ptr<query::result>, cache_temperature>(std::move(result), hit_rate);
-        }
+    return with_scheduling_group(_dbcfg.query_scheduling_group,
+        [this, s = std::move(s), &cmd, opts = std::move(opts), &ranges,
+        trace_state = std::move(trace_state), max_result_size, timeout] () mutable
+    {
+        column_family& cf = find_column_family(cmd.cf_id);
+        querier_cache_context cache_ctx(_querier_cache, cmd.query_uuid, cmd.is_first_page);
+        return _data_query_stage(&cf,
+                std::move(s),
+                seastar::cref(cmd),
+                opts,
+                seastar::cref(ranges),
+                std::move(trace_state),
+                seastar::ref(get_result_memory_limiter()),
+                max_result_size,
+                timeout,
+                std::move(cache_ctx)).then_wrapped([this, s = _stats, hit_rate = cf.get_global_cache_hit_rate()] (auto f) {
+            if (f.failed()) {
+                ++s->total_reads_failed;
+                return make_exception_future<lw_shared_ptr<query::result>, cache_temperature>(f.get_exception());
+            } else {
+                ++s->total_reads;
+                auto result = f.get0();
+                s->short_data_queries += bool(result->is_short_read());
+                return make_ready_future<lw_shared_ptr<query::result>, cache_temperature>(std::move(result), hit_rate);
+            }
+        });
     });
 }
 
 future<reconcilable_result, cache_temperature>
 database::query_mutations(schema_ptr s, const query::read_command& cmd, const dht::partition_range& range,
                           query::result_memory_accounter&& accounter, tracing::trace_state_ptr trace_state, db::timeout_clock::time_point timeout) {
-    column_family& cf = find_column_family(cmd.cf_id);
-    querier_cache_context cache_ctx(_querier_cache, cmd.query_uuid, cmd.is_first_page);
-    return mutation_query(std::move(s),
-            cf.as_mutation_source(),
-            range,
-            cmd.slice,
-            cmd.row_limit,
-            cmd.partition_limit,
-            cmd.timestamp,
-            std::move(accounter),
-            std::move(trace_state),
-            timeout,
-            std::move(cache_ctx)).then_wrapped([this, s = _stats, hit_rate = cf.get_global_cache_hit_rate()] (auto f) {
-        if (f.failed()) {
-            ++s->total_reads_failed;
-            return make_exception_future<reconcilable_result, cache_temperature>(f.get_exception());
-        } else {
-            ++s->total_reads;
-            auto result = f.get0();
-            s->short_mutation_queries += bool(result.is_short_read());
-            return make_ready_future<reconcilable_result, cache_temperature>(std::move(result), hit_rate);
-        }
+    return with_scheduling_group(_dbcfg.query_scheduling_group,
+        [this, s = std::move(s), &cmd, &range, accounter = std::move(accounter),
+        trace_state = std::move(trace_state), timeout] () mutable
+    {
+        column_family& cf = find_column_family(cmd.cf_id);
+        querier_cache_context cache_ctx(_querier_cache, cmd.query_uuid, cmd.is_first_page);
+        return mutation_query(std::move(s),
+                cf.as_mutation_source(),
+                range,
+                cmd.slice,
+                cmd.row_limit,
+                cmd.partition_limit,
+                cmd.timestamp,
+                std::move(accounter),
+                std::move(trace_state),
+                timeout,
+                std::move(cache_ctx)).then_wrapped([this, s = _stats, hit_rate = cf.get_global_cache_hit_rate()] (auto f) {
+            if (f.failed()) {
+                ++s->total_reads_failed;
+                return make_exception_future<reconcilable_result, cache_temperature>(f.get_exception());
+            } else {
+                ++s->total_reads;
+                auto result = f.get0();
+                s->short_mutation_queries += bool(result.is_short_read());
+                return make_ready_future<reconcilable_result, cache_temperature>(std::move(result), hit_rate);
+            }
+        });
     });
 }
 
