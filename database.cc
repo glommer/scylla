@@ -809,6 +809,8 @@ void column_family::add_sstable(sstables::shared_sstable sstable, const std::vec
     _sstables = std::move(new_sstables);
     update_stats_for_new_sstable(sstable->bytes_on_disk(), shards_for_the_sstable);
     _compaction_strategy.get_backlog_tracker().add_sstable(sstable);
+
+    _sstables_being_written.erase(sstable->generation());
 }
 
 future<>
@@ -873,16 +875,16 @@ column_family::seal_active_streaming_memtable_immediate(flush_permit&& permit) {
         auto current_waiters = std::exchange(_waiting_streaming_flushes, shared_promise<>());
         auto f = current_waiters.get_shared_future(); // for this seal
 
-        with_lock(_sstables_lock.for_read(), [this, old, permit = std::move(permit)] () mutable {
+        with_lock(_sstables_lock.for_read(), [this] {
             auto newtab = sstables::make_sstable(_schema,
                 _config.datadir, calculate_generation_for_new_table(),
                 get_highest_supported_format(),
                 sstables::sstable::format_types::big);
 
             newtab->set_unshared();
-
             dblog.debug("Flushing to {}", newtab->get_filename());
-
+            return make_ready_future<sstables::shared_sstable>(newtab);
+        }).then([this, old, permit = std::move(permit)] (auto newtab) mutable {
             // This is somewhat similar to the main memtable flush, but with important differences.
             //
             // The first difference, is that we don't keep aggregate collectd statistics about this one.
@@ -943,13 +945,14 @@ future<> column_family::seal_active_streaming_memtable_big(streaming_memtable_bi
     smb.memtables->erase(old);
     return with_gate(_streaming_flush_gate, [this, old, &smb, permit = std::move(permit)] () mutable {
         return with_gate(smb.flush_in_progress, [this, old, &smb, permit = std::move(permit)] () mutable {
-            return with_lock(_sstables_lock.for_read(), [this, old, &smb, permit = std::move(permit)] () mutable {
+            return with_lock(_sstables_lock.for_read(), [this] {
                 auto newtab = sstables::make_sstable(_schema,
                                                      _config.datadir, calculate_generation_for_new_table(),
                                                      get_highest_supported_format(),
                                                      sstables::sstable::format_types::big);
-
                 newtab->set_unshared();
+                return make_ready_future<sstables::shared_sstable>(newtab);
+            }).then([this, old, &smb, permit = std::move(permit)] (auto newtab) mutable {
 
                 auto fp = permit.release_sstable_write_permit();
                 auto monitor = std::make_unique<database_sstable_write_monitor>(std::move(fp), newtab, _compaction_manager, _compaction_strategy);
@@ -996,9 +999,7 @@ column_family::seal_active_memtable(flush_permit&& permit) {
     return do_with(std::move(permit), [this, old] (auto& permit) {
         return repeat([this, old, &permit] () mutable {
             auto sstable_write_permit = permit.release_sstable_write_permit();
-            return with_lock(_sstables_lock.for_read(), [this, old, sstable_write_permit = std::move(sstable_write_permit)] () mutable {
-                return this->try_flush_memtable_to_sstable(old, std::move(sstable_write_permit));
-            }).then([this, &permit] (auto should_stop) mutable {
+            return this->try_flush_memtable_to_sstable(old, std::move(sstable_write_permit)).then([this, &permit] (auto should_stop) mutable {
                 if (should_stop) {
                     return make_ready_future<stop_iteration>(should_stop);
                 }
@@ -1027,15 +1028,17 @@ column_family::seal_active_memtable(flush_permit&& permit) {
 future<stop_iteration>
 column_family::try_flush_memtable_to_sstable(lw_shared_ptr<memtable> old, sstable_write_permit&& permit) {
   return with_scheduling_group(_config.memtable_scheduling_group, [this, old = std::move(old), permit = std::move(permit)] () mutable {
-    auto gen = calculate_generation_for_new_table();
+    return with_lock(_sstables_lock.for_read(), [this] () mutable {
+        auto gen = calculate_generation_for_new_table();
+        auto newtab = sstables::make_sstable(_schema,
+            _config.datadir, gen,
+            get_highest_supported_format(),
+            sstables::sstable::format_types::big);
 
-    auto newtab = sstables::make_sstable(_schema,
-        _config.datadir, gen,
-        get_highest_supported_format(),
-        sstables::sstable::format_types::big);
-
-    newtab->set_unshared();
-    dblog.debug("Flushing to {}", newtab->get_filename());
+        newtab->set_unshared();
+        dblog.debug("Flushing to {}", newtab->get_filename());
+        return make_ready_future<sstables::shared_sstable>(newtab);
+    }).then([this, old = std::move(old), permit = std::move(permit)] (auto newtab) mutable {
     // Note that due to our sharded architecture, it is possible that
     // in the face of a value change some shards will backup sstables
     // while others won't.
@@ -1076,6 +1079,7 @@ column_family::try_flush_memtable_to_sstable(lw_shared_ptr<memtable> old, sstabl
                 return stop_iteration(_async_gate.is_closed());
             });
         });
+    });
     });
   });
 }
@@ -1404,14 +1408,16 @@ column_family::compact_sstables(sstables::compaction_descriptor descriptor, bool
         return make_ready_future<>();
     }
 
-    return with_lock(_sstables_lock.for_read(), [this, descriptor = std::move(descriptor), cleanup] () mutable {
         auto create_sstable = [this] {
+            assert(seastar::thread::running_in_thread());
+            return with_lock(_sstables_lock.for_read(), [this] () mutable {
                 auto gen = this->calculate_generation_for_new_table();
                 auto sst = sstables::make_sstable(_schema, _config.datadir, gen,
                         get_highest_supported_format(),
                         sstables::sstable::format_types::big);
                 sst->set_unshared();
                 return sst;
+            }).get0();
         };
         auto sstables_to_compact = descriptor.sstables;
         return sstables::compact_sstables(std::move(descriptor), *this, create_sstable,
@@ -1419,7 +1425,6 @@ column_family::compact_sstables(sstables::compaction_descriptor descriptor, bool
             _compaction_strategy.notify_completion(sstables_to_compact, info.new_sstables);
             this->on_compaction_completion(info.new_sstables, sstables_to_compact);
             return info;
-        });
     }).then([this] (auto info) {
         if (info.type != sstables::compaction_type::Compaction) {
             return make_ready_future<>();
@@ -4207,6 +4212,10 @@ column_family::disable_sstable_write() {
         int64_t max = 0;
         for (auto&& s : *_sstables->all()) {
             max = std::max(max, s->generation());
+        }
+
+        for (int64_t gen : _sstables_being_written) {
+            max = std::max(max, gen);
         }
         return make_ready_future<int64_t>(max);
     });

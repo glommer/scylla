@@ -403,6 +403,8 @@ private:
     sstables::compaction_strategy _compaction_strategy;
     // generation -> sstable. Ordered by key so we can easily get the most recent.
     lw_shared_ptr<sstables::sstable_set> _sstables;
+    // SSTables in progress. Only the generation is needed.
+    std::unordered_set<uint64_t> _sstables_being_written;
     // sstables that have been compacted (so don't look up in query) but
     // have not been deleted yet, so must not GC any tombstones in other sstables
     // that may delete data in these sstables:
@@ -498,7 +500,9 @@ private:
         assert(_sstable_generation);
         // FIXME: better way of ensuring we don't attempt to
         // overwrite an existing table.
-        return (*_sstable_generation)++ * smp::count + engine().cpu_id();
+        auto gen = (*_sstable_generation)++ * smp::count + engine().cpu_id();
+        _sstables_being_written.insert(gen);
+        return gen;
     }
 
     // inverse of calculate_generation_for_new_table(), used to determine which
@@ -749,6 +753,9 @@ public:
     size_t sstables_count() const;
     std::vector<uint64_t> sstable_count_per_level() const;
     int64_t get_unleveled_sstables() const;
+    const std::unordered_set<uint64_t>& get_sstable_generations_in_progress() const {
+        return _sstables_being_written;
+    }
 
     void start_compaction();
     void trigger_compaction();

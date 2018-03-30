@@ -2775,6 +2775,9 @@ future<> storage_service::load_new_sstables(sstring ks_name, sstring cf_name) {
             for (auto& p : *(cf.get_sstables())) {
                 generations.insert(p->generation());
             }
+            for (auto& p : cf.get_sstable_generations_in_progress()) {
+                generations.insert(p);
+            }
             return make_ready_future<std::set<int64_t>>(std::move(generations));
         }).then([this, max_seen_sstable, ks_name, cf_name] (std::set<int64_t> all_generations) {
             auto shard = std::hash<sstring>()(cf_name) % smp::count;
