@@ -1039,47 +1039,47 @@ column_family::try_flush_memtable_to_sstable(lw_shared_ptr<memtable> old, sstabl
         dblog.debug("Flushing to {}", newtab->get_filename());
         return make_ready_future<sstables::shared_sstable>(newtab);
     }).then([this, old = std::move(old), permit = std::move(permit)] (auto newtab) mutable {
-    // Note that due to our sharded architecture, it is possible that
-    // in the face of a value change some shards will backup sstables
-    // while others won't.
-    //
-    // This is, in theory, possible to mitigate through a rwlock.
-    // However, this doesn't differ from the situation where all tables
-    // are coming from a single shard and the toggle happens in the
-    // middle of them.
-    //
-    // The code as is guarantees that we'll never partially backup a
-    // single sstable, so that is enough of a guarantee.
-    database_sstable_write_monitor monitor(std::move(permit), newtab, _compaction_manager, _compaction_strategy);
-    return do_with(std::move(monitor), [this, old, newtab] (auto& monitor) {
-        auto&& priority = service::get_local_memtable_flush_priority();
-        auto f = write_memtable_to_sstable(*old, newtab, monitor, incremental_backups_enabled(), priority, false);
-        // Switch back to default scheduling group for post-flush actions, to avoid them being staved by the memtable flush
-        // controller. Cache update does not affect the input of the memtable cpu controller, so it can be subject to
-        // priority inversion.
-        return with_scheduling_group(default_scheduling_group(), [this, &monitor, old = std::move(old), newtab = std::move(newtab), f = std::move(f)] () mutable {
-            return f.then([this, newtab, old, &monitor] {
-                return newtab->open_data().then([this, old, newtab] () {
-                    dblog.debug("Flushing to {} done", newtab->get_filename());
-                    return with_scheduling_group(_config.memtable_to_cache_scheduling_group, [this, old, newtab] {
-                        return update_cache(old, newtab);
+        // Note that due to our sharded architecture, it is possible that
+        // in the face of a value change some shards will backup sstables
+        // while others won't.
+        //
+        // This is, in theory, possible to mitigate through a rwlock.
+        // However, this doesn't differ from the situation where all tables
+        // are coming from a single shard and the toggle happens in the
+        // middle of them.
+        //
+        // The code as is guarantees that we'll never partially backup a
+        // single sstable, so that is enough of a guarantee.
+        database_sstable_write_monitor monitor(std::move(permit), newtab, _compaction_manager, _compaction_strategy);
+        return do_with(std::move(monitor), [this, old, newtab] (auto& monitor) {
+            auto&& priority = service::get_local_memtable_flush_priority();
+            auto f = write_memtable_to_sstable(*old, newtab, monitor, incremental_backups_enabled(), priority, false);
+            // Switch back to default scheduling group for post-flush actions, to avoid them being staved by the memtable flush
+            // controller. Cache update does not affect the input of the memtable cpu controller, so it can be subject to
+            // priority inversion.
+            return with_scheduling_group(default_scheduling_group(), [this, &monitor, old = std::move(old), newtab = std::move(newtab), f = std::move(f)] () mutable {
+                return f.then([this, newtab, old, &monitor] {
+                    return newtab->open_data().then([this, old, newtab] () {
+                        dblog.debug("Flushing to {} done", newtab->get_filename());
+                        return with_scheduling_group(_config.memtable_to_cache_scheduling_group, [this, old, newtab] {
+                            return update_cache(old, newtab);
+                        });
+                    }).then([this, old, newtab] () noexcept {
+                        _memtables->erase(old);
+                        dblog.debug("Memtable for {} replaced", newtab->get_filename());
+                        return stop_iteration::yes;
                     });
-                }).then([this, old, newtab] () noexcept {
-                    _memtables->erase(old);
-                    dblog.debug("Memtable for {} replaced", newtab->get_filename());
-                    return stop_iteration::yes;
+                }).handle_exception([this, old, newtab, &monitor] (auto e) {
+                    monitor.write_failed();
+                    newtab->mark_for_deletion();
+                    dblog.error("failed to write sstable {}: {}", newtab->get_filename(), e);
+                    // If we failed this write we will try the write again and that will create a new flush reader
+                    // that will decrease dirty memory again. So we need to reset the accounting.
+                    old->revert_flushed_memory();
+                    return stop_iteration(_async_gate.is_closed());
                 });
-            }).handle_exception([this, old, newtab, &monitor] (auto e) {
-                monitor.write_failed();
-                newtab->mark_for_deletion();
-                dblog.error("failed to write sstable {}: {}", newtab->get_filename(), e);
-                // If we failed this write we will try the write again and that will create a new flush reader
-                // that will decrease dirty memory again. So we need to reset the accounting.
-                old->revert_flushed_memory();
-                return stop_iteration(_async_gate.is_closed());
             });
         });
-    });
     });
   });
 }
@@ -1408,23 +1408,23 @@ column_family::compact_sstables(sstables::compaction_descriptor descriptor, bool
         return make_ready_future<>();
     }
 
-        auto create_sstable = [this] {
-            assert(seastar::thread::running_in_thread());
-            return with_lock(_sstables_lock.for_read(), [this] () mutable {
-                auto gen = this->calculate_generation_for_new_table();
-                auto sst = sstables::make_sstable(_schema, _config.datadir, gen,
-                        get_highest_supported_format(),
-                        sstables::sstable::format_types::big);
-                sst->set_unshared();
-                return sst;
-            }).get0();
-        };
-        auto sstables_to_compact = descriptor.sstables;
-        return sstables::compact_sstables(std::move(descriptor), *this, create_sstable,
-                cleanup).then([this, sstables_to_compact = std::move(sstables_to_compact)] (auto info) {
-            _compaction_strategy.notify_completion(sstables_to_compact, info.new_sstables);
-            this->on_compaction_completion(info.new_sstables, sstables_to_compact);
-            return info;
+    auto create_sstable = [this] {
+        assert(seastar::thread::running_in_thread());
+        return with_lock(_sstables_lock.for_read(), [this] () mutable {
+            auto gen = this->calculate_generation_for_new_table();
+            auto sst = sstables::make_sstable(_schema, _config.datadir, gen,
+                    get_highest_supported_format(),
+                    sstables::sstable::format_types::big);
+            sst->set_unshared();
+            return sst;
+        }).get0();
+    };
+    auto sstables_to_compact = descriptor.sstables;
+    return sstables::compact_sstables(std::move(descriptor), *this, create_sstable,
+            cleanup).then([this, sstables_to_compact = std::move(sstables_to_compact)] (auto info) {
+        _compaction_strategy.notify_completion(sstables_to_compact, info.new_sstables);
+        this->on_compaction_completion(info.new_sstables, sstables_to_compact);
+        return info;
     }).then([this] (auto info) {
         if (info.type != sstables::compaction_type::Compaction) {
             return make_ready_future<>();
