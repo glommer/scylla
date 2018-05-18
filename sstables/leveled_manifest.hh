@@ -160,6 +160,23 @@ public:
         return max_bytes_for_level(level, _max_sstable_size_in_bytes);
     }
 
+
+    sstables::compaction_descriptor get_descriptor_for_level(int level, const std::vector<stdx::optional<dht::decorated_key>>& last_compacted_keys,
+                                                             std::vector<int>& compaction_counter) {
+        auto info = get_candidates_for(level, last_compacted_keys);
+        if (!info.candidates.empty()) {
+            int next_level = get_next_level(info.candidates, info.can_promote);
+
+            if (info.can_promote) {
+                info.candidates = get_overlapping_starved_sstables(next_level, std::move(info.candidates), compaction_counter);
+            }
+            return sstables::compaction_descriptor(std::move(info.candidates), next_level, _max_sstable_size_in_bytes);
+        } else {
+            logger.debug("No compaction candidates for L{}", level);
+            return sstables::compaction_descriptor();
+        }
+    }
+
     /**
      * @return highest-priority sstables to compact, and level to compact them to
      * If no compactions are necessary, will return null
@@ -234,35 +251,38 @@ public:
                     return sstables::compaction_descriptor(std::move(most_interesting));
                 }
             }
-            // L0 is fine, proceed with this level
-            auto info = get_candidates_for(i, last_compacted_keys);
-            if (!info.candidates.empty()) {
-                int next_level = get_next_level(info.candidates, info.can_promote);
-
-                if (info.can_promote) {
-                    info.candidates = get_overlapping_starved_sstables(next_level, std::move(info.candidates), compaction_counter);
-                }
-#if 0
-                if (logger.isDebugEnabled())
-                    logger.debug("Compaction candidates for L{} are {}", i, toString(candidates));
-#endif
-                return sstables::compaction_descriptor(std::move(info.candidates), next_level, _max_sstable_size_in_bytes);
-            } else {
-                logger.debug("No compaction candidates for L{}", i);
+            auto descriptor = get_descriptor_for_level(i, last_compacted_keys, compaction_counter);
+            if (descriptor.sstables.size() > 0) {
+                return descriptor;
             }
         }
 
         // Higher levels are happy, time for a standard, non-STCS L0 compaction
-        if (get_level(0).empty()) {
-            return sstables::compaction_descriptor();
+        if (!get_level(0).empty()) {
+            auto info = get_candidates_for(0, last_compacted_keys);
+            if (!info.candidates.empty()) {
+                auto next_level = get_next_level(info.candidates, info.can_promote);
+                return sstables::compaction_descriptor(std::move(info.candidates), next_level, _max_sstable_size_in_bytes);
+            }
         }
-
-        auto info = get_candidates_for(0, last_compacted_keys);
-        if (info.candidates.empty()) {
-            return sstables::compaction_descriptor();
+        // L0 is okay, and yet we seem to have nothing to run. Try pushing things to the highest
+        // level
+        for (size_t i = 1; i < _generations.size() - 1; i++) {
+            auto& sstables = get_level(i);
+            if (sstables.empty()) {
+                continue;
+            }
+            auto& sstables_next_level = get_level(i+1);
+            // I am the de facto next level
+            if (sstables_next_level.empty()) {
+                continue;
+            }
+            auto descriptor = get_descriptor_for_level(i, last_compacted_keys, compaction_counter);
+            if (descriptor.sstables.size() > 0) {
+                return descriptor;
+            }
         }
-        auto next_level = get_next_level(info.candidates, info.can_promote);
-        return sstables::compaction_descriptor(std::move(info.candidates), next_level, _max_sstable_size_in_bytes);
+        return sstables::compaction_descriptor();
     }
 private:
     /**
