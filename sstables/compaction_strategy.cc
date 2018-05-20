@@ -443,6 +443,71 @@ public:
     }
 };
 
+class leveled_compaction_backlog_tracker final : public compaction_backlog_tracker::impl {
+    size_tiered_backlog_tracker _l0_scts;
+    std::vector<uint64_t> _size_per_level;
+public:
+    leveled_compaction_backlog_tracker()
+        : _size_per_level(leveled_manifest::MAX_LEVELS, uint64_t(0))
+    {}
+
+    virtual double backlog(const compaction_backlog_tracker::ongoing_writes& ow, const compaction_backlog_tracker::ongoing_compactions& oc) const override {
+        std::vector<uint64_t> effective_size_per_level = _size_per_level;
+        compaction_backlog_tracker::ongoing_writes l0_partial_writes;
+        compaction_backlog_tracker::ongoing_compactions l0_compacted;
+
+        for (auto& op : ow) {
+            auto level = op.second->level();
+            if (level == 0) {
+                l0_partial_writes.insert(op);
+            }
+            effective_size_per_level[level] += op.second->written();
+            fmt::print(" added {} to {}  / ", op.second->written(), level);
+        }
+        fmt::print("\n");
+
+        for (auto& cp : oc) {
+            auto level = cp.first->get_sstable_level();
+            if (level == 0) {
+                l0_compacted.insert(cp);
+            }
+            effective_size_per_level[level] -= cp.second->compacted();
+            fmt::print(" compacted{} to {}  / ", cp.second->compacted(), level);
+        }
+        fmt::print("\n");
+
+        double b = 0;
+        // Backlog for a level: size_of_level * (max_level - n) * fan_out
+        for (size_t level = 0; level < _size_per_level.size() - 1; ++level) {
+            auto lsize = _size_per_level[level];
+            for (size_t next = level + 1; next < _size_per_level.size() - 1; ++next) {
+                auto lsize_next = _size_per_level[next];
+                fmt::print("Size of a level {}, next\n", lsize, lsize_next);
+                // if nothing is accumulated we are top level. There is no backlog in the top level.
+                b += std::min(double(leveled_manifest::sstables_per_run), double(lsize_next) / (160 << 20))  * lsize;
+            }
+        }
+        fmt::print("Backlog for LCS {}, for STCS L0 {}\n", b , _l0_scts.backlog(l0_partial_writes, l0_compacted));
+        return b ;//+ _l0_scts.backlog(l0_partial_writes, l0_compacted);
+    }
+
+    virtual void add_sstable(sstables::shared_sstable sst) override {
+        auto level = sst->get_sstable_level();
+        _size_per_level[level] += sst->data_size();
+        if (level == 0) {
+            _l0_scts.add_sstable(sst);
+        }
+    }
+
+    virtual void remove_sstable(sstables::shared_sstable sst) override {
+        auto level = sst->get_sstable_level();
+        _size_per_level[level] -= sst->data_size();
+        if (level == 0) {
+            _l0_scts.remove_sstable(sst);
+        }
+    }
+};
+
 
 struct unimplemented_backlog_tracker final : public compaction_backlog_tracker::impl {
     virtual double backlog(const compaction_backlog_tracker::ongoing_writes& ow, const compaction_backlog_tracker::ongoing_compactions& oc) const override {
@@ -494,7 +559,7 @@ public:
 leveled_compaction_strategy::leveled_compaction_strategy(const std::map<sstring, sstring>& options)
         : compaction_strategy_impl(options)
         , _stcs_options(options)
-        , _backlog_tracker(std::make_unique<unimplemented_backlog_tracker>())
+        , _backlog_tracker(std::make_unique<leveled_compaction_backlog_tracker>())
 {
     using namespace cql3::statements;
 
