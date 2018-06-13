@@ -37,9 +37,11 @@ class compaction_strategy_impl {
 protected:
     const sstring TOMBSTONE_THRESHOLD_OPTION = "tombstone_threshold";
     const sstring TOMBSTONE_COMPACTION_INTERVAL_OPTION = "tombstone_compaction_interval";
+    const sstring STRICT_MIN_THRESHOLD = "strict_min_threshold";
 
     bool _use_clustering_key_filter = false;
     bool _disable_tombstone_compaction = false;
+    bool _strict_min_threshold = false;
     float _tombstone_threshold = DEFAULT_TOMBSTONE_THRESHOLD;
     db_clock::duration _tombstone_compaction_interval = DEFAULT_TOMBSTONE_COMPACTION_INTERVAL();
 public:
@@ -62,6 +64,8 @@ protected:
         auto interval = property_definitions::to_long(TOMBSTONE_COMPACTION_INTERVAL_OPTION, tmp_value, DEFAULT_TOMBSTONE_COMPACTION_INTERVAL().count());
         _tombstone_compaction_interval = db_clock::duration(std::chrono::seconds(interval));
 
+        tmp_value = get_value(options, STRICT_MIN_THRESHOLD);
+        _strict_min_threshold = property_definitions::to_boolean(STRICT_MIN_THRESHOLD, tmp_value, _strict_min_threshold);
         // FIXME: validate options.
     }
 public:
@@ -78,6 +82,10 @@ public:
 
     bool use_clustering_key_filter() const {
         return _use_clustering_key_filter;
+    }
+
+    bool strict_min_threshold() const {
+        return _strict_min_threshold;
     }
 
     // Check if a given sstable is entitled for tombstone compaction based on its
