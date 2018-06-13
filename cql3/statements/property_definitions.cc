@@ -121,6 +121,10 @@ sstring property_definitions::get_string(sstring key, sstring default_value) con
 // Return a property value, typed as a Boolean
 bool property_definitions::get_boolean(sstring key, bool default_value) const {
     auto value = get_simple(key);
+    return to_boolean(key, value, default_value);
+}
+
+bool property_definitions::to_boolean(sstring key, std::experimental::optional<sstring> value, bool default_value) {
     if (value) {
         std::string s{value.value()};
         std::transform(s.begin(), s.end(), s.begin(), ::tolower);

@@ -91,6 +91,8 @@ public:
     // Return a property value, typed as a Boolean
     bool get_boolean(sstring key, bool default_value) const;
 
+    static bool to_boolean(sstring key, std::experimental::optional<sstring> value, bool default_value);
+
     // Return a property value, typed as a double
     double get_double(sstring key, double default_value) const;
 
