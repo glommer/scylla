@@ -288,6 +288,11 @@ size_tiered_compaction_strategy::get_sstables_for_compaction(column_family& cfs,
     // TODO: Add support to filter cold sstables (for reference: SizeTieredCompactionStrategy::filterColdSSTables).
 
     auto buckets = get_buckets(candidates);
+    while (!strict_min_threshold() && (buckets.size() > 1) && (!is_any_bucket_interesting(buckets, min_threshold))) {
+        auto last_bucket = std::move(buckets.back());
+        buckets.pop_back();
+        buckets.back().insert(buckets.back().end(), last_bucket.begin(), last_bucket.end());
+    }
 
     if (is_any_bucket_interesting(buckets, min_threshold)) {
         std::vector<sstables::shared_sstable> most_interesting = most_interesting_bucket(std::move(buckets), min_threshold, max_threshold);
