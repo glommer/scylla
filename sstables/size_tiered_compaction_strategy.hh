@@ -281,7 +281,7 @@ size_tiered_compaction_strategy::most_interesting_bucket(std::vector<std::vector
 inline compaction_descriptor
 size_tiered_compaction_strategy::get_sstables_for_compaction(column_family& cfs, std::vector<sstables::shared_sstable> candidates) {
     // make local copies so they can't be changed out from under us mid-method
-    int min_threshold = cfs.schema()->min_compaction_threshold();
+    int min_threshold = strict_min_threshold() ? cfs.schema()->min_compaction_threshold() : 2;
     int max_threshold = cfs.schema()->max_compaction_threshold();
     auto gc_before = gc_clock::now() - cfs.schema()->gc_grace_seconds();
 
