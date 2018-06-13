@@ -288,10 +288,31 @@ size_tiered_compaction_strategy::get_sstables_for_compaction(column_family& cfs,
     // TODO: Add support to filter cold sstables (for reference: SizeTieredCompactionStrategy::filterColdSSTables).
 
     auto buckets = get_buckets(candidates);
-
     if (is_any_bucket_interesting(buckets, min_threshold)) {
         std::vector<sstables::shared_sstable> most_interesting = most_interesting_bucket(std::move(buckets), min_threshold, max_threshold);
         return sstables::compaction_descriptor(std::move(most_interesting));
+    }
+
+    // If we got here, there are no interesting buckets. This means that for the case
+    // of non-strict min_threshold, each bucket has a single SSTable. So we can safely just
+    // look at back(). Since there is no work to do at this point, we will try to merge two SSTables
+    // that are as close as possible to each other in size.
+    size_t candidate = 0;
+    float size_ratio = std::numeric_limits<float>::infinity();
+    if ((!cfs.compaction_enforce_min_threshold()) {
+        for (ssize_t idx = 0; idx < (ssize_t(buckets.size()) - 1); ++idx) {
+            float tmp_ratio = buckets[idx + 1].back()->data_size() / buckets[idx].back()->data_size();
+            if (tmp_ratio < size_ratio) {
+                size_ratio = tmp_ratio;
+                candidate = idx;
+            }
+        }
+
+        if (!std::isinf(size_ratio)) {
+            auto& bucket = buckets[candidate];
+            bucket.push_back(buckets[candidate+1].back());
+            return sstables::compaction_descriptor(bucket);
+        }
     }
 
     // if there is no sstable to compact in standard way, try compacting single sstable whose droppable tombstone
