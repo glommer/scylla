@@ -330,6 +330,11 @@ struct timestamp_native_type {
     primary_type tp;
 };
 
+struct time_native_type {
+    using primary_type = int64_t;
+    primary_type nanoseconds;
+};
+
 struct timeuuid_native_type {
     using primary_type = utils::UUID;
     primary_type uuid;
@@ -372,6 +377,7 @@ public:
     data_value(net::ipv4_address);
     data_value(simple_date_native_type);
     data_value(timestamp_native_type);
+    data_value(time_native_type);
     data_value(timeuuid_native_type);
     data_value(db_clock::time_point);
     data_value(boost::multiprecision::cpp_int);
@@ -1254,6 +1260,12 @@ template <>
 inline
 shared_ptr<const abstract_type> data_type_for<timestamp_native_type>() {
     return timestamp_type;
+}
+
+template <>
+inline
+shared_ptr<const abstract_type> data_type_for<time_native_type>() {
+    return time_type;
 }
 
 template <>
