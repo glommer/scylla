@@ -123,7 +123,7 @@ namespace sstables {
     // cleaned up, log messages will inform the user that compact_sstables runs for
     // cleaning operation, and compaction history will not be updated.
     future<compaction_info> compact_sstables(sstables::compaction_descriptor descriptor,
-            column_family& cf, std::function<shared_sstable()> creator, bool cleanup = false);
+            column_family& cf, std::function<shared_sstable(const sstring& dir)> creator, bool cleanup = false);
 
     // Compacts a set of N shared sstables into M sstables. For every shard involved,
     // i.e. which owns any of the sstables, a new unshared sstable is created.

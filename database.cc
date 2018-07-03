@@ -1407,9 +1407,9 @@ table::compact_sstables(sstables::compaction_descriptor descriptor, bool cleanup
     }
 
     return with_lock(_sstables_lock.for_read(), [this, descriptor = std::move(descriptor), cleanup] () mutable {
-        auto create_sstable = [this] {
+        auto create_sstable = [this] (const sstring& sstdir) {
                 auto gen = this->calculate_generation_for_new_table();
-                auto sst = sstables::make_sstable(_schema, _config.datadir, gen,
+                auto sst = sstables::make_sstable(_schema, sstdir, gen,
                         get_highest_supported_format(),
                         sstables::sstable::format_types::big);
                 sst->set_unshared();

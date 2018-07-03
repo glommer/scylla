@@ -495,7 +495,7 @@ void compacting_sstable_writer::consume_end_of_stream() {
 }
 
 class regular_compaction : public compaction {
-    std::function<shared_sstable()> _creator;
+    std::function<shared_sstable(const sstring&)> _creator;
     // store a clone of sstable set for column family, which needs to be alive for incremental selector.
     const sstable_set _set;
     // used to incrementally calculate max purgeable timestamp, as we iterate through decorated keys.
@@ -507,7 +507,7 @@ class regular_compaction : public compaction {
     mutable compaction_read_monitor_generator _monitor_generator;
     std::deque<compaction_write_monitor> _active_write_monitors = {};
 public:
-    regular_compaction(column_family& cf, compaction_descriptor descriptor, std::function<shared_sstable()> creator)
+    regular_compaction(column_family& cf, compaction_descriptor descriptor, std::function<shared_sstable(const sstring&)> creator)
         : compaction(cf, std::move(descriptor.sstables), descriptor.max_sstable_bytes, descriptor.level)
         , _creator(std::move(creator))
         , _set(cf.get_sstable_set())
@@ -560,7 +560,7 @@ public:
 
     virtual sstable_writer* select_sstable_writer(const dht::decorated_key& dk) override {
         if (!_writer) {
-            _sst = _creator();
+            _sst = _creator(_cf.dir());
             setup_new_sstable(_sst);
 
             _active_write_monitors.emplace_back(_sst, _cf, maximum_timestamp(), _sstable_level);
@@ -595,7 +595,7 @@ private:
 
 class cleanup_compaction final : public regular_compaction {
 public:
-    cleanup_compaction(column_family& cf, compaction_descriptor descriptor, std::function<shared_sstable()> creator)
+    cleanup_compaction(column_family& cf, compaction_descriptor descriptor, std::function<shared_sstable(const sstring&)> creator)
         : regular_compaction(cf, std::move(descriptor), std::move(creator))
     {
         _info->type = compaction_type::Cleanup;
@@ -775,7 +775,7 @@ static std::unique_ptr<compaction> make_compaction(bool cleanup, Params&&... par
 }
 
 future<compaction_info>
-compact_sstables(sstables::compaction_descriptor descriptor, column_family& cf, std::function<shared_sstable()> creator, bool cleanup) {
+compact_sstables(sstables::compaction_descriptor descriptor, column_family& cf, std::function<shared_sstable(const sstring& dir)> creator, bool cleanup) {
     if (descriptor.sstables.empty()) {
         throw std::runtime_error(sprint("Called compaction with empty set on behalf of {}.{}", cf.schema()->ks_name(), cf.schema()->cf_name()));
     }
