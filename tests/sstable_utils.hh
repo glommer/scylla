@@ -24,6 +24,7 @@
 #include "sstables/sstables.hh"
 #include "memtable-sstable.hh"
 #include "dht/i_partitioner.hh"
+#include "sstables/compaction.hh"
 #include <boost/range/irange.hpp>
 #include <boost/range/adaptor/map.hpp>
 
@@ -75,4 +76,9 @@ inline sstring make_local_key(const schema_ptr& s, size_t min_key_size = 1) {
 
 inline std::vector<sstring> make_keys(unsigned n, const schema_ptr& s, size_t min_key_size = 1) {
     return do_make_keys(n, s, min_key_size, local_shard_only::no);
+}
+
+inline future<sstables::compaction_info> compact_sstables(sstables::compaction_descriptor descriptor,
+        column_family& cf, std::function<sstables::shared_sstable()> creator, bool cleanup = false) {
+    return sstables::compact_sstables(std::move(descriptor), cf, [creator] (const sstring& dummy) { return creator(); }, cleanup);
 }
