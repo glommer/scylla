@@ -79,6 +79,7 @@
 #include "db/view/build_progress_virtual_reader.hh"
 #include "db/schema_tables.hh"
 #include "index/built_indexes_virtual_reader.hh"
+#include "sstables/sstables.hh"
 
 using days = std::chrono::duration<int, std::ratio<24 * 3600>>;
 
@@ -378,6 +379,10 @@ schema_ptr built_indexes() {
             {"compacted_at", timestamp_type},
             {"keyspace_name", utf8_type},
             {"rows_merged", map_type_impl::get_instance(int32_type, long_type, true)},
+            {"type", utf8_type},
+            {"compaction_started_at", timestamp_type},
+            {"sstables_in", list_type_impl::get_instance(utf8_type, false)},
+            {"sstables_out", list_type_impl::get_instance(utf8_type, false)},
         },
         // static columns
         {},
@@ -1743,6 +1748,11 @@ static map_type_impl::native_type prepare_rows_merged(std::unordered_map<int32_t
     return tmp;
 }
 
+list_type_impl::native_type prepare_sstable_list(std::vector<sstables::shared_sstable> sstable_list) {
+    return boost::copy_range<list_type_impl::native_type>(sstable_list |
+           boost::adaptors::transformed(std::mem_fn(&sstables::sstable::get_filename)));
+}
+
 future<> update_compaction_history(compaction_history_entry entry)
 {
     // don't write anything when the history table itself is compacted, since that would in turn cause new compactions
@@ -1751,13 +1761,17 @@ future<> update_compaction_history(compaction_history_entry entry)
     }
 
     auto map_type = map_type_impl::get_instance(int32_type, long_type, true);
+    auto list_type = list_type_impl::get_instance(utf8_type, false);
 
-    sstring req = sprint("INSERT INTO system.%s (id, keyspace_name, columnfamily_name, compacted_at, bytes_in, bytes_out, rows_merged) VALUES (?, ?, ?, ?, ?, ?, ?)"
+    sstring req = sprint("INSERT INTO system.%s (id, keyspace_name, columnfamily_name, compaction_started_at, compacted_at, bytes_in, bytes_out, rows_merged, type, sstables_in, sstables_out) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
                     , COMPACTION_HISTORY);
 
     return execute_cql(req, utils::UUID_gen::get_time_UUID(), std::move(entry.ks), std::move(entry.cf),
-                       entry.compacted_at, entry.bytes_in, entry.bytes_out,
-                       make_map_value(map_type, prepare_rows_merged(entry.rows_merged))).discard_result();
+                       entry.compaction_started_at, entry.compacted_at, entry.bytes_in, entry.bytes_out,
+                       make_map_value(map_type, prepare_rows_merged(entry.rows_merged)),
+                       sstables::compaction_name(entry.type),
+                       make_list_value(list_type, prepare_sstable_list(std::move(entry.sstables_in))),
+                       make_list_value(list_type, prepare_sstable_list(std::move(entry.sstables_out)))).discard_result();
 }
 
 future<std::vector<compaction_history_entry>> get_compaction_history() {

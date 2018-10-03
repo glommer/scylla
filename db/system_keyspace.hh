@@ -51,6 +51,8 @@
 #include "locator/token_metadata.hh"
 #include "db_clock.hh"
 #include "db/commitlog/replay_position.hh"
+#include "sstables/sstables.hh"
+#include "sstables/compaction.hh"
 #include "mutation_query.hh"
 #include <map>
 #include <seastar/core/distributed.hh>
@@ -368,6 +370,10 @@ enum class bootstrap_state {
         // Key: number of rows merged
         // Value: counter
         std::unordered_map<int32_t, int64_t> rows_merged;
+        sstables::compaction_type type;
+        int64_t compaction_started_at;
+        std::vector<sstables::shared_sstable> sstables_in;
+        std::vector<sstables::shared_sstable> sstables_out;
     };
 
     future<> update_compaction_history(compaction_history_entry entry);

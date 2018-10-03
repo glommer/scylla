@@ -1419,10 +1419,14 @@ make_compaction_history(sstables::compaction_info info) {
     db::system_keyspace::compaction_history_entry entry;
     entry.ks = info.ks;
     entry.cf = info.cf;
+    entry.compaction_started_at = info.started_at;
     entry.compacted_at = info.ended_at;
+    entry.type = info.type;
     entry.bytes_in = info.start_size;
     entry.bytes_out = info.end_size;
     entry.rows_merged = std::unordered_map<int32_t, int64_t>{};
+    entry.sstables_in = info.old_sstables;
+    entry.sstables_out = info.new_sstables;
     return entry;
 }
 
