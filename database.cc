@@ -1450,9 +1450,6 @@ table::compact_sstables(sstables::compaction_descriptor descriptor, bool cleanup
             return info;
         });
     }).then([this] (auto info) {
-        if (info.type != sstables::compaction_type::Compaction) {
-            return make_ready_future<>();
-        }
         // skip update if running without a query context, for example, when running a test case.
         if (!db::qctx) {
             return make_ready_future<>();
