@@ -317,6 +317,7 @@ protected:
         , _max_sstable_size(max_sstable_size)
         , _sstable_level(sstable_level)
     {
+        _info->old_sstables = _sstables;
         _cf.get_compaction_manager().register_compaction(_info);
     }
 
@@ -399,6 +400,7 @@ private:
         _info->ks = schema->ks_name();
         _info->cf = schema->cf_name();
         report_start(formatted_msg);
+        _info->started_at = std::chrono::duration_cast<std::chrono::milliseconds>(db_clock::now().time_since_epoch()).count();
 
         return make_sstable_reader(std::move(ssts));
     }
