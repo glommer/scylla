@@ -1743,11 +1743,10 @@ static map_type_impl::native_type prepare_rows_merged(std::unordered_map<int32_t
     return tmp;
 }
 
-future<> update_compaction_history(sstring ksname, sstring cfname, int64_t compacted_at, int64_t bytes_in, int64_t bytes_out,
-                                   std::unordered_map<int32_t, int64_t> rows_merged)
+future<> update_compaction_history(compaction_history_entry entry)
 {
     // don't write anything when the history table itself is compacted, since that would in turn cause new compactions
-    if (ksname == "system" && cfname == COMPACTION_HISTORY) {
+    if (entry.ks == "system" && entry.cf == COMPACTION_HISTORY) {
         return make_ready_future<>();
     }
 
@@ -1756,8 +1755,9 @@ future<> update_compaction_history(sstring ksname, sstring cfname, int64_t compa
     sstring req = sprint("INSERT INTO system.%s (id, keyspace_name, columnfamily_name, compacted_at, bytes_in, bytes_out, rows_merged) VALUES (?, ?, ?, ?, ?, ?, ?)"
                     , COMPACTION_HISTORY);
 
-    return execute_cql(req, utils::UUID_gen::get_time_UUID(), ksname, cfname, compacted_at, bytes_in, bytes_out,
-                       make_map_value(map_type, prepare_rows_merged(rows_merged))).discard_result();
+    return execute_cql(req, utils::UUID_gen::get_time_UUID(), std::move(entry.ks), std::move(entry.cf),
+                       entry.compacted_at, entry.bytes_in, entry.bytes_out,
+                       make_map_value(map_type, prepare_rows_merged(entry.rows_merged))).discard_result();
 }
 
 future<std::vector<compaction_history_entry>> get_compaction_history() {

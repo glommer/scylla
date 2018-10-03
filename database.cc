@@ -1414,6 +1414,18 @@ void table::remove_ancestors_needed_rewrite(std::unordered_set<uint64_t> ancesto
     rebuild_statistics();
 }
 
+db::system_keyspace::compaction_history_entry
+make_compaction_history(sstables::compaction_info info) {
+    db::system_keyspace::compaction_history_entry entry;
+    entry.ks = info.ks;
+    entry.cf = info.cf;
+    entry.compacted_at = info.ended_at;
+    entry.bytes_in = info.start_size;
+    entry.bytes_out = info.end_size;
+    entry.rows_merged = std::unordered_map<int32_t, int64_t>{};
+    return entry;
+}
+
 future<>
 table::compact_sstables(sstables::compaction_descriptor descriptor, bool cleanup) {
     if (!descriptor.sstables.size()) {
@@ -1449,8 +1461,7 @@ table::compact_sstables(sstables::compaction_descriptor descriptor, bool cleanup
         // shows how many sstables each row is merged from. This information
         // cannot be accessed until we make combined_reader more generic,
         // for example, by adding a reducer method.
-        return db::system_keyspace::update_compaction_history(info.ks, info.cf, info.ended_at,
-            info.start_size, info.end_size, std::unordered_map<int32_t, int64_t>{});
+        return db::system_keyspace::update_compaction_history(make_compaction_history(std::move(info)));
     });
 }
 
