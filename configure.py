@@ -1264,7 +1264,7 @@ with open(buildfile, 'w') as f:
         f.write(textwrap.dedent('''\
             build build/{mode}/iotune: copy seastar/build/{mode}/apps/iotune/iotune
             ''').format(**locals()))
-        f.write('build build/{mode}/scylla-package.tar.gz: package build/{mode}/scylla build/{mode}/iotune build/SCYLLA-RELEASE-FILE build/SCYLLA-VERSION-FILE\n'.format(**locals()))
+        f.write('build build/{mode}/scylla-package.tar.gz: package build/{mode}/scylla build/{mode}/iotune build/SCYLLA-RELEASE-FILE build/SCYLLA-VERSION-FILE | always\n'.format(**locals()))
         f.write('    mode = {mode}\n'.format(**locals()))
     f.write('build {}: phony\n'.format(seastar_deps))
     f.write(textwrap.dedent('''\
@@ -1283,6 +1283,7 @@ with open(buildfile, 'w') as f:
         default {modes_list}
         ''').format(modes_list=' '.join(build_modes), **globals()))
     f.write(textwrap.dedent('''\
+        build always: phony
         rule scylla_version_gen
             command = ./SCYLLA-VERSION-GEN
         build build/SCYLLA-RELEASE-FILE build/SCYLLA-VERSION-FILE: scylla_version_gen
