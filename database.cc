@@ -933,6 +933,7 @@ future<> table::seal_active_streaming_memtable_big(streaming_memtable_big& smb, 
                 auto&& priority = service::get_local_streaming_write_priority();
                 auto fut = write_memtable_to_sstable(*old, newtab, *monitor, get_large_partition_handler(), incremental_backups_enabled(), priority, true);
                 return fut.then_wrapped([this, newtab, old, &smb, permit = std::move(permit), monitor = std::move(monitor)] (future<> f) mutable {
+                    dblog.debug("Flush big mutation succeeded to {}", newtab->get_filename());
                     if (!f.failed()) {
                         smb.sstables.push_back(monitored_sstable{std::move(monitor), newtab});
                         return make_ready_future<>();
@@ -4145,10 +4146,11 @@ future<> table::flush_streaming_mutations(utils::UUID plan_id, dht::partition_ra
     // temporary counter measure.
     dblog.debug("Flushing streaming memtable, plan={}", plan_id);
     return with_gate(_streaming_flush_gate, [this, plan_id, ranges = std::move(ranges)] () mutable {
-        return flush_streaming_big_mutations(plan_id).then([this, ranges = std::move(ranges)] (auto sstables) mutable {
+        return flush_streaming_big_mutations(plan_id).then([this, ranges = std::move(ranges), plan_id] (auto sstables) mutable {
             return _streaming_memtables->seal_active_memtable_delayed().then([this] {
                 return _streaming_flush_phaser.advance_and_await();
-            }).then([this, sstables = std::move(sstables), ranges = std::move(ranges)] () mutable {
+            }).then([this, sstables = std::move(sstables), ranges = std::move(ranges), plan_id] () mutable {
+                dblog.debug("Flushing streaming memtable succeeded for plan={}", plan_id);
                 return _cache.invalidate([this, sstables = std::move(sstables)] () mutable noexcept {
                     // FIXME: this is not really noexcept, but we need to provide strong exception guarantees.
                     for (auto&& sst : sstables) {
