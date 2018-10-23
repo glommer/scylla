@@ -743,7 +743,7 @@ void compaction_backlog_tracker::revert_charges(sstables::shared_sstable sst) {
 }
 
 compaction_backlog_tracker::~compaction_backlog_tracker() {
-    cmlog.trace("{}", fmt::format("Destroying backlog tracker 0x{:x}, bt {}", uint64_t(this), __builtin_return_address(0)).c_str());
+    cmlog.trace("{}", fmt::format("Destroying backlog tracker 0x{:x}, bt 0x{:x}, 0x{:x}", uint64_t(this), __builtin_return_address(0), __builtin_return_address(1)).c_str());
     if (_manager) {
         _manager->remove_backlog_tracker(this);
     }
