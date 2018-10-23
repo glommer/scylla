@@ -665,7 +665,7 @@ void compaction_backlog_tracker::add_sstable(sstables::shared_sstable sst) {
         return;
     }
 
-    cmlog.trace("Adding SSTable {} from backlog tracker (0x{:x}", sst->get_filename(), uint64_t(this));
+    cmlog.trace("{}",fmt::format("Adding SSTable {} from backlog tracker (0x{:x})", sst->get_filename(), uint64_t(this)));
     _ongoing_writes.erase(sst);
     try {
         _impl->add_sstable(std::move(sst));
@@ -680,7 +680,7 @@ void compaction_backlog_tracker::remove_sstable(sstables::shared_sstable sst) {
         return;
     }
 
-    cmlog.trace("Removing SSTable {} from backlog tracker (0x{:x}", sst->get_filename(), uint64_t(this));
+    cmlog.trace("{}",fmt::format("Removing SSTable {} from backlog tracker (0x{:x})", sst->get_filename(), uint64_t(this)));
     _ongoing_compactions.erase(sst);
     try {
         _impl->remove_sstable(std::move(sst));
@@ -695,7 +695,7 @@ void compaction_backlog_tracker::register_partially_written_sstable(sstables::sh
         return;
     }
 
-    cmlog.trace("Registering partially written SSTable {} into backlog tracker (0x{:x}", sst->get_filename(), uint64_t(this));
+    cmlog.trace("{}",fmt::format("Registering partially written SSTable {} into backlog tracker (0x{:x})", sst->get_filename(), uint64_t(this)));
     try {
         _ongoing_writes.emplace(sst, &wp);
     } catch (...) {
@@ -713,7 +713,7 @@ void compaction_backlog_tracker::register_compacting_sstable(sstables::shared_ss
     }
 
 
-    cmlog.trace("Registering compacting SSTable {} into backlog tracker (0x{:x}", sst->get_filename(), uint64_t(this));
+    cmlog.trace("{}",fmt::format("Registering compacting SSTable {} into backlog tracker (0x{:x})", sst->get_filename(), uint64_t(this)));
     try {
         _ongoing_compactions.emplace(sst, &rp);
     } catch (...) {
@@ -722,7 +722,7 @@ void compaction_backlog_tracker::register_compacting_sstable(sstables::shared_ss
 }
 
 void compaction_backlog_tracker::transfer_ongoing_charges(compaction_backlog_tracker& new_bt, bool move_read_charges) {
-    cmlog.trace("Transfering my (0x{:x}) charges to backlog tracker {:x}", uint64_t(this), uint64_t(&new_bt));
+    cmlog.trace("{}",fmt::format("Transfering my (0x{:x}) charges to backlog tracker 0x{:x}", uint64_t(this), uint64_t(&new_bt)));
     for (auto&& w : _ongoing_writes) {
         new_bt.register_partially_written_sstable(w.first, *w.second);
     }
@@ -737,20 +737,20 @@ void compaction_backlog_tracker::transfer_ongoing_charges(compaction_backlog_tra
 }
 
 void compaction_backlog_tracker::revert_charges(sstables::shared_sstable sst) {
-    cmlog.trace("Reverting charges relative to SSTable {} from backlog tracker {:x}", sst->get_filename(), uint64_t(this));
+    cmlog.trace("{}",fmt::format("Reverting charges relative to SSTable {} from backlog tracker 0x{:x}", sst->get_filename(), uint64_t(this)));
     _ongoing_writes.erase(sst);
     _ongoing_compactions.erase(sst);
 }
 
 compaction_backlog_tracker::~compaction_backlog_tracker() {
-    cmlog.trace("Destroying backlog tracker {:x}", uint64_t(this));
+    seastar::internal::print_with_backtrace(fmt::format("Destroying backlog tracker 0x{:x}", uint64_t(this)).c_str());
     if (_manager) {
         _manager->remove_backlog_tracker(this);
     }
 }
 
 void compaction_backlog_manager::remove_backlog_tracker(compaction_backlog_tracker* tracker) {
-    cmlog.trace("Removing tracker 0x{:x} into the backlog manager", uint64_t(tracker));
+    cmlog.trace("{}",fmt::format("Removing tracker 0x{:x} into the backlog manager", uint64_t(tracker)));
     _backlog_trackers.erase(tracker);
 }
 
@@ -772,7 +772,7 @@ double compaction_backlog_manager::backlog() const {
 }
 
 void compaction_backlog_manager::register_backlog_tracker(compaction_backlog_tracker& tracker) {
-    cmlog.trace("Inserting tracker 0x{:x} into the backlog manager", uint64_t(&tracker));
+    cmlog.trace("{}",fmt::format("Inserting tracker 0x{:x} into the backlog manager", uint64_t(&tracker)));
     tracker._manager = this;
     _backlog_trackers.insert(&tracker);
 }

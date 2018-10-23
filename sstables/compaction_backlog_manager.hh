@@ -66,6 +66,12 @@ struct backlog_read_progress_manager {
     virtual ~backlog_read_progress_manager() {}
 };
 
+namespace seastar {
+namespace internal {
+extern void print_with_backtrace(const char* cause); 
+}
+}
+
 // Manages one individual source of compaction backlog, usually a column family.
 class compaction_backlog_tracker {
 public:
@@ -79,7 +85,9 @@ public:
         virtual ~impl() { }
     };
 
-    compaction_backlog_tracker(std::unique_ptr<impl> impl) : _impl(std::move(impl)) {}
+    compaction_backlog_tracker(std::unique_ptr<impl> impl) : _impl(std::move(impl)) {
+        seastar::internal::print_with_backtrace(fmt::format("Constructing 0x{:x}", uint64_t(this)).c_str());
+    }
     compaction_backlog_tracker(compaction_backlog_tracker&&) = default;
     compaction_backlog_tracker(const compaction_backlog_tracker&) = delete;
     ~compaction_backlog_tracker();
