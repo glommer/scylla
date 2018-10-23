@@ -80,9 +80,7 @@ public:
         virtual ~impl() { }
     };
 
-    compaction_backlog_tracker(std::unique_ptr<impl> impl) : _impl(std::move(impl)) {
-        fmt::print("Constructing 0x{:x}, bt 0x{:x}, 0x{:x} \n", uint64_t(this), __builtin_return_address(0), __builtin_return_address(1));
-    }
+    compaction_backlog_tracker(std::unique_ptr<impl> impl);
     compaction_backlog_tracker(compaction_backlog_tracker&&) = default;
     compaction_backlog_tracker(const compaction_backlog_tracker&) = delete;
     ~compaction_backlog_tracker();

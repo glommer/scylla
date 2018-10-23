@@ -28,6 +28,7 @@
 #include "exceptions.hh"
 #include <cmath>
 #include <boost/range/algorithm/count_if.hpp>
+#include <execinfo.h>
 
 static logging::logger cmlog("compaction_manager");
 using namespace std::chrono_literals;
@@ -742,8 +743,22 @@ void compaction_backlog_tracker::revert_charges(sstables::shared_sstable sst) {
     _ongoing_compactions.erase(sst);
 }
 
+compaction_backlog_tracker::compaction_backlog_tracker(std::unique_ptr<impl> impl) : _impl(std::move(impl)) {
+    void *buffer[1024];
+    int nptrs = ::backtrace(buffer, 1024);
+    auto strings = backtrace_symbols(buffer, nptrs);
+    cmlog.trace("{}", fmt::format("Constructing 0x{:x}, bt 0x{:x}, 0x{:x} \n", uint64_t(this), strings[0], strings[1]).c_str());
+    free(strings);
+}
+
 compaction_backlog_tracker::~compaction_backlog_tracker() {
-    cmlog.trace("{}", fmt::format("Destroying backlog tracker 0x{:x}, bt 0x{:x}, 0x{:x}", uint64_t(this), __builtin_return_address(0), __builtin_return_address(1)).c_str());
+    void *buffer[1024];
+    int nptrs = ::backtrace(buffer, 1024);
+    auto strings = backtrace_symbols(buffer, nptrs);
+
+    cmlog.trace("{}", fmt::format("Destroying backlog tracker 0x{:x}, bt 0x{:x}, 0x{:x}", uint64_t(this), strings[0], strings[1]).c_str());
+    free(strings);
+
     if (_manager) {
         _manager->remove_backlog_tracker(this);
     }
