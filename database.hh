@@ -485,7 +485,11 @@ private:
     // Cache must be synchronized atomically with this, otherwise write atomicity may not be respected.
     // Doesn't trigger compaction.
     // Strong exception guarantees.
+    void add_sstable_without_updating_backlog_tracker(sstables::shared_sstable sstable, const std::vector<unsigned>& shards_for_the_sstable);
+
+    // Adds new sstable to the set of sstables and also updates the backlog tracker
     void add_sstable(sstables::shared_sstable sstable, const std::vector<unsigned>& shards_for_the_sstable);
+
     // returns an empty pointer if sstable doesn't belong to current shard.
     future<sstables::shared_sstable> open_sstable(sstables::foreign_sstable_open_info info, sstring dir,
         int64_t generation, sstables::sstable_version_types v, sstables::sstable_format_types f);

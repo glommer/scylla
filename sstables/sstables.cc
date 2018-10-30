@@ -3981,6 +3981,11 @@ future<>
 delete_sstables(std::vector<sstring> tocs);
 
 sstable::~sstable() {
+    void *buffer[1024];
+    int nptrs = ::backtrace(buffer, 1024);
+    auto strings = backtrace_symbols(buffer, nptrs);
+    sstlog.info("{}", fmt::format("Destroying the SSTable {}, bt 0x{}, 0x{} 0x{} 0x{}\n", get_filename(), strings[0], strings[1], strings[2], strings[3]).c_str());
+
     if (_index_file) {
         _index_file.close().handle_exception([save = _index_file, op = background_jobs().start()] (auto ep) {
             sstlog.warn("sstable close index_file failed: {}", ep);

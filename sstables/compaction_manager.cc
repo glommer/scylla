@@ -747,7 +747,7 @@ compaction_backlog_tracker::compaction_backlog_tracker(std::unique_ptr<impl> imp
     void *buffer[1024];
     int nptrs = ::backtrace(buffer, 1024);
     auto strings = backtrace_symbols(buffer, nptrs);
-    cmlog.trace("{}", fmt::format("Constructing 0x{:x}, bt 0x{:x}, 0x{:x} \n", uint64_t(this), strings[0], strings[1]).c_str());
+    cmlog.trace("{}", fmt::format("Constructing 0x{:x}, bt 0x{}, 0x{} {}\n", uint64_t(this), strings[0], strings[1], strings[2]).c_str());
     free(strings);
 }
 
@@ -756,7 +756,7 @@ compaction_backlog_tracker::~compaction_backlog_tracker() {
     int nptrs = ::backtrace(buffer, 1024);
     auto strings = backtrace_symbols(buffer, nptrs);
 
-    cmlog.trace("{}", fmt::format("Destroying backlog tracker 0x{:x}, bt 0x{:x}, 0x{:x}", uint64_t(this), strings[0], strings[1]).c_str());
+    cmlog.trace("{}", fmt::format("Destroying backlog tracker 0x{:x}, bt 0x{}, 0x{} {}", uint64_t(this), strings[0], strings[1], strings[2]).c_str());
     free(strings);
 
     if (_manager) {

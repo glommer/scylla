@@ -134,7 +134,22 @@ public:
             , _compaction_manager(manager)
             , _compaction_strategy(strategy)
             , _maximum_timestamp(max_timestamp)
-    {}
+    {
+        void *buffer[1024];
+        int nptrs = ::backtrace(buffer, 1024);
+        auto strings = backtrace_symbols(buffer, nptrs);
+        dblog.info("{}", fmt::format("Constructing the write monitor 0x{:x}, bt 0x{}, 0x{} 0x{} 0x{}\n", uint64_t(this), strings[0], strings[1], strings[2], strings[3]).c_str());
+    }
+
+    ~database_sstable_write_monitor() {
+        void *buffer[1024];
+        int nptrs = ::backtrace(buffer, 1024);
+        auto strings = backtrace_symbols(buffer, nptrs);
+        dblog.info("{}", fmt::format("Destroying the write monitor 0x{:x}, bt 0x{}, 0x{} 0x{} 0x{}\n", uint64_t(this), strings[0], strings[1], strings[2], strings[3]).c_str());
+    }
+
+    database_sstable_write_monitor(const database_sstable_write_monitor& m) = delete;
+    database_sstable_write_monitor(database_sstable_write_monitor&& m) = default;
 
     virtual void on_write_started(const sstables::writer_offset_tracker& t) override {
         _tracker = &t;
@@ -819,12 +834,16 @@ void table::update_stats_for_new_sstable(uint64_t disk_space_used_by_sstable, co
     }
 }
 
-void table::add_sstable(sstables::shared_sstable sstable, const std::vector<unsigned>& shards_for_the_sstable) {
+void table::add_sstable_without_updating_backlog_tracker(sstables::shared_sstable sstable, const std::vector<unsigned>& shards_for_the_sstable) {
     // allow in-progress reads to continue using old list
     auto new_sstables = make_lw_shared(*_sstables);
     new_sstables->insert(sstable);
     _sstables = std::move(new_sstables);
     update_stats_for_new_sstable(sstable->bytes_on_disk(), shards_for_the_sstable);
+}
+
+void table::add_sstable(sstables::shared_sstable sstable, const std::vector<unsigned>& shards_for_the_sstable) {
+    add_sstable_without_updating_backlog_tracker(sstable, shards_for_the_sstable);
     _compaction_strategy.get_backlog_tracker().add_sstable(sstable);
 }
 
@@ -935,6 +954,7 @@ future<> table::seal_active_streaming_memtable_big(streaming_memtable_big& smb, 
                 return fut.then_wrapped([this, newtab, old, &smb, permit = std::move(permit), monitor = std::move(monitor)] (future<> f) mutable {
                     dblog.debug("Flush big mutation succeeded to {}", newtab->get_filename());
                     if (!f.failed()) {
+                        _compaction_strategy.get_backlog_tracker().add_sstable(newtab);
                         smb.sstables.push_back(monitored_sstable{std::move(monitor), newtab});
                         return make_ready_future<>();
                     } else {
@@ -4185,6 +4205,7 @@ future<std::vector<table::monitored_sstable>> table::flush_streaming_big_mutatio
 }
 
 future<> table::fail_streaming_mutations(utils::UUID plan_id) {
+    dblog.info("Streaming mutation failed, and I was called because of that. Plan ID: {}", plan_id);
     auto it = _streaming_memtables_big.find(plan_id);
     if (it == _streaming_memtables_big.end()) {
         return make_ready_future<>();
@@ -4193,6 +4214,7 @@ future<> table::fail_streaming_mutations(utils::UUID plan_id) {
     _streaming_memtables_big.erase(it);
     return entry->flush_in_progress.close().then([this, entry] {
         for (auto&& sst : entry->sstables) {
+   //         sst.monitor->write_failed();
             sst.sstable->mark_for_deletion();
         }
     });
