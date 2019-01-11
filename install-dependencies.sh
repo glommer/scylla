@@ -31,6 +31,7 @@ debian_base_packages=(
     git
 )
 
+# The python relocatable process happens on Fedora (as does the main build), so it has to install all the packages needed to do that
 fedora_packages=(
     yaml-cpp-devel
     thrift-devel
@@ -47,6 +48,11 @@ fedora_packages=(
     ant-junit
     maven
     pystache
+    patchelf
+    python3
+    python3-PyYAML
+    python3-pyudev
+    python3-setuptools
 )
 
 centos_packages=(
