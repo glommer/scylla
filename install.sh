@@ -97,11 +97,14 @@ install -m644 conf/cassandra-rackdc.properties -Dt "$retc"/scylla
 install -m644 build/*.service -Dt "$rprefix"/lib/systemd/system
 install -m644 dist/common/systemd/*.service -Dt "$rprefix"/lib/systemd/system
 install -m644 dist/common/systemd/*.timer -Dt "$rprefix"/lib/systemd/system
-install -m755 dist/common/scripts/* -Dt "$rprefix"/lib/scylla/
+install -m755 seastar/scripts/libexec/* -Dt "$rprefix"/lib/scylla/libexec/
+install -m755 dist/common/scripts/libexec/* -Dt "$rprefix"/lib/scylla/libexec/
+find dist/common/scripts -maxdepth 1 -type f | xargs -I{} install -m755 {} -Dt "$rprefix"/lib/scylla/
 install -m755 seastar/scripts/perftune.py -Dt "$rprefix"/lib/scylla/
 install -m755 seastar/scripts/seastar-addr2line -Dt "$rprefix"/lib/scylla/
 install -m755 seastar/scripts/seastar-cpu-map.sh -Dt "$rprefix"/lib/scylla/
 install -m755 seastar/dpdk/usertools/dpdk-devbind.py -Dt "$rprefix"/lib/scylla/
+install -m755 seastar/dpdk/usertools/libexec/dpdk-devbind.py.bin -Dt "$rprefix"/lib/scylla/libexec/
 install -m755 bin/* -Dt "$root/opt/scylladb/bin"
 # some files in libexec are symlinks, which "install" dereferences
 # use cp -P for the symlinks instead.
@@ -115,7 +118,8 @@ install -m755 lib/* -Dt "$root/opt/scylladb/lib"
 # use relative paths instead?
 ln -sf /opt/scylladb/bin/scylla "$rprefix/bin/scylla"
 ln -sf /opt/scylladb/bin/iotune "$rprefix/bin/iotune"
-install -m755 dist/common/bin/scyllatop -Dt "$rprefix/bin"
+ln -sf "../lib/scylla/scyllatop/scyllatop.py" "$rprefix/bin/scyllatop"
+
 install -m644 dist/common/scripts/scylla_blocktune.py -Dt "$rprefix"/lib/scylla/
 install -m755 dist/common/scripts/scylla-blocktune -Dt "$rprefix"/lib/scylla/
 install -m755 dist/common/scripts/scylla-housekeeping -Dt "$rprefix"/lib/scylla/
@@ -142,6 +146,7 @@ cp -r swagger-ui/dist "$rprefix"/lib/scylla/swagger-ui
 install -d -m755 -d "$rprefix"/lib/scylla/api
 cp -r api/api-doc "$rprefix"/lib/scylla/api
 cp -r tools/scyllatop "$rprefix"/lib/scylla/scyllatop
+cp -r tools/scyllatop/libexec "$rprefix"/lib/scylla/scyllatop/libexec
 install -d "$rprefix"/sbin
 cp -P dist/common/sbin/* "$rprefix"/sbin
 install -m755 scylla-gdb.py -Dt "$rprefix"/lib/scylla/

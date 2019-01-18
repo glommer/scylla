@@ -27,7 +27,7 @@ import os
 import subprocess
 import tarfile
 import pathlib
-
+import relocate_python_scripts
 
 def ldd(executable):
     '''Given an executable file, return a dictionary with the keys
@@ -126,11 +126,21 @@ for exe in executables:
 for lib, libfile in libs.items():
     ar.add(libfile, arcname='lib/' + lib)
 ar.add('conf')
-ar.add('dist')
+
+scylla_python3 = "/opt/scylladb/python3/bin/python3"
+def excluded_files(ti):
+    if ti.name.endswith("dist/common/scripts"):
+        return None
+    elif ti.name.endswith("scyllatop.py"):
+        return None
+    else:
+        return ti
+ar_fixup = relocate_python_scripts.TarFileFixup(scylla_python3, ar)
+
+ar.add('dist/', filter=excluded_files)
+
 ar.add('build/SCYLLA-RELEASE-FILE', arcname='SCYLLA-RELEASE-FILE')
 ar.add('build/SCYLLA-VERSION-FILE', arcname='SCYLLA-VERSION-FILE')
-ar.add('seastar/scripts')
-ar.add('seastar/dpdk/usertools')
 ar.add('install.sh')
 ar.add('README.md')
 ar.add('README-DPDK.md')
@@ -141,3 +151,9 @@ ar.add('swagger-ui')
 ar.add('api')
 ar.add('tools')
 ar.add('scylla-gdb.py')
+ar.add('tools', filter=excluded_files)
+# always safe to call even though many scripts in seastar are .sh. The relocator will just copy them over.
+relocate_python_scripts.fixup_scripts_in_directory(ar_fixup, 'dist/common/scripts')
+relocate_python_scripts.fixup_scripts_in_directory(ar_fixup, 'seastar/scripts')
+relocate_python_scripts.fixup_scripts_in_directory(ar_fixup, 'seastar/dpdk/usertools')
+relocate_python_scripts.fixup_script(ar_fixup, 'tools/scyllatop/scyllatop.py')
