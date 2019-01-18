@@ -126,7 +126,7 @@ for exe in executables:
 for lib, libfile in libs.items():
     ar.add(libfile, arcname='lib/' + lib)
 ar.add('conf')
-ar.add('dist')
+ar.add('dist/common/scripts')
 ar.add('build/SCYLLA-RELEASE-FILE', arcname='SCYLLA-RELEASE-FILE')
 ar.add('build/SCYLLA-VERSION-FILE', arcname='SCYLLA-VERSION-FILE')
 ar.add('seastar/scripts')
