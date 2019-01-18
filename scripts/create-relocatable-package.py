@@ -27,7 +27,7 @@ import os
 import subprocess
 import tarfile
 import pathlib
-
+import relocate_python_scripts
 
 def ldd(executable):
     '''Given an executable file, return a dictionary with the keys
@@ -126,11 +126,15 @@ for exe in executables:
 for lib, libfile in libs.items():
     ar.add(libfile, arcname='lib/' + lib)
 ar.add('conf')
-ar.add('dist/common/scripts')
+
+scylla_python3 = "/opt/scylladb/python3/bin/python3"
+relocate_python_scripts.fixup_scripts_in_directory_into_archive(ar, scylla_python3, 'dist/common/scripts')
 ar.add('build/SCYLLA-RELEASE-FILE', arcname='SCYLLA-RELEASE-FILE')
 ar.add('build/SCYLLA-VERSION-FILE', arcname='SCYLLA-VERSION-FILE')
-ar.add('seastar/scripts')
-ar.add('seastar/dpdk/usertools')
+# always safe to call even though many scripts in seastar are .sh. The relocator will just copy them over.
+relocate_python_scripts.fixup_scripts_in_directory_into_archive(ar, scylla_python3, 'seastar/scripts')
+relocate_python_scripts.fixup_scripts_in_directory_into_archive(ar, scylla_python3, 'seastar/dpdk/usertools')
+relocate_python_scripts.fixup_scripts_in_directory_into_archive(ar, scylla_python3, 'tools/scyllatop')
 ar.add('install.sh')
 ar.add('README.md')
 ar.add('README-DPDK.md')
@@ -139,6 +143,6 @@ ar.add('ORIGIN')
 ar.add('licenses')
 ar.add('swagger-ui')
 ar.add('api')
-ar.add('tools')
 ar.add('scylla-housekeeping')
 ar.add('scylla-gdb.py')
+ar.add('tools/toolchain')
