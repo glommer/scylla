@@ -118,7 +118,6 @@ install -m755 lib/* -Dt "$root/opt/scylladb/lib"
 # use relative paths instead?
 ln -sf /opt/scylladb/bin/scylla "$rprefix/bin/scylla"
 ln -sf /opt/scylladb/bin/iotune "$rprefix/bin/iotune"
-ln -sf "../lib/scylla/scyllatop/scyllatop.py" "$rprefix/bin/scyllatop"
 
 install -m644 dist/common/scripts/scylla_blocktune.py -Dt "$rprefix"/lib/scylla/
 install -m755 dist/common/scripts/scylla-blocktune -Dt "$rprefix"/lib/scylla/
@@ -145,8 +144,6 @@ install -m755 -d "$rprefix"/lib/scylla/swagger-ui
 cp -r swagger-ui/dist "$rprefix"/lib/scylla/swagger-ui
 install -d -m755 -d "$rprefix"/lib/scylla/api
 cp -r api/api-doc "$rprefix"/lib/scylla/api
-cp -r tools/scyllatop "$rprefix"/lib/scylla/scyllatop
-cp -r tools/scyllatop/libexec "$rprefix"/lib/scylla/scyllatop/libexec
 install -d "$rprefix"/sbin
 cp -P dist/common/sbin/* "$rprefix"/sbin
 install -m755 scylla-gdb.py -Dt "$rprefix"/lib/scylla/
