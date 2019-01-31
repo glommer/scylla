@@ -29,6 +29,7 @@ Usage: install.sh [options]
 Options:
   --root /path/to/root     alternative install root (default /)
   --prefix /prefix         directory prefix (default /usr)
+  --python3 python3-binary where to find the python3 interpreter (default \$root/opt/scylladb/python3/bin)
   --housekeeping           enable housekeeping service
   --target centos          specify target distribution
   --help                   this helpful message
@@ -40,6 +41,7 @@ root=/
 prefix=/usr
 housekeeping=false
 target=centos
+python3=/opt/scylladb/python3/bin
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -57,6 +59,10 @@ while [ $# -gt 0 ]; do
             ;;
         "--target")
             target="$2"
+            shift 2
+            ;;
+        "--python3")
+            python3="$2"
             shift 2
             ;;
         "--help")
@@ -97,9 +103,6 @@ install -m644 conf/cassandra-rackdc.properties -Dt "$retc"/scylla
 install -m644 build/*.service -Dt "$rprefix"/lib/systemd/system
 install -m644 dist/common/systemd/*.service -Dt "$rprefix"/lib/systemd/system
 install -m644 dist/common/systemd/*.timer -Dt "$rprefix"/lib/systemd/system
-install -m755 dist/common/scripts/* -Dt "$rprefix"/lib/scylla/
-install -m755 seastar/scripts/perftune.py -Dt "$rprefix"/lib/scylla/
-install -m755 seastar/scripts/seastar-addr2line -Dt "$rprefix"/lib/scylla/
 install -m755 seastar/scripts/seastar-cpu-map.sh -Dt "$rprefix"/lib/scylla/
 install -m755 seastar/dpdk/usertools/dpdk-devbind.py -Dt "$rprefix"/lib/scylla/
 install -m755 bin/* -Dt "$root/opt/scylladb/bin"
@@ -114,9 +117,8 @@ done
 install -m755 libreloc/* -Dt "$root/opt/scylladb/libreloc"
 ln -sf "$root/opt/scylladb/bin/scylla" "$rprefix/bin/scylla"
 ln -sf "$root/opt/scylladb/bin/iotune" "$rprefix/bin/iotune"
-install -m755 dist/common/bin/scyllatop -Dt "$rprefix/bin"
-install -m644 dist/common/scripts/scylla_blocktune.py -Dt "$rprefix"/lib/scylla/
-install -m755 dist/common/scripts/scylla-blocktune -Dt "$rprefix"/lib/scylla/
+ln -sf "../lib/scylla/scyllatop/scyllatop.py" "$rprefix/bin/scyllatop"
+
 install -m755 scylla-housekeeping -Dt "$rprefix"/lib/scylla/
 if $housekeeping; then
     install -m644 conf/housekeeping.cfg -Dt "$retc"/scylla.d
@@ -145,4 +147,13 @@ install -d "$rprefix"/sbin
 cp -P dist/common/sbin/* "$rprefix"/sbin
 install -m755 scylla-gdb.py -Dt "$rprefix"/lib/scylla/
 
+find ./dist/common/scripts -type f -exec ./relocate_python_scripts.py \
+            --installroot $rprefix/lib/scylla/ --with-python3 "$root/$python3" {} +
 
+./relocate_python_scripts.py \
+            --installroot $rprefix/lib/scylla/ --with-python3 "$root/$python3" \
+            seastar/scripts/perftune.py seastar/scripts/seastar-addr2line seastar/scripts/perftune.py
+
+./relocate_python_scripts.py \
+            --installroot $rprefix/lib/scylla/scyllatop/ --with-python3 "$root/$python3" \
+            tools/scyllatop/scyllatop.py
