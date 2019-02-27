@@ -201,6 +201,13 @@ public:
         return bool(_seal_immediate_fn);
     }
 
+    size_t used_space() const {
+        size_t s = 0;
+        for (auto& m : _memtables) {
+            s += m->region().occupancy().used_space();
+        }
+        return s;
+    }
     shared_memtable back() {
         return _memtables.back();
     }

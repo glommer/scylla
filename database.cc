@@ -1282,7 +1282,7 @@ future<> dirty_memory_manager::shutdown() {
 }
 
 future<> memtable_list::request_flush() {
-    if (!may_flush()) {
+    if ((used_space() == 0) || !may_flush()) {
         return make_ready_future<>();
     } else if (!_flush_coalescing) {
         _flush_coalescing = shared_promise<>();
