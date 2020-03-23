@@ -655,6 +655,11 @@ public:
         return _config.datadir;
     }
 
+
+    const std::vector<sstring>& all_datadirs() {
+        return _config.all_datadirs;
+    }
+
     logalloc::region_group& dirty_memory_region_group() const {
         return _config.dirty_memory_manager->region_group();
     }
