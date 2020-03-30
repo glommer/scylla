@@ -1294,6 +1294,11 @@ table::compact_sstables(sstables::compaction_descriptor descriptor) {
     }
 
     return with_lock(_sstables_lock.for_read(), [this, descriptor = std::move(descriptor)] () mutable {
+        auto create_sstable = [this] {
+                auto sst = make_sstable();
+                sst->set_unshared();
+                return sst;
+        };
         auto replace_sstables = [this, release_exhausted = descriptor.release_exhausted] (sstables::compaction_completion_desc desc) {
             _compaction_strategy.notify_completion(desc.input_sstables, desc.output_sstables);
             _compaction_manager.propagate_replacement(this, desc.input_sstables, desc.output_sstables);
@@ -1303,7 +1308,7 @@ table::compact_sstables(sstables::compaction_descriptor descriptor) {
             }
         };
 
-        return sstables::compact_sstables(std::move(descriptor), *this, replace_sstables);
+        return sstables::compact_sstables(std::move(descriptor), *this, create_sstable, replace_sstables);
     }).then([this] (auto info) {
         if (info.type != sstables::compaction_type::Compaction) {
             return make_ready_future<>();
@@ -1336,8 +1341,7 @@ future<> table::rewrite_sstables(sstables::compaction_descriptor descriptor) {
                 // components cannot be reclaimed until all of them are cleaned.
                 auto sstable_level = sst->get_sstable_level();
                 auto run_identifier = sst->run_identifier();
-                auto dir = sst->get_dir();
-                auto descriptor = sstables::compaction_descriptor({ std::move(sst) }, dir, sstable_level,
+                auto descriptor = sstables::compaction_descriptor({ std::move(sst) }, sstable_level,
                     sstables::compaction_descriptor::default_max_sstable_bytes, run_identifier, options);
                 descriptor.release_exhausted = release_fn;
                 return this->compact_sstables(std::move(descriptor));
