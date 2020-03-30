@@ -33,6 +33,57 @@ static schema_ptr get_schema() {
     return builder.build();
 }
 
+using mutation_map = std::unordered_map<shard_id, std::vector<mutation>>;
+
+mutation_map
+create_mutations_from_shards(schema_ptr s, unsigned keys_per_shard, std::vector<unsigned> shards) {
+    mutation_map muts;
+
+    auto get_mutation = [s] (sstring key_to_write, auto value) {
+        auto key = partition_key::from_exploded(*s, {to_bytes(key_to_write)});
+        mutation m(s, key);
+        m.set_clustered_cell(clustering_key::make_empty(), bytes("value"), data_value(int32_t(value)), api::timestamp_type(0));
+        return m;
+    };
+
+    auto cfg = std::make_unique<db::config>();
+    for (auto i : shards) {
+        auto key_token_pair = token_generation_for_shard(keys_per_shard, i, cfg->murmur3_partitioner_ignore_msb_bits());
+        BOOST_REQUIRE(key_token_pair.size() == keys_per_shard);
+        muts[i].reserve(keys_per_shard);
+        for (auto k : boost::irange(0u, keys_per_shard)) {
+            auto m = get_mutation(key_token_pair[k].first, i);
+            muts[i].push_back(m);
+        }
+    }
+
+    return muts;
+}
+
+future<sstables::shared_sstable>
+create_sstable_shared_by_shards(test_env& env, tmpdir& tmp, schema_ptr s, int64_t generation, sstables::sstable::version_types version, mutation_map muts) {
+
+    auto mt = make_lw_shared<memtable>(s);
+    for (auto m : muts) {
+        for (auto&& m : m.second) {
+            mt->apply(std::move(m));
+        }
+    }
+
+    auto sst = env.make_sstable(s, tmp.path().string(), generation, version, sstables::sstable::format_types::big);
+    return write_memtable_to_sstable_for_test(*mt, sst).then([sst, generation, version, muts, s, &env, &tmp] {
+        // FIXME: sstable write has a limitation in which it will generate sharding metadata only
+        // for a single shard. workaround that by setting shards manually. from this test perspective,
+        // it doesn't matter because we check each partition individually of each sstable created
+        // for a shard that owns the shared input sstable.
+        return env.reusable_sst(s, tmp.path().string(), generation, version,
+                sstables::sstable::format_types::big).then([muts] (sstables::shared_sstable sst) {
+            sstables::test(sst).set_shards(boost::copy_range<std::vector<unsigned>>(muts | boost::adaptors::map_keys));
+            return make_ready_future<sstables::shared_sstable>(sst);
+        });
+    });
+}
+
 void run_sstable_resharding_test() {
     test_env env;
     cache_tracker tracker;
@@ -44,39 +95,10 @@ void run_sstable_resharding_test() {
     auto cl_stats = make_lw_shared<cell_locker_stats>();
     auto cf = make_lw_shared<column_family>(s, column_family_test_config(), column_family::no_commitlog(), *cm, *cl_stats, tracker);
     cf->mark_ready_for_writes();
-    std::unordered_map<shard_id, std::vector<mutation>> muts;
     static constexpr auto keys_per_shard = 1000u;
 
-    // create sst shared by all shards
-    {
-        auto mt = make_lw_shared<memtable>(s);
-        auto get_mutation = [mt, s] (sstring key_to_write, auto value) {
-            auto key = partition_key::from_exploded(*s, {to_bytes(key_to_write)});
-            mutation m(s, key);
-            m.set_clustered_cell(clustering_key::make_empty(), bytes("value"), data_value(int32_t(value)), api::timestamp_type(0));
-            return m;
-        };
-        auto cfg = std::make_unique<db::config>();
-        for (auto i : boost::irange(0u, smp::count)) {
-            auto key_token_pair = token_generation_for_shard(keys_per_shard, i, cfg->murmur3_partitioner_ignore_msb_bits());
-            BOOST_REQUIRE(key_token_pair.size() == keys_per_shard);
-            muts[i].reserve(keys_per_shard);
-            for (auto k : boost::irange(0u, keys_per_shard)) {
-                auto m = get_mutation(key_token_pair[k].first, i);
-                muts[i].push_back(m);
-                mt->apply(std::move(m));
-            }
-        }
-        auto sst = env.make_sstable(s, tmp.path().string(), 0, version, sstables::sstable::format_types::big);
-        write_memtable_to_sstable_for_test(*mt, sst).get();
-    }
-    auto sst = env.reusable_sst(s, tmp.path().string(), 0, version, sstables::sstable::format_types::big).get0();
-
-    // FIXME: sstable write has a limitation in which it will generate sharding metadata only
-    // for a single shard. workaround that by setting shards manually. from this test perspective,
-    // it doesn't matter because we check each partition individually of each sstable created
-    // for a shard that owns the shared input sstable.
-    sstables::test(sst).set_shards(boost::copy_range<std::vector<unsigned>>(boost::irange(0u, smp::count)));
+    auto muts = create_mutations_from_shards(s, keys_per_shard, boost::copy_range<std::vector<unsigned>>(boost::irange(0u, smp::count)));
+    auto sst = create_sstable_shared_by_shards(env, tmp, s, 0, version, muts).get0();
 
     auto filter_fname = sstables::test(sst).filename(component_type::Filter);
     uint64_t bloom_filter_size_before = file_size(filter_fname).get0();
