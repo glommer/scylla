@@ -445,7 +445,7 @@ std::unique_ptr<sstable_set_impl> make_partitioned_sstable_set(schema_ptr schema
 }
 
 compaction_descriptor compaction_strategy_impl::get_major_compaction_job(column_family& cf, std::vector<sstables::shared_sstable> candidates) {
-    return compaction_descriptor(std::move(candidates));
+    return compaction_descriptor(std::move(candidates), cf.dir());
 }
 
 bool compaction_strategy_impl::worth_dropping_tombstones(const shared_sstable& sst, gc_clock::time_point gc_before) {
@@ -986,7 +986,7 @@ compaction_descriptor date_tiered_compaction_strategy::get_sstables_for_compacti
 
     if (!sstables.empty()) {
         date_tiered_manifest::logger.debug("datetiered: Compacting {} out of {} sstables", sstables.size(), candidates.size());
-        return sstables::compaction_descriptor(std::move(sstables));
+        return sstables::compaction_descriptor(std::move(sstables), cfs.dir());
     }
 
     // filter out sstables which droppable tombstone ratio isn't greater than the defined threshold.
@@ -1002,7 +1002,7 @@ compaction_descriptor date_tiered_compaction_strategy::get_sstables_for_compacti
     auto it = std::min_element(candidates.begin(), candidates.end(), [] (auto& i, auto& j) {
         return i->get_stats_metadata().min_timestamp < j->get_stats_metadata().min_timestamp;
     });
-    return sstables::compaction_descriptor({ *it });
+    return sstables::compaction_descriptor({ *it }, cfs.dir());
 }
 
 size_tiered_compaction_strategy::size_tiered_compaction_strategy(const std::map<sstring, sstring>& options)

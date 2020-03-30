@@ -686,7 +686,7 @@ void garbage_collected_sstable_writer::on_end_of_stream() {
 }
 
 class regular_compaction : public compaction {
-    std::function<shared_sstable()> _creator;
+    std::filesystem::path _output_directory;
     replacer_fn _replacer;
     std::unordered_set<shared_sstable> _compacting_for_max_purgeable_func;
     // store a clone of sstable set for column family, which needs to be alive for incremental selector.
@@ -701,9 +701,9 @@ class regular_compaction : public compaction {
     std::deque<compaction_write_monitor> _active_write_monitors = {};
     utils::UUID _run_identifier;
 public:
-    regular_compaction(column_family& cf, compaction_descriptor descriptor, std::function<shared_sstable()> creator, replacer_fn replacer)
+    regular_compaction(column_family& cf, compaction_descriptor descriptor, replacer_fn replacer)
         : compaction(cf, std::move(descriptor.sstables), descriptor.max_sstable_bytes, descriptor.level)
-        , _creator(std::move(creator))
+        , _output_directory(descriptor.output_directory)
         , _replacer(std::move(replacer))
         , _compacting_for_max_purgeable_func(std::unordered_set<shared_sstable>(_sstables.begin(), _sstables.end()))
         , _set(cf.get_sstable_set())
@@ -756,12 +756,14 @@ public:
     }
 
     virtual shared_sstable create_new_sstable() const override {
-        return _creator();
+        auto sst = _cf.make_sstable(_output_directory.string());
+        sst->set_unshared();
+        return sst;
     }
 
     virtual sstable_writer* select_sstable_writer(const dht::decorated_key& dk) override {
         if (!_writer) {
-            _sst = _creator();
+            _sst = create_new_sstable();
             setup_new_sstable(_sst);
 
             _active_write_monitors.emplace_back(_sst, _cf, maximum_timestamp(), _sstable_level);
@@ -909,8 +911,8 @@ protected:
         return compaction_completion_desc{std::move(input_sstables), std::move(output_sstables), std::move(ranges_for_for_invalidation)};
     }
 public:
-    cleanup_compaction(column_family& cf, compaction_descriptor descriptor, std::function<shared_sstable()> creator, replacer_fn replacer)
-        : regular_compaction(cf, std::move(descriptor), std::move(creator), std::move(replacer))
+    cleanup_compaction(column_family& cf, compaction_descriptor descriptor, replacer_fn replacer)
+        : regular_compaction(cf, std::move(descriptor), std::move(replacer))
         , _owned_ranges(service::get_local_storage_service().get_local_ranges(_schema->ks_name()))
     {
         _info->type = compaction_type::Cleanup;
@@ -1114,9 +1116,8 @@ private:
     compaction_options::scrub _options;
 
 public:
-    scrub_compaction(column_family& cf, compaction_descriptor descriptor, compaction_options::scrub options, std::function<shared_sstable()> creator,
-            replacer_fn replacer)
-        : regular_compaction(cf, std::move(descriptor), std::move(creator), std::move(replacer))
+    scrub_compaction(column_family& cf, compaction_descriptor descriptor, compaction_options::scrub options, replacer_fn replacer)
+        : regular_compaction(cf, std::move(descriptor), std::move(replacer))
         , _options(options) {
         _info->type = compaction_type::Scrub;
     }
@@ -1298,38 +1299,36 @@ compaction_type compaction_options::type() const {
     return index_to_type[_options.index()];
 }
 
-static std::unique_ptr<compaction> make_compaction(column_family& cf, sstables::compaction_descriptor descriptor,
-        std::function<shared_sstable()> creator, replacer_fn replacer) {
+static std::unique_ptr<compaction> make_compaction(column_family& cf, sstables::compaction_descriptor descriptor, replacer_fn replacer) {
     struct {
         column_family& cf;
         sstables::compaction_descriptor&& descriptor;
-        std::function<shared_sstable()>&& creator;
         replacer_fn&& replacer;
 
         std::unique_ptr<compaction> operator()(compaction_options::regular) {
-            return std::make_unique<regular_compaction>(cf, std::move(descriptor), std::move(creator), std::move(replacer));
+            return std::make_unique<regular_compaction>(cf, std::move(descriptor), std::move(replacer));
         }
         std::unique_ptr<compaction> operator()(compaction_options::cleanup) {
-            return std::make_unique<cleanup_compaction>(cf, std::move(descriptor), std::move(creator), std::move(replacer));
+            return std::make_unique<cleanup_compaction>(cf, std::move(descriptor), std::move(replacer));
         }
         std::unique_ptr<compaction> operator()(compaction_options::upgrade) {
-            return std::make_unique<cleanup_compaction>(cf, std::move(descriptor), std::move(creator), std::move(replacer));
+            return std::make_unique<cleanup_compaction>(cf, std::move(descriptor), std::move(replacer));
         }
         std::unique_ptr<compaction> operator()(compaction_options::scrub scrub_options) {
-            return std::make_unique<scrub_compaction>(cf, std::move(descriptor), scrub_options, std::move(creator), std::move(replacer));
+            return std::make_unique<scrub_compaction>(cf, std::move(descriptor), scrub_options, std::move(replacer));
         }
-    } visitor_factory{cf, std::move(descriptor), std::move(creator), std::move(replacer)};
+    } visitor_factory{cf, std::move(descriptor), std::move(replacer)};
 
     return descriptor.options.visit(visitor_factory);
 }
 
 future<compaction_info>
-compact_sstables(sstables::compaction_descriptor descriptor, column_family& cf, std::function<shared_sstable()> creator, replacer_fn replacer) {
+compact_sstables(sstables::compaction_descriptor descriptor, column_family& cf, replacer_fn replacer) {
     if (descriptor.sstables.empty()) {
         throw std::runtime_error(format("Called {} compaction with empty set on behalf of {}.{}", compaction_name(descriptor.options.type()),
                 cf.schema()->ks_name(), cf.schema()->cf_name()));
     }
-    auto c = make_compaction(cf, std::move(descriptor), std::move(creator), std::move(replacer));
+    auto c = make_compaction(cf, std::move(descriptor), std::move(replacer));
     if (c->contains_multi_fragment_runs()) {
         auto gc_writer = c->make_garbage_collected_sstable_writer();
         return compaction::run(std::move(c), std::move(gc_writer));

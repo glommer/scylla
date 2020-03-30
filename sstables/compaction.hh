@@ -30,6 +30,7 @@
 #include "dht/i_partitioner.hh"
 #include <seastar/core/thread.hh>
 #include <functional>
+#include <filesystem>
 
 class flat_mutation_reader;
 
@@ -87,6 +88,8 @@ namespace sstables {
     struct compaction_descriptor {
         // List of sstables to be compacted.
         std::vector<sstables::shared_sstable> sstables;
+        // Output directory where to write the SSTable.
+        std::filesystem::path output_directory;
         // Level of sstable(s) created by compaction procedure.
         int level;
         // Threshold size for sstable(s) to be created.
@@ -106,11 +109,14 @@ namespace sstables {
         static constexpr int default_level = 0;
         static constexpr uint64_t default_max_sstable_bytes = std::numeric_limits<uint64_t>::max();
 
-        explicit compaction_descriptor(std::vector<sstables::shared_sstable> sstables, int level = default_level,
+        explicit compaction_descriptor(std::vector<sstables::shared_sstable> sstables,
+                                       sstring directory,
+                                       int level = default_level,
                                        uint64_t max_sstable_bytes = default_max_sstable_bytes,
                                        utils::UUID run_identifier = utils::make_random_uuid(),
                                        compaction_options options = compaction_options::make_regular())
             : sstables(std::move(sstables))
+            , output_directory(std::filesystem::path(directory))
             , level(level)
             , max_sstable_bytes(max_sstable_bytes)
             , run_identifier(run_identifier)
@@ -212,8 +218,7 @@ namespace sstables {
     // If descriptor.cleanup is true, mutation that doesn't belong to current node will be
     // cleaned up, log messages will inform the user that compact_sstables runs for
     // cleaning operation, and compaction history will not be updated.
-    future<compaction_info> compact_sstables(sstables::compaction_descriptor descriptor, column_family& cf,
-        std::function<shared_sstable()> creator, replacer_fn replacer);
+    future<compaction_info> compact_sstables(sstables::compaction_descriptor descriptor, column_family& cf, replacer_fn replacer);
 
     // Compacts a set of N shared sstables into M sstables. For every shard involved,
     // i.e. which owns any of the sstables, a new unshared sstable is created.

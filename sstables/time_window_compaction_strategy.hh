@@ -177,7 +177,7 @@ public:
         if (!expired.empty()) {
             compaction_candidates.insert(compaction_candidates.end(), expired.begin(), expired.end());
         }
-        return compaction_descriptor(std::move(compaction_candidates));
+        return compaction_descriptor(std::move(compaction_candidates), cf.dir());
     }
 private:
     static timestamp_type

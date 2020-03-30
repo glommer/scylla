@@ -605,7 +605,7 @@ future<> compaction_manager::rewrite_sstables(column_family* cf, sstables::compa
             return make_ready_future<stop_iteration>(stop_iteration::yes);
         }
         column_family& cf = *task->compacting_cf;
-        sstables::compaction_descriptor descriptor = sstables::compaction_descriptor(get_func(cf));
+        sstables::compaction_descriptor descriptor = sstables::compaction_descriptor(get_func(cf), cf.dir());
         descriptor.options = options;
         auto compacting = make_lw_shared<compacting_sstable_registration>(this, descriptor.sstables);
         // Releases reference to cleaned sstable such that respective used disk space can be freed.
