@@ -270,6 +270,8 @@ future<> for_each_sstable_version(AsyncAction action) {
     return seastar::do_for_each(all_sstable_versions, std::move(action));
 }
 
+future<compaction_info> compact_sstables(sstables::compaction_descriptor descriptor, column_family& cf, std::function<shared_sstable()> creator, replacer_fn replacer);
+
 class test_setup {
     file _f;
     std::function<future<> (directory_entry de)> _walker;

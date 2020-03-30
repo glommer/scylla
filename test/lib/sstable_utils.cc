@@ -29,6 +29,16 @@
 #include <boost/range/adaptor/map.hpp>
 #include "test/lib/flat_mutation_reader_assertions.hh"
 
+namespace sstables {
+future<compaction_info> compact_sstables(sstables::compaction_descriptor descriptor, column_family& cf, std::function<shared_sstable()> creator, replacer_fn replacer) {
+    descriptor.creator = [creator = std::move(creator)] (unsigned dummy) mutable {
+        return creator();
+    };
+    descriptor.replacer = std::move(replacer);
+    return sstables::compact_sstables(std::move(descriptor), cf);
+}
+}
+
 using namespace sstables;
 using namespace std::chrono_literals;
 
