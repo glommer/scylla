@@ -366,7 +366,7 @@ static std::vector<sstables::shared_sstable> sstables_for_shard(const std::vecto
         | boost::adaptors::filtered([&] (auto& sst) { return belongs_to_shard(sst, shard); }));
 }
 
-void distributed_loader::reshard(distributed<database>& db, sstring ks_name, sstring cf_name) {
+future<> distributed_loader::reshard(distributed<database>& db, sstring ks_name, sstring cf_name) {
     assert(this_shard_id() == 0); // NOTE: should always run on shard 0!
 
     // ensures that only one column family is resharded at a time (that's okay because
@@ -375,8 +375,7 @@ void distributed_loader::reshard(distributed<database>& db, sstring ks_name, sst
     // refresh (triggers resharding) is issued by user while resharding is going on).
     static semaphore sem(1);
 
-    // FIXME: discarded future.
-    (void)with_semaphore(sem, 1, [&db, ks_name = std::move(ks_name), cf_name = std::move(cf_name)] () mutable {
+    return with_semaphore(sem, 1, [&db, ks_name = std::move(ks_name), cf_name = std::move(cf_name)] () mutable {
         return seastar::async([&db, ks_name = std::move(ks_name), cf_name = std::move(cf_name)] () mutable {
             global_column_family_ptr cf(db, ks_name, cf_name);
 
@@ -527,7 +526,7 @@ future<> distributed_loader::load_new_sstables(distributed<database>& db, distri
             });
         }).then([&db, ks, cf] () mutable {
             return smp::submit_to(0, [&db, ks = std::move(ks), cf = std::move(cf)] () mutable {
-                distributed_loader::reshard(db, std::move(ks), std::move(cf));
+                return distributed_loader::reshard(db, std::move(ks), std::move(cf));
             });
         });
     }).handle_exception([&db, ks, cf] (std::exception_ptr ep) {

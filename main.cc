@@ -79,6 +79,8 @@
 #include "cdc/cdc_extension.hh"
 #include "alternator/tags_extension.hh"
 
+#include <boost/range/adaptor/map.hpp>
+
 namespace fs = std::filesystem;
 
 seastar::metrics::metric_groups app_metrics;
@@ -893,6 +895,40 @@ int main(int ac, char** av) {
             }).get();
             supervisor::notify("setting up system keyspace");
             db::system_keyspace::setup(db, qp, service::get_storage_service()).get();
+
+            db.invoke_on_all([&proxy] (database& db) {
+                db.get_compaction_manager().start();
+            }).get();
+
+            auto stop_resharding = stop_signal.as_local_abort_source().subscribe([&db] {
+                (void)db.invoke_on_all([] (database& db) {
+                    return db.get_compaction_manager().stop();
+                });
+            });
+
+            db.invoke_on_all([&proxy] (database& db) {
+                boost::for_each(db.get_column_families() | boost::adaptors::map_values, [] (lw_shared_ptr<table>& tbl) {
+                    tbl->disable_auto_compaction();
+                });
+            }).get();
+
+            // If the same sstable is shared by several shards, it cannot be
+            // deleted until all shards decide to compact it. So we want to
+            // start these compactions now. Note we start compacting only after
+            // all sstables in this CF were loaded on all shards - otherwise
+            // we will have races between the compaction and loading processes
+            // We also want to trigger regular compaction on boot.
+            for (auto& x : db.local().get_column_families()) {
+                column_family& cf = *(x.second);
+                distributed_loader::reshard(db, cf.schema()->ks_name(), cf.schema()->cf_name()).get();
+            }
+
+            db.invoke_on_all([&proxy] (database& db) {
+                boost::for_each(db.get_column_families() | boost::adaptors::map_values, [] (lw_shared_ptr<table>& tbl) {
+                    tbl->enable_auto_compaction();
+                });
+            }).get();
+
             supervisor::notify("starting commit log");
             auto cl = db.local().commitlog();
             if (cl != nullptr) {
@@ -911,21 +947,6 @@ int main(int ac, char** av) {
                 }
             }
 
-            db.invoke_on_all([&proxy] (database& db) {
-                db.get_compaction_manager().start();
-            }).get();
-
-            // If the same sstable is shared by several shards, it cannot be
-            // deleted until all shards decide to compact it. So we want to
-            // start these compactions now. Note we start compacting only after
-            // all sstables in this CF were loaded on all shards - otherwise
-            // we will have races between the compaction and loading processes
-            // We also want to trigger regular compaction on boot.
-
-            for (auto& x : db.local().get_column_families()) {
-                column_family& cf = *(x.second);
-                distributed_loader::reshard(db, cf.schema()->ks_name(), cf.schema()->cf_name());
-            }
             db.invoke_on_all([&proxy] (database& db) {
                 for (auto& x : db.get_column_families()) {
                     column_family& cf = *(x.second);
