@@ -26,6 +26,7 @@
 #include "shared_sstable.hh"
 #include "gc_clock.hh"
 #include "compaction_weight_registration.hh"
+#include "service/priority_manager.hh"
 #include "utils/UUID.hh"
 #include "dht/i_partitioner.hh"
 #include <seastar/core/thread.hh>
@@ -122,6 +123,7 @@ namespace sstables {
         creator_fn creator;
         replacer_fn replacer;
 
+        ::io_priority_class io_priority = service::get_local_compaction_priority();
         compaction_descriptor() = default;
 
         static constexpr int default_level = 0;
