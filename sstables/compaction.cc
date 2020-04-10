@@ -126,11 +126,65 @@ static std::vector<shared_sstable> get_uncompacting_sstables(column_family& cf, 
 
 class compaction;
 
+// Writes a single SSTable
 struct compaction_writer {
-    sstable_writer writer;
-    shared_sstable sst;
+    std::optional<sstable_writer> _writer = {};
+    shared_sstable _sst = {};
+public:
+    explicit compaction_writer(sstable_writer writer, shared_sstable sst)
+        : _writer(std::move(writer))
+        , _sst(std::move(sst))
+    { }
+
+    shared_sstable get_sstable() {
+        return _sst;
+    }
+
+    void consume_new_partition(const dht::decorated_key& dk) {
+        if (_writer) {
+            _writer->consume_new_partition(dk);
+        }
+    }
+
+    void consume(tombstone t) {
+        if (_writer) {
+            _writer->consume(t);
+        }
+    }
+
+    stop_iteration consume(static_row&& sr) {
+        if (_writer) {
+            return _writer->consume(std::move(sr));
+        }
+        return stop_iteration::yes;
+    }
+    stop_iteration consume(clustering_row&& cr) {
+        if (_writer) {
+            return _writer->consume(std::move(cr));
+        }
+        return stop_iteration::yes;
+    }
+    stop_iteration consume(range_tombstone&& rt) {
+        if (_writer) {
+            return _writer->consume(std::move(rt));
+        }
+        return stop_iteration::yes;
+    }
+
+    stop_iteration consume_end_of_partition() {
+        if (_writer) {
+            return _writer->consume_end_of_partition();
+        }
+        return stop_iteration::yes;
+    }
+    void consume_end_of_stream() {
+        if (_writer) {
+            return _writer->consume_end_of_stream();
+        }
+    }
 };
 
+// May write more than one SSTable, each of them with its own compaction_writer
 class compacting_sstable_writer {
     compaction& _c;
     std::optional<compaction_writer> _writer = {};
@@ -138,10 +192,10 @@ public:
     explicit compacting_sstable_writer(compaction& c) : _c(c) { }
     void consume_new_partition(const dht::decorated_key& dk);
 
-    void consume(tombstone t) { _writer->writer.consume(t); }
-    stop_iteration consume(static_row&& sr, tombstone, bool) { return _writer->writer.consume(std::move(sr)); }
-    stop_iteration consume(clustering_row&& cr, row_tombstone, bool) { return _writer->writer.consume(std::move(cr)); }
-    stop_iteration consume(range_tombstone&& rt) { return _writer->writer.consume(std::move(rt)); }
+    void consume(tombstone t) { _writer->consume(t); }
+    stop_iteration consume(static_row&& sr, tombstone, bool) { return _writer->consume(std::move(sr)); }
+    stop_iteration consume(clustering_row&& cr, row_tombstone, bool) { return _writer->consume(std::move(cr)); }
+    stop_iteration consume(range_tombstone&& rt) { return _writer->consume(std::move(rt)); }
 
     stop_iteration consume_end_of_partition();
     void consume_end_of_stream();
@@ -451,9 +505,7 @@ protected:
     }
 
     void finish_new_sstable(compaction_writer* writer) {
-        writer->writer.consume_end_of_stream();
-        writer->sst->open_data().get0();
-        _info->end_size += writer->sst->bytes_on_disk();
+        writer->consume_end_of_stream();
         // Notify GC'ed-data sstable writer's handler that an output sstable has just been sealed.
         // The handler is responsible for making sure that deleting an input sstable will not
         // result in resurrection on failure.
@@ -675,12 +727,12 @@ void compacting_sstable_writer::consume_new_partition(const dht::decorated_key& 
     }
 
     _c.on_new_partition();
-    _writer->writer.consume_new_partition(dk);
+    _writer->consume_new_partition(dk);
     _c._info->total_keys_written++;
 }
 
 stop_iteration compacting_sstable_writer::consume_end_of_partition() {
-    auto ret = _writer->writer.consume_end_of_partition();
+    auto ret = _writer->consume_end_of_partition();
     if (ret == stop_iteration::yes) {
         // stop sstable writer being currently used.
         _c.stop_sstable_writer(&*_writer);
@@ -816,13 +868,16 @@ public:
         cfg.max_sstable_size = _max_sstable_size;
         cfg.monitor = &_active_write_monitors.back();
         cfg.run_identifier = _run_identifier;
-        return compaction_writer{sst->get_writer(*_schema, partitions_per_sstable(), cfg, get_encoding_stats(), _io_priority), sst};
+        return compaction_writer(sst->get_writer(*_schema, partitions_per_sstable(), cfg, get_encoding_stats(), _io_priority), sst);
     }
 
     virtual void stop_sstable_writer(compaction_writer* writer) override {
         if (writer) {
             finish_new_sstable(writer);
-            maybe_replace_exhausted_sstables_by_sst(writer->sst);
+            auto sst = writer->get_sstable();
+            sst->open_data().get0();
+            _info->end_size += sst->bytes_on_disk();
+            maybe_replace_exhausted_sstables_by_sst(sst);
         }
     }
 
@@ -1288,7 +1343,7 @@ public:
         cfg.max_sstable_size = _max_sstable_size;
         // sstables generated for a given shard will share the same run identifier.
         cfg.run_identifier = _run_identifiers.at(shard);
-        return compaction_writer{sst->get_writer(*_schema, partitions_per_sstable(shard), cfg, get_encoding_stats(), _io_priority, shard), sst};
+        return compaction_writer(sst->get_writer(*_schema, partitions_per_sstable(shard), cfg, get_encoding_stats(), _io_priority, shard), sst);
     }
 
     void on_new_partition() override {}
@@ -1298,6 +1353,9 @@ public:
     void stop_sstable_writer(compaction_writer* writer) override {
         if (writer) {
             finish_new_sstable(writer);
+            auto sst = writer->get_sstable();
+            sst->open_data().get0();
+            _info->end_size += sst->bytes_on_disk();
         }
     }
 };
