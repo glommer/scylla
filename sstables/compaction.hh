@@ -29,6 +29,7 @@
 #include "utils/UUID.hh"
 #include "dht/i_partitioner.hh"
 #include <seastar/core/thread.hh>
+#include <seastar/core/abort_source.hh>
 #include <functional>
 
 class flat_mutation_reader;
@@ -177,7 +178,12 @@ namespace sstables {
         }
     }
 
-    struct compaction_info {
+    class compaction_info {
+        // Created by the compaction object, updated back to
+        // nullptr when the compaction finishes.
+        seastar::abort_source* _abort_source = nullptr;
+        friend class compaction;
+    public:
         compaction_type type = compaction_type::Compaction;
         table* cf = nullptr;
         sstring ks_name;
@@ -198,12 +204,17 @@ namespace sstables {
         };
         std::vector<replacement> pending_replacements;
 
-        bool is_stop_requested() const {
-            return stop_requested.size() > 0;
+        void check_stop_requested() const {
+            _abort_source->check();
         }
 
         void stop(sstring reason) {
             stop_requested = std::move(reason);
+            // stop can be called after the compaction has finished already
+            // and the original abort source has been destroyed
+            if (_abort_source) {
+                _abort_source->request_abort();
+            }
         }
 
         void stop_tracking() {

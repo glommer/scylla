@@ -385,6 +385,7 @@ public:
 
 class compaction {
 protected:
+    abort_source _as;
     column_family& _cf;
     creator_fn _sstable_creator;
     schema_ptr _schema;
@@ -413,6 +414,8 @@ protected:
         , _sstable_level(sstable_level)
     {
         _info->cf = &cf;
+        _info->_abort_source = &_as;
+
         for (auto& sst : _sstables) {
             _stats_collector.update(sst->get_encoding_stats_for_compaction());
         }
@@ -545,6 +548,7 @@ private:
     virtual reader_consumer make_interposer_consumer(reader_consumer end_consumer) = 0;
 
     compaction_info finish(std::chrono::time_point<db_clock> started_at, std::chrono::time_point<db_clock> ended_at) {
+        _info->_abort_source = nullptr;
         _info->ended_at = std::chrono::duration_cast<std::chrono::milliseconds>(ended_at.time_since_epoch()).count();
         auto ratio = double(_info->end_size) / double(_info->start_size);
         auto duration = std::chrono::duration<float>(ended_at - started_at);
@@ -652,7 +656,9 @@ public:
 };
 
 void compacting_sstable_writer::consume_new_partition(const dht::decorated_key& dk) {
-    if (_c._info->is_stop_requested()) {
+    try {
+        _c._info->check_stop_requested();
+    } catch (seastar::abort_requested_exception& ae) {
         // Compaction manager will catch this exception and re-schedule the compaction.
         throw compaction_stop_exception(_c._info->ks_name, _c._info->cf_name, _c._info->stop_requested);
     }
