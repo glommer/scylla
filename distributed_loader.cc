@@ -545,6 +545,21 @@ directory_with_sstables_handler::num_unopened_shared() const {
     return sum;
 }
 
+future<>
+distributed_loader::process_upload_dir(distributed<database>& db, sstring ks_name, sstring cf_name) {
+    return seastar::async([&db, ks_name = std::move(ks_name), cf_name = std::move(cf_name)] {
+        auto& cf = db.local().find_column_family(ks_name, cf_name);
+        directory_with_sstables_handler sstable_dir_handler(db, ks_name, cf_name, fs::path(cf._config.datadir), "upload",
+                directory_with_sstables_handler::need_mutate_level::yes,
+                directory_with_sstables_handler::lack_of_toc_fatal::no);
+        sstable_dir_handler.process_sstable_dir().get();
+
+        db.invoke_on_all([&sstable_dir_handler] (database& db) mutable {
+            return sstable_dir_handler.reshard();
+        }).get();
+    });
+}
+
 // This function will iterate through upload directory in column family,
 // and will do the following for each sstable found:
 // 1) Mutate sstable level to 0.
@@ -840,10 +855,6 @@ future<> distributed_loader::load_new_sstables(distributed<database>& db, distri
                 }
                 cf._sstables_opened_but_not_loaded.clear();
                 cf.trigger_compaction();
-            });
-        }).then([&db, ks, cf] () mutable {
-            return smp::submit_to(0, [&db, ks = std::move(ks), cf = std::move(cf)] () mutable {
-                distributed_loader::reshard(db, std::move(ks), std::move(cf));
             });
         });
     }).handle_exception([&db, ks, cf] (std::exception_ptr ep) {
