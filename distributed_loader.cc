@@ -774,10 +774,6 @@ future<> distributed_loader::load_new_sstables(distributed<database>& db, distri
                 cf._sstables_opened_but_not_loaded.clear();
                 cf.trigger_compaction();
             });
-        }).then([&db, ks, cf] () mutable {
-            return smp::submit_to(0, [&db, ks = std::move(ks), cf = std::move(cf)] () mutable {
-                distributed_loader::reshard(db, std::move(ks), std::move(cf));
-            });
         });
     }).handle_exception([&db, ks, cf] (std::exception_ptr ep) {
         return db.invoke_on_all([ks = std::move(ks), cfname = std::move(cf)] (database& db) {
