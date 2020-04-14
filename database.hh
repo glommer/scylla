@@ -1072,6 +1072,8 @@ public:
     friend class column_family_test;
 
     friend class distributed_loader;
+
+    friend class auxiliary_directory_handler;
 };
 
 using sstable_reader_factory_type = std::function<flat_mutation_reader(sstables::shared_sstable&, const dht::partition_range& pr)>;
@@ -1612,6 +1614,7 @@ public:
     }
 
     friend class distributed_loader;
+    friend class auxiliary_directory_handler;
 
     db::data_listeners& data_listeners() const {
         return *_data_listeners;

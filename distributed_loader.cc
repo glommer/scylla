@@ -79,25 +79,15 @@ static future<> invoke_shards_with_ptr(std::unordered_set<shard_id> shards, dist
     });
 }
 
-// global_column_family_ptr provides a way to easily retrieve local instance of a given column family.
-class global_column_family_ptr {
-    distributed<database>& _db;
-    utils::UUID _id;
-private:
-    column_family& get() const { return _db.local().find_column_family(_id); }
-public:
-    global_column_family_ptr(distributed<database>& db, sstring ks_name, sstring cf_name)
-        : _db(db)
-        , _id(_db.local().find_column_family(ks_name, cf_name).schema()->id()) {
-    }
+table&
+global_column_family_ptr::get() const {
+    return _db.local().find_column_family(_id);
+}
 
-    column_family* operator->() const {
-        return &get();
-    }
-    column_family& operator*() const {
-        return get();
-    }
-};
+global_column_family_ptr::global_column_family_ptr(distributed<database>& db, sstring ks_name, sstring cf_name)
+    : _db(db)
+    , _id(_db.local().find_column_family(ks_name, cf_name).schema()->id())
+{}
 
 // checks whether or not a given column family is worth resharding by checking if any of its
 // sstables has more than one owner shard.
@@ -228,6 +218,265 @@ future<> distributed_loader::verify_owner_and_mode(fs::path path) {
         }
     });
 };
+
+void auxiliary_directory_handler::validate(sstables::shared_sstable sst) {
+    assert(_coordinator == this_shard_id());
+
+    schema_ptr s = _table->schema();
+    if (s->is_counter() && !sst->has_scylla_component()) {
+        sstring error = "Direct loading non-Scylla SSTables containing counters is not supported.";
+        if (_enable_dangerous_direct_import_of_cassandra_counters) {
+            dblog.info("{} But trying to continue on user's request.", error);
+        } else {
+            dblog.error("{} Use sstableloader instead.", error);
+            throw std::runtime_error(fmt::format("{} Use sstableloader instead.", error));
+        }
+    }
+    if (s->is_view()) {
+        throw std::runtime_error("Loading Materialized View SSTables is not supported. Re-create the view instead.");
+    }
+}
+
+int64_t auxiliary_directory_handler::new_generation() {
+    return _generation.fetch_add(1, std::memory_order_relaxed);
+}
+
+fs::path auxiliary_directory_handler::dir() {
+   return _sstable_main_dir / _aux_dir;
+}
+
+sstables::shared_sstable
+auxiliary_directory_handler::get_destination_unshared_sstable(shard_id shard) {
+    auto sst = _table->make_sstable(dir().native(), new_generation(),
+        _table->get_sstables_manager().get_highest_supported_format(),
+        sstables::sstable::format_types::big);
+    sst->set_unshared();
+    return sst;
+};
+
+future<sstables::shared_sstable>
+auxiliary_directory_handler::get_local_sstable(sstables::foreign_sstable_open_info info) {
+    auto sst = _table->make_sstable(dir().native(), info.generation, info.version, info.format,
+            [] (disk_error_signal_type&) { return error_handler_for_upload_dir(); });
+    return sst->load(std::move(info)).then([sst] {
+        return make_ready_future<sstables::shared_sstable>(sst);
+    });
+}
+
+future<>
+auxiliary_directory_handler::process_descriptor(sstables::entry_descriptor desc, fs::path aux_dir) {
+    assert(_coordinator == this_shard_id());
+
+    auto sstdir = fs::path(desc.sstdir) / aux_dir;
+    auto sst = _table->make_sstable(sstdir.native(), desc.generation, desc.version, desc.format, [] (disk_error_signal_type&)
+            { return error_handler_for_upload_dir();
+    });
+    _descriptors.push_back(std::move(desc));
+
+    return sst->load(service::get_local_streaming_read_priority()).then([this, sst] {
+        validate(sst);
+        return sst->mutate_sstable_level(0);
+    }).then([sst, this] {
+        return sst->get_open_info().then([sst, this] (sstables::foreign_sstable_open_info info) {
+            auto shards = sst->get_shards_for_this_sstable();
+            if (shards.size() == 1) {
+                _unshared_sstables[shards[0]].sstable_info.push_back(std::move(info));
+            } else {
+                auto shard_it = boost::min_element(_shared_sstables);
+                shard_it->total_size += sst->data_size();
+                shard_it->sstable_info.push_back(std::move(info));
+            }
+            return make_ready_future<>();
+        });
+    });
+}
+
+bool auxiliary_directory_handler::manifest_json_filter(const fs::path& path, const directory_entry& entry) {
+    return table::manifest_json_filter(path, entry);
+}
+
+future<>
+auxiliary_directory_handler::scan_dir(fs::path aux_dir) {
+    assert(_coordinator == this_shard_id());
+
+    auto sstable_dir = _sstable_main_dir / aux_dir;
+
+    return distributed_loader::verify_owner_and_mode(sstable_dir).then([this, aux_dir, sstable_dir] {
+        return lister::scan_dir(sstable_dir, { directory_entry_type::regular },
+                [this, aux_dir] (fs::path parent_dir, directory_entry de) {
+
+            // We record the parent path here, because some of the users in this function will want
+            // to use $PATH/upload while others will want $PATH/offstrategy. So this records $PATH
+            // and each user will add its own.
+            auto comps = sstables::entry_descriptor::make_descriptor(parent_dir.parent_path().native(), de.name);
+            _generations_found.emplace(comps.generation, parent_dir / fs::path(de.name));
+
+            if (comps.component != component_type::TOC) {
+                return make_ready_future<>();
+            }
+            return process_descriptor(std::move(comps), aux_dir);
+        }, &manifest_json_filter);
+    }).then([this] {
+        if (_generations_found.size()) {
+            auto max_it = boost::max_element(_generations_found | boost::adaptors::map_keys);
+            _generation.store(*max_it + 1, std::memory_order_relaxed);
+        }
+
+        for (auto& desc : _descriptors) {
+            _generations_found.erase(desc.generation);
+        }
+
+        return parallel_for_each(_generations_found | boost::adaptors::map_values, [] (fs::path& path) {
+            dblog.info("Found incomplete SSTable {} in auxiliary dir. Removing", path.native());
+            return remove_file(path.native());
+        });
+    });
+}
+
+auxiliary_directory_handler::auxiliary_directory_handler(distributed<database>& db, sstring ks_name, sstring cf_name,
+        fs::path sstable_main_dir, fs::path aux_dir)
+    : _table(db, ks_name, cf_name)
+    , _scheduling_group(db.local().get_streaming_scheduling_group())
+    , _io_priority(service::get_local_streaming_read_priority())
+    , _sstable_main_dir(std::move(sstable_main_dir))
+    , _enable_dangerous_direct_import_of_cassandra_counters(db.local().get_config().enable_dangerous_direct_import_of_cassandra_counters())
+    , _aux_dir(std::move(aux_dir))
+    , _coordinator(this_shard_id())
+{
+    _shared_sstables.resize(smp::count);
+    _unshared_sstables.resize(smp::count);
+}
+
+future<>
+auxiliary_directory_handler::open_sstables(std::vector<shard_bucket>& bucket) {
+    return parallel_for_each(bucket[this_shard_id()].sstable_info,
+            [this, &bucket] (sstables::foreign_sstable_open_info& info) {
+        return get_local_sstable(std::move(info)).then([this, &bucket] (sstables::shared_sstable sst) {
+            bucket[this_shard_id()].opened_sstables.push_back(sst);
+            return make_ready_future<>();
+        });
+    });
+}
+
+future<>
+auxiliary_directory_handler::collect_newly_unshared_sstables(std::vector<sstables::shared_sstable> new_sstables) {
+    // Collect all info structures first to save on smp round trips
+    return do_with(std::vector<sstables::foreign_sstable_open_info>(),
+            [this, new_sstables = std::move(new_sstables)] (std::vector<sstables::foreign_sstable_open_info>& new_info) {
+        return parallel_for_each(new_sstables, [this, &new_info] (sstables::shared_sstable sst) {
+            auto shards = sst->get_shards_for_this_sstable();
+            return sst->get_open_info().then([this, &new_info] (sstables::foreign_sstable_open_info info) {
+                assert(info.owners.size() == 1);
+                new_info.push_back(std::move(info));
+            }).finally([sst] {}); // keep sstable alive until we are doing with get_open_info()
+        }).then([this, &new_info] {
+            return smp::submit_to(_coordinator, [this, &new_info] {
+                for (auto& info : new_info) {
+                    auto shard = info.owners[0];
+                    _unshared_sstables[shard].sstable_info.push_back(std::move(info));
+                }
+                return make_ready_future<>();
+            });
+        });
+    });
+}
+
+future<>
+auxiliary_directory_handler::reshard() {
+    // Step 1: open all shared SSTables that are assigned to this shard.
+    return open_sstables(_shared_sstables).then([this] {
+    // Step 2: Reshard shared SSTables together
+        return _table->get_compaction_manager().run_resharding_job(&*_table, [this] {
+            // FIXME: in a future iteration, this will be part of the compaction manager.
+            // We can't do it right now because this doesn't yet handle reshard-at-boot.
+            // It's better if we keep that one with compaction priority until then to avoid
+            // Priority inversion. It's better to add temporary code here than in the compaction
+            // manager.
+            return with_scheduling_group(_scheduling_group, [this] {
+
+            // Resharding doesn't like empty sstable sets, so bail early. There is nothing
+            // to reshard in this shard.
+            auto sst_list = std::move(_shared_sstables[this_shard_id()].opened_sstables);
+            if (sst_list.size() == 0) {
+                return make_ready_future<>();
+            }
+
+            sstables::compaction_descriptor desc(sst_list, 0, std::numeric_limits<uint64_t>::max());
+            desc.options = sstables::compaction_options::make_reshard();
+            desc.io_priority = _io_priority;
+            desc.creator = [this] (shard_id shard) mutable {
+                return get_destination_unshared_sstable(shard);
+            };
+            return sstables::compact_sstables(std::move(desc), *_table).then(
+                    [this, sst_list = std::move(sst_list)] (sstables::compaction_info result) mutable {
+                // Only if it succeeds.
+                for (auto& sst : sst_list) {
+                    sst->mark_for_deletion();
+                }
+                return collect_newly_unshared_sstables(std::move(result.new_sstables));
+            });
+            });
+        });
+    }).finally([this] {
+        // clear memory in the shard we created
+        std::exchange(_shared_sstables[this_shard_id()].opened_sstables, std::vector<sstables::shared_sstable>());
+        return make_ready_future<>();
+    });
+}
+
+future<>
+auxiliary_directory_handler::scan_aux_dir() {
+    return scan_dir(_aux_dir);
+}
+
+size_t
+auxiliary_directory_handler::num_opened_unshared() const {
+    size_t sum = 0;
+    for (auto& shard : _unshared_sstables) {
+        sum += shard.opened_sstables.size();
+    }
+    return sum;
+}
+
+size_t
+auxiliary_directory_handler::num_opened_shared() const {
+    size_t sum = 0;
+    for (auto& shard : _shared_sstables) {
+        sum += shard.opened_sstables.size();
+    }
+    return sum;
+}
+
+size_t
+auxiliary_directory_handler::num_unopened_unshared() const {
+    size_t sum = 0;
+    for (auto& shard : _unshared_sstables) {
+        sum += shard.sstable_info.size();
+    }
+    return sum;
+}
+
+size_t
+auxiliary_directory_handler::num_unopened_shared() const {
+    size_t sum = 0;
+    for (auto& shard : _shared_sstables) {
+        sum += shard.sstable_info.size();
+    }
+    return sum;
+}
+
+future<>
+distributed_loader::process_upload_dir(distributed<database>& db, sstring ks_name, sstring cf_name) {
+    return seastar::async([&db, ks_name = std::move(ks_name), cf_name = std::move(cf_name)] {
+        auto& cf = db.local().find_column_family(ks_name, cf_name);
+        auxiliary_directory_handler aux_handler(db, ks_name, cf_name, fs::path(cf._config.datadir), "upload");
+        aux_handler.scan_aux_dir().get();
+
+        db.invoke_on_all([&aux_handler] (database& db) mutable {
+            return aux_handler.reshard();
+        }).get();
+    });
+}
 
 // This function will iterate through upload directory in column family,
 // and will do the following for each sstable found:
