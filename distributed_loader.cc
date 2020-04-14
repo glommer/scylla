@@ -341,6 +341,45 @@ distributed_loader::reshard(sharded<sstables::sstable_directory>& dir, sharded<d
     });
 }
 
+future<>
+distributed_loader::process_upload_dir(distributed<database>& db, sstring ks, sstring cf) {
+    seastar::thread_attributes attr;
+    attr.sched_group = db.local().get_streaming_scheduling_group();
+
+    return seastar::async(std::move(attr), [&db, ks = std::move(ks), cf = std::move(cf)] {
+        global_column_family_ptr global_table(db, ks, cf);
+
+        sharded<sstables::sstable_directory> directory;
+        auto upload = fs::path(global_table->dir()) / "upload";
+        directory.start(upload, 4,
+            sstables::sstable_directory::need_mutate_level::yes,
+            sstables::sstable_directory::lack_of_toc_fatal::no,
+            sstables::sstable_directory::enable_dangerous_direct_import_of_cassandra_counters(db.local().get_config().enable_dangerous_direct_import_of_cassandra_counters()),
+            sstables::sstable_directory::allow_loading_materialized_view::no,
+            [&global_table] (fs::path dir, int64_t gen, sstables::sstable_version_types v, sstables::sstable_format_types f) {
+                return global_table->make_sstable(dir.native(), gen, v, f);
+
+        }).get();
+
+        auto stop = defer([&directory] {
+            directory.stop().get();
+        });
+
+        lock_table(directory, db, ks, cf).get();
+        process_sstable_dir(directory).get();
+        reshard(directory, db, ks, cf, [&global_table, upload] (shard_id shard) {
+            // we need generation calculated by instance of cf at requested shard
+            auto gen = smp::submit_to(shard, [&global_table] () {
+                return global_table->calculate_generation_for_new_table();
+            }).get0();
+
+            return global_table->make_sstable(upload.native(), gen,
+                    global_table->get_sstables_manager().get_highest_supported_format(),
+                    sstables::sstable::format_types::big);
+        }).get();
+    });
+}
+
 // This function will iterate through upload directory in column family,
 // and will do the following for each sstable found:
 // 1) Mutate sstable level to 0.
@@ -644,10 +683,6 @@ future<> distributed_loader::load_new_sstables(distributed<database>& db, distri
                 }
                 cf._sstables_opened_but_not_loaded.clear();
                 cf.trigger_compaction();
-            });
-        }).then([&db, ks, cf] () mutable {
-            return smp::submit_to(0, [&db, ks = std::move(ks), cf = std::move(cf)] () mutable {
-                distributed_loader::reshard(db, std::move(ks), std::move(cf));
             });
         });
     }).handle_exception([&db, ks, cf] (std::exception_ptr ep) {
