@@ -48,6 +48,12 @@ public:
             , _m()
     { }
 
+    view_updating_consumer(const view_updating_consumer& o) = delete;
+    view_updating_consumer& operator=(const view_updating_consumer& o) = delete;
+    view_updating_consumer(view_updating_consumer&& o) = default;
+    view_updating_consumer& operator=(view_updating_consumer&& o) = default;
+    ~view_updating_consumer() = default;
+
     void consume_new_partition(const dht::decorated_key& dk) {
         _m = mutation(_schema, dk, mutation_partition(_schema));
     }

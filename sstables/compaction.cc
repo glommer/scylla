@@ -70,6 +70,7 @@
 #include "dht/token.hh"
 #include "mutation_writer/shard_based_splitting_writer.hh"
 #include "mutation_source_metadata.hh"
+#include "db/view/view_updating_consumer.hh"
 
 namespace sstables {
 
@@ -129,6 +130,7 @@ class compaction;
 // Writes a single SSTable
 struct compaction_writer {
     std::optional<sstable_writer> _writer = {};
+    std::optional<db::view::view_updating_consumer> _view_update = {};
     shared_sstable _sst = {};
 public:
     explicit compaction_writer(sstable_writer writer, shared_sstable sst)
