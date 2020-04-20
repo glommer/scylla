@@ -651,15 +651,7 @@ table::open_sstable(sstables::foreign_sstable_open_info info, sstring dir, int64
 void table::load_sstable(sstables::shared_sstable& sst, bool reset_level) {
     auto& shards = sst->get_shards_for_this_sstable();
     if (belongs_to_other_shard(shards)) {
-        // If we're here, this sstable is shared by this and other
-        // shard(s). Shared sstables cannot be deleted until all
-        // shards compacted them, so to reduce disk space usage we
-        // want to start splitting them now.
-        // However, we need to delay this compaction until we read all
-        // the sstables belonging to this CF, because we need all of
-        // them to know which tombstones we can drop, and what
-        // generation number is free.
-        _sstables_need_rewrite.emplace(sst->generation(), sst);
+        throw sstables::malformed_sstable_exception("We are not expected a shared SSTable at this point.");
     }
     if (reset_level) {
         // When loading a migrated sstable, set level to 0 because
@@ -1245,44 +1237,6 @@ table::on_compaction_completion(sstables::compaction_completion_desc& desc) {
     });
     _sstables_compacted_but_not_deleted.erase(e, _sstables_compacted_but_not_deleted.end());
     rebuild_statistics();
-}
-
-// For replace/remove_ancestors_needed_write, note that we need to update the compaction backlog
-// manually. The new tables will be coming from a remote shard and thus unaccounted for in our
-// list so far, and the removed ones will no longer be needed by us.
-void table::replace_ancestors_needed_rewrite(std::unordered_set<uint64_t> ancestors, std::vector<sstables::shared_sstable> new_sstables) {
-    std::vector<sstables::shared_sstable> old_sstables;
-
-    for (auto& sst : new_sstables) {
-        _compaction_strategy.get_backlog_tracker().add_sstable(sst);
-    }
-
-    for (auto& ancestor : ancestors) {
-        auto it = _sstables_need_rewrite.find(ancestor);
-        if (it != _sstables_need_rewrite.end()) {
-            old_sstables.push_back(it->second);
-            _compaction_strategy.get_backlog_tracker().remove_sstable(it->second);
-            _sstables_need_rewrite.erase(it);
-        }
-    }
-    rebuild_sstable_list(new_sstables, old_sstables);
-    rebuild_statistics();
-    trigger_compaction();
-}
-
-void table::remove_ancestors_needed_rewrite(std::unordered_set<uint64_t> ancestors) {
-    std::vector<sstables::shared_sstable> old_sstables;
-    for (auto& ancestor : ancestors) {
-        auto it = _sstables_need_rewrite.find(ancestor);
-        if (it != _sstables_need_rewrite.end()) {
-            old_sstables.push_back(it->second);
-            _compaction_strategy.get_backlog_tracker().remove_sstable(it->second);
-            _sstables_need_rewrite.erase(it);
-        }
-    }
-    rebuild_sstable_list({}, old_sstables);
-    rebuild_statistics();
-    trigger_compaction();
 }
 
 future<>
