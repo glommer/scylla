@@ -757,6 +757,11 @@ int main(int ac, char** av) {
 
             dirs.init(*cfg, bool(hinted_handoff_enabled)).get();
 
+            // We need the compaction manager ready early so we can reshard.
+            db.invoke_on_all([&proxy, &stop_signal] (database& db) {
+                db.get_compaction_manager().start();
+            }).get();
+
             // Initialization of a keyspace is done by shard 0 only. For system
             // keyspace, the procedure  will go through the hardcoded column
             // families, and in each of them, it will load the sstables for all
@@ -891,6 +896,13 @@ int main(int ac, char** av) {
                 }
             }).get();
 
+            db.invoke_on_all([] (database& db) {
+                return do_for_each(db.get_column_families(), [] (std::pair<utils::UUID, lw_shared_ptr<table>> pair) {
+                    pair.second->enable_auto_compaction();
+                    return make_ready_future<>();
+                });
+            }).get();
+
             // register connection drop notification to update cf's cache hit rate data
             db.invoke_on_all([] (database& db) {
                 db.register_connection_drop_notifier(netw::get_local_messaging_service());
@@ -915,21 +927,6 @@ int main(int ac, char** av) {
                 }
             }
 
-            db.invoke_on_all([&proxy] (database& db) {
-                db.get_compaction_manager().start();
-            }).get();
-
-            // If the same sstable is shared by several shards, it cannot be
-            // deleted until all shards decide to compact it. So we want to
-            // start these compactions now. Note we start compacting only after
-            // all sstables in this CF were loaded on all shards - otherwise
-            // we will have races between the compaction and loading processes
-            // We also want to trigger regular compaction on boot.
-
-            for (auto& x : db.local().get_column_families()) {
-                column_family& cf = *(x.second);
-                distributed_loader::reshard(db, cf.schema()->ks_name(), cf.schema()->cf_name());
-            }
             db.invoke_on_all([&proxy] (database& db) {
                 for (auto& x : db.get_column_families()) {
                     column_family& cf = *(x.second);

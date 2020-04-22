@@ -1095,8 +1095,68 @@ future<> distributed_loader::populate_column_family(distributed<database>& db, s
         if (exists) {
             handle_sstables_pending_delete(pending_delete_dir).get();
         }
-        // Second pass, cleanup sstables with temporary TOCs and load the rest.
-        do_populate_column_family(db, std::move(sstdir), std::move(ks), std::move(cf)).get();
+
+        auto eddiocc = [&db] {
+            if (db.local().get_config().enable_dangerous_direct_import_of_cassandra_counters()) {
+                return sstable_directory::enable_dangerous_direct_import_of_cassandra_counters::yes;
+            } else {
+                return sstable_directory::enable_dangerous_direct_import_of_cassandra_counters::no;
+            }
+        };
+
+        global_column_family_ptr global_table(db, ks, cf);
+
+        sharded<sstable_directory> directory;
+        directory.start(fs::path(sstdir), 10,
+            sstable_directory::need_mutate_level::no,
+            sstable_directory::lack_of_toc_fatal::yes,
+            eddiocc(),
+            sstable_directory::allow_loading_materialized_view::yes,
+            [&global_table] (fs::path dir, int64_t gen, sstables::sstable_version_types v, sstables::sstable_format_types f) {
+                return global_table->make_sstable(dir.native(), gen, v, f);
+
+        }).get();
+        auto stop = defer([&directory] {
+            directory.stop().get();
+        });
+
+        // Prevent the table from disappearing. This is early boot, but it can still
+        // be that a drop will hit another node and get propagated here. We also disable
+        // auto compaction in this table so the resharded tables don't start getting
+        // compacted until it is time to do so.
+        directory.invoke_on_all([&global_table] (sstable_directory& dir) {
+            dir.store_phaser(global_table->write_in_progress());
+            global_table->disable_auto_compaction();
+            return make_ready_future<>();
+        }).get();
+
+        sstable_directory::process_sstable_dir(directory).get();
+        // If we are resharding system tables before we can read them, we will not
+        // know which is the highest format we support: this information is itself stored
+        // in the system tables. In that case we'll rely on what we find on disk: we'll
+        // at least not downgrade any files. If we already know that we support a higher
+        // format than the one we see then we use that.
+        auto sys_format = global_table->get_sstables_manager().get_highest_supported_format();
+        auto format = sstable_directory::highest_version_seen(directory, sys_format).get0();
+        auto generation = sstable_directory::highest_generation_seen(directory).get0();;
+
+        db.invoke_on_all([&global_table, generation] (database& db) {
+            global_table->update_sstables_known_generation(generation);
+            return make_ready_future<>();
+        }).get();
+
+        sstable_directory::reshard(directory, db, ks, cf, [&global_table, sstdir, format] (shard_id shard) {
+            // we need generation calculated by instance of cf at requested shard
+            auto gen = smp::submit_to(shard, [&global_table] () {
+                return global_table->calculate_generation_for_new_table();
+            }).get0();
+
+            return global_table->make_sstable(sstdir, gen, format, sstables::sstable::format_types::big);
+        }).get();
+
+        sstable_directory::do_for_each_sstable(directory, [&global_table] (sstables::shared_sstable sst) {
+            return global_table->add_sstable_and_update_cache(sst);
+        }).get();
     });
 }
 
