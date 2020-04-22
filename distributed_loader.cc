@@ -1092,8 +1092,36 @@ future<> distributed_loader::populate_column_family(distributed<database>& db, s
         if (exists) {
             handle_sstables_pending_delete(pending_delete_dir).get();
         }
-        // Second pass, cleanup sstables with temporary TOCs and load the rest.
-        do_populate_column_family(db, std::move(sstdir), std::move(ks), std::move(cf)).get();
+
+        directory_with_sstables_handler sstable_dir_handler(db, ks, cf, fs::path(sstdir), "");
+        sstable_dir_handler.process_sstable_dir().get();
+
+        // Compaction manager is on at this time so we can submit resharding jobs.
+        // We need to make sure that we don't compact the resulting SSTables from
+        // resharding, so disable auto compaction. Do this in a separate pass to be sure.
+        // Otherwise resharding in shardX can generate an SSTable in shardY before we
+        // managed to disable it there.
+        //
+        // We will not enable them back when we are done because we don't want compactions
+        // in this table affecting reshards in tables we will load later.
+        db.invoke_on_all([ks, cf] (database& db) mutable {
+            auto& table = db.find_column_family(ks, cf);
+            table.disable_auto_compaction();
+        }).get();
+
+        // This has to be in a separate invoke block: resharding generates SSTables
+        // for all other shards. We don't want to start generating SSTables for a
+        // shard that hasn't disabled compactions yet.
+        db.invoke_on_all([&sstable_dir_handler] (database& dummy) mutable {
+            return sstable_dir_handler.reshard();
+        }).get();
+
+        // This also has to be in a separate invoke block: otherwise resharding
+        // may still be actively generating SSTables for some shards and they will
+        // be skipped.
+        db.invoke_on_all([&sstable_dir_handler] (database& db) mutable {
+            return sstable_dir_handler.make_unshared_sstables_available();
+        }).get();
     });
 }
 
