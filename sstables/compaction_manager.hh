@@ -29,6 +29,7 @@
 #include <seastar/core/rwlock.hh>
 #include <seastar/core/metrics_registration.hh>
 #include <seastar/core/scheduling.hh>
+#include <seastar/core/abort_source.hh>
 #include "log.hh"
 #include "utils/exponential_backoff_retry.hh"
 #include <vector>
@@ -69,6 +70,12 @@ private:
 
     // Used to assert that compaction_manager was explicitly stopped, if started.
     bool _stopped = true;
+    promise<> _stop_promise;
+    // We have to extract the future right away in the constructor, otherwise
+    // when we forward the result of stop to the promise above, which requires
+    // the promise to be moved, we may race and end up extracting get_future()
+    // from an invalid promise
+    future<> _stop_future;
 
     stats _stats;
     seastar::metrics::metric_groups _metrics;
@@ -149,9 +156,11 @@ private:
     using get_candidates_func = std::function<std::vector<sstables::shared_sstable>(const column_family&)>;
 
     future<> rewrite_sstables(column_family* cf, sstables::compaction_options options, get_candidates_func);
+    optimized_optional<abort_source::subscription> _early_abort_subscription;
+    void do_stop();
 public:
-    compaction_manager(seastar::scheduling_group sg, const ::io_priority_class& iop, size_t available_memory);
-    compaction_manager(seastar::scheduling_group sg, const ::io_priority_class& iop, size_t available_memory, uint64_t shares);
+    compaction_manager(seastar::scheduling_group sg, const ::io_priority_class& iop, size_t available_memory, abort_source& as);
+    compaction_manager(seastar::scheduling_group sg, const ::io_priority_class& iop, size_t available_memory, uint64_t shares, abort_source& as);
     compaction_manager();
     ~compaction_manager();
 
