@@ -357,7 +357,7 @@ future<> compaction_manager::task_stop(lw_shared_ptr<compaction_manager::task> t
     });
 }
 
-compaction_manager::compaction_manager(seastar::scheduling_group sg, const ::io_priority_class& iop, size_t available_memory)
+compaction_manager::compaction_manager(seastar::scheduling_group sg, const ::io_priority_class& iop, size_t available_memory, abort_source& as)
     : _compaction_controller(sg, iop, 250ms, [this, available_memory] () -> float {
         auto b = backlog() / available_memory;
         // This means we are using an unimplemented strategy
@@ -372,15 +372,21 @@ compaction_manager::compaction_manager(seastar::scheduling_group sg, const ::io_
     , _backlog_manager(_compaction_controller)
     , _scheduling_group(_compaction_controller.sg())
     , _available_memory(available_memory)
+    , _early_abort_subscription(as.subscribe([this] {
+        do_stop();
+    }))
 {
     register_metrics();
 }
 
-compaction_manager::compaction_manager(seastar::scheduling_group sg, const ::io_priority_class& iop, size_t available_memory, uint64_t shares)
+compaction_manager::compaction_manager(seastar::scheduling_group sg, const ::io_priority_class& iop, size_t available_memory, uint64_t shares, abort_source& as)
     : _compaction_controller(sg, iop, shares)
     , _backlog_manager(_compaction_controller)
     , _scheduling_group(_compaction_controller.sg())
     , _available_memory(available_memory)
+    , _early_abort_subscription(as.subscribe([this] {
+        do_stop();
+    }))
 {
     register_metrics();
 }
@@ -481,14 +487,24 @@ future<> compaction_manager::drain() {
 }
 
 future<> compaction_manager::stop() {
-    if (_state == state::none || _state == state::stopped) {
+    // never started
+    if (_state == state::none) {
         return make_ready_future<>();
+    } else {
+        do_stop();
+        return std::move(*_stop_future);
+    }
+}
+
+void compaction_manager::do_stop() {
+    if (_state == state::none || _state == state::stopped) {
+        return;
     }
 
     cmlog.info("Asked to stop");
     // Reset the metrics registry
     _metrics.clear();
-    return drain().then([this] () mutable {
+    _stop_future.emplace(drain().then([this] () mutable {
         reevaluate_postponed_compactions();
         return std::move(_waiting_reevalution);
     }).then([this] {
@@ -497,7 +513,7 @@ future<> compaction_manager::stop() {
         _compaction_submission_timer.cancel();
         cmlog.info("Stopped");
         return _compaction_controller.shutdown();
-    });
+    }));
 }
 
 inline bool compaction_manager::can_proceed(const lw_shared_ptr<task>& task) {
@@ -530,8 +546,7 @@ inline bool compaction_manager::maybe_stop_on_error(future<> f, stop_iteration w
     } catch (storage_io_error& e) {
         cmlog.error("compaction failed due to storage io error: {}: stopping", e.what());
         retry = false;
-        // FIXME discarded future.
-        (void)stop();
+        do_stop();
     } catch (...) {
         cmlog.error("compaction failed: {}: {}", std::current_exception(), decision_msg);
         retry = true;
