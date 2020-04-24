@@ -29,6 +29,7 @@
 #include <seastar/core/rwlock.hh>
 #include <seastar/core/metrics_registration.hh>
 #include <seastar/core/scheduling.hh>
+#include <seastar/core/abort_source.hh>
 #include "log.hh"
 #include "utils/exponential_backoff_retry.hh"
 #include <vector>
@@ -69,6 +70,7 @@ private:
 
     // Used to assert that compaction_manager was explicitly stopped, if started.
     bool _stopped = true;
+    shared_promise<> _stop_promise;
 
     stats _stats;
     seastar::metrics::metric_groups _metrics;
@@ -149,6 +151,8 @@ private:
     using get_candidates_func = std::function<std::vector<sstables::shared_sstable>(const column_family&)>;
 
     future<> rewrite_sstables(column_family* cf, sstables::compaction_options options, get_candidates_func);
+    optimized_optional<abort_source::subscription> _early_abort_subscription;
+    void do_stop();
 public:
     compaction_manager(seastar::scheduling_group sg, const ::io_priority_class& iop, size_t available_memory);
     compaction_manager(seastar::scheduling_group sg, const ::io_priority_class& iop, size_t available_memory, uint64_t shares);
@@ -159,6 +163,8 @@ public:
 
     // Start compaction manager.
     void start();
+
+    void start(abort_source& as);
 
     // Stop all fibers. Ongoing compactions will be waited.
     future<> stop();
