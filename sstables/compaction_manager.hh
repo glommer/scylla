@@ -29,6 +29,7 @@
 #include <seastar/core/rwlock.hh>
 #include <seastar/core/metrics_registration.hh>
 #include <seastar/core/scheduling.hh>
+#include <seastar/core/abort_source.hh>
 #include "log.hh"
 #include "utils/exponential_backoff_retry.hh"
 #include <vector>
@@ -70,6 +71,9 @@ private:
     // Used to assert that compaction_manager was explicitly stopped, if started.
     enum class state { none, destroyed, created, disabled, enabled };
     state _state = state::none;
+    // We use a shared promise to indicate whether or not we are stopped because it is legal
+    // for stop() to be called twice. For instance it is called on DRAIN and shutdown.
+    std::optional<future<>> _stop_future;
 
     stats _stats;
     seastar::metrics::metric_groups _metrics;
@@ -150,9 +154,10 @@ private:
     using get_candidates_func = std::function<std::vector<sstables::shared_sstable>(const column_family&)>;
 
     future<> rewrite_sstables(column_family* cf, sstables::compaction_options options, get_candidates_func);
+    optimized_optional<abort_source::subscription> _early_abort_subscription;
 public:
-    compaction_manager(seastar::scheduling_group sg, const ::io_priority_class& iop, size_t available_memory);
-    compaction_manager(seastar::scheduling_group sg, const ::io_priority_class& iop, size_t available_memory, uint64_t shares);
+    compaction_manager(seastar::scheduling_group sg, const ::io_priority_class& iop, size_t available_memory, abort_source& as);
+    compaction_manager(seastar::scheduling_group sg, const ::io_priority_class& iop, size_t available_memory, uint64_t shares, abort_source& as);
     compaction_manager();
     ~compaction_manager();
 
@@ -162,12 +167,15 @@ public:
     void enable();
     void disable();
 
-    // Stop all fibers. Ongoing compactions will be waited.
+    // Stop all fibers. Ongoing compactions will be waited. Should only be called
+    // once, from main teardown path.
     future<> stop();
 
     // FIXME: should not be public. It's not anyone's business if we are enabled.
     // distributed_loader.cc uses for resharding, remove this when the new resharding series lands.
     bool enabled() const { return _state == state::enabled; }
+    // Stop all fibers, without waiting. Safe to be called multiple times.
+    void do_stop();
 
     // Submit a column family to be compacted.
     void submit(column_family* cf);
