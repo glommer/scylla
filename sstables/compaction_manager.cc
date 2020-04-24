@@ -446,11 +446,17 @@ void compaction_manager::postpone_compaction_for_column_family(column_family* cf
 }
 
 future<> compaction_manager::stop() {
+    do_stop();
+    return _stop_promise.get_shared_future();
+}
+
+void compaction_manager::do_stop() {
     if (_stopped) {
-        return make_ready_future<>();
+        return;
     }
-    cmlog.info("Asked to stop");
+
     _stopped = true;
+    cmlog.info("Asked to stop");
     // Reset the metrics registry
     _metrics.clear();
     // Stop all ongoing compaction.
@@ -460,7 +466,10 @@ future<> compaction_manager::stop() {
     // Wait for each task handler to stop. Copy list because task remove itself
     // from the list when done.
     auto tasks = _tasks;
-    return do_with(std::move(tasks), [this] (std::list<lw_shared_ptr<task>>& tasks) {
+
+    // the compaction manager won't stop and is guaranteed to be alive until the
+    // promise is set at the end of this call chain.
+    (void)do_with(std::move(tasks), [this] (std::list<lw_shared_ptr<task>>& tasks) {
         return parallel_for_each(tasks, [this] (auto& task) {
             return this->task_stop(task);
         });
@@ -472,6 +481,15 @@ future<> compaction_manager::stop() {
         _compaction_submission_timer.cancel();
         cmlog.info("Stopped");
         return _compaction_controller.shutdown();
+    }).finally([this] {
+        _stop_promise.set_value();
+    });
+}
+
+void compaction_manager::start(abort_source& as) {
+    start();
+    _early_abort_subscription = as.subscribe([this] {
+        do_stop();
     });
 }
 
