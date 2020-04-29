@@ -1276,7 +1276,7 @@ view_builder::build_step& view_builder::get_or_create_build_step(utils::UUID bas
 void view_builder::initialize_reader_at_current_token(build_step& step) {
     step.pslice = make_partition_slice(*step.base->schema());
     step.prange = dht::partition_range(dht::ring_position::starting_at(step.current_token()), dht::ring_position::max());
-    step.reader = make_local_shard_sstable_reader(
+    step.reader = make_range_sstable_reader(
             step.base->schema(),
             no_reader_permit(),
             make_lw_shared(sstables::sstable_set(step.base->get_sstable_set())),

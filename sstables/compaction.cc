@@ -758,7 +758,7 @@ public:
     }
 
     flat_mutation_reader make_sstable_reader() const override {
-        return ::make_local_shard_sstable_reader(_schema,
+        return ::make_range_sstable_reader(_schema,
                 no_reader_permit(),
                 _compacting,
                 query::full_partition_range,
