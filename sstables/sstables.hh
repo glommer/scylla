@@ -313,11 +313,6 @@ public:
         _collector.add_ancestor(generation);
     }
 
-    // Returns true iff this sstable contains data which belongs to many shards.
-    bool is_shared() const {
-        return _shared;
-    }
-
     void set_unshared() {
         _shared = false;
     }

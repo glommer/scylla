@@ -381,7 +381,7 @@ table::make_sstable_reader(schema_ptr s,
                     tracing::trace_state_ptr trace_state,
                     streamed_mutation::forwarding fwd,
                     mutation_reader::forwarding fwd_mr) {
-                return make_local_shard_sstable_reader(std::move(s), std::move(permit), std::move(sstables), pr, slice, pc,
+                return make_range_sstable_reader(std::move(s), std::move(permit), std::move(sstables), pr, slice, pc,
                         std::move(trace_state), fwd, fwd_mr);
             });
         }
@@ -572,32 +572,6 @@ static bool belongs_to_other_shard(const std::vector<shard_id>& shards) {
     return shards.size() != size_t(belongs_to_current_shard(shards));
 }
 
-flat_mutation_reader make_local_shard_sstable_reader(schema_ptr s,
-        reader_permit permit,
-        lw_shared_ptr<sstables::sstable_set> sstables,
-        const dht::partition_range& pr,
-        const query::partition_slice& slice,
-        const io_priority_class& pc,
-        tracing::trace_state_ptr trace_state,
-        streamed_mutation::forwarding fwd,
-        mutation_reader::forwarding fwd_mr,
-        sstables::read_monitor_generator& monitor_generator)
-{
-    auto reader_factory_fn = [s, permit, &slice, &pc, trace_state, fwd, fwd_mr, &monitor_generator]
-            (sstables::shared_sstable& sst, const dht::partition_range& pr) mutable {
-        flat_mutation_reader reader = sst->read_range_rows_flat(s, permit, pr, slice, pc,
-                trace_state, fwd, fwd_mr, monitor_generator(sst));
-        return reader;
-    };
-    return make_combined_reader(s, std::make_unique<incremental_reader_selector>(s,
-                    std::move(sstables),
-                    pr,
-                    std::move(trace_state),
-                    std::move(reader_factory_fn)),
-            fwd,
-            fwd_mr);
-}
-
 sstables::shared_sstable table::make_sstable(sstring dir, int64_t generation, sstables::sstable_version_types v, sstables::sstable_format_types f,
         io_error_handler_gen error_handler_gen) {
     return get_sstables_manager().make_sstable(_schema, dir, generation, v, f, gc_clock::now(), error_handler_gen);
@@ -673,11 +647,8 @@ void table::update_stats_for_new_sstable(uint64_t disk_space_used_by_sstable, co
 }
 
 inline void table::add_sstable_to_backlog_tracker(compaction_backlog_tracker& tracker, sstables::shared_sstable sstable) {
-    // Don't add sstables that belong to more than one shard to the table's backlog tracker
-    // given that such sstables are supposed to be tracked only by resharding's own tracker.
-    if (!sstable->is_shared()) {
-        tracker.add_sstable(sstable);
-    }
+    check_sstable_is_not_shared(sstable);
+    tracker.add_sstable(sstable);
 }
 
 void table::add_sstable(sstables::shared_sstable sstable, const std::vector<unsigned>& shards_for_the_sstable) {
