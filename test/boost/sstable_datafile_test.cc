@@ -1044,6 +1044,7 @@ SEASTAR_TEST_CASE(compaction_manager_test) {
         {{"p1", utf8_type}}, {{"c1", utf8_type}}, {{"r1", int32_type}}, {}, utf8_type));
 
     auto cm = make_lw_shared<compaction_manager>();
+    bool cm_stopped_by_us = false;
     cm->start();
 
     auto tmp = tmpdir();
@@ -1083,7 +1084,7 @@ SEASTAR_TEST_CASE(compaction_manager_test) {
                 return make_ready_future<>();
             });
         });
-    }).then([&env, cf, cm, generations] {
+    }).then([&env, cf, cm, generations, &cm_stopped_by_us] {
         // submit cf to compaction manager and then check that cf's sstables
         // were compacted.
 
@@ -1096,10 +1097,11 @@ SEASTAR_TEST_CASE(compaction_manager_test) {
         return do_until(end, [] {
             // sleep until compaction manager selects cf for compaction.
             return sleep(std::chrono::milliseconds(100));
-        }).then([cf, cm] {
+        }).then([cf, cm, &cm_stopped_by_us] {
             BOOST_REQUIRE(cm->get_stats().completed_tasks == 1);
             BOOST_REQUIRE(cm->get_stats().errors == 0);
 
+            cm_stopped_by_us = true;
             // remove cf from compaction manager; this will wait for the
             // ongoing compaction to finish.
             return cf->stop().then([cf, cm] {
@@ -1111,8 +1113,11 @@ SEASTAR_TEST_CASE(compaction_manager_test) {
                 });
             });
         });
-    }).finally([&env, s, cm, cl_stats, tracker] {
-        return cm->stop().then([&env, cm] {});
+    }).finally([&env, s, cm, &cm_stopped_by_us, cl_stats, tracker] {
+        if (!cm_stopped_by_us) {
+            return cm->stop().then([&env, cm] {});
+        }
+        return make_ready_future<>();
     }).get();
   });
 }
