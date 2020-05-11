@@ -68,7 +68,8 @@ private:
     std::list<lw_shared_ptr<task>> _tasks;
 
     // Used to assert that compaction_manager was explicitly stopped, if started.
-    bool _stopped = true;
+    enum class state { none, stopped, disabled, enabled };
+    state _state = state::none;
 
     stats _stats;
     seastar::metrics::metric_groups _metrics;
@@ -157,13 +158,16 @@ public:
 
     void register_metrics();
 
-    // Start compaction manager.
-    void start();
+    // enable/disable compaction manager.
+    void enable();
+    void disable();
 
     // Stop all fibers. Ongoing compactions will be waited.
     future<> stop();
 
-    bool stopped() const { return _stopped; }
+    // FIXME: should not be public. It's not anyone's business if we are enabled.
+    // distributed_loader.cc uses for resharding, remove this when the new resharding series lands.
+    bool enabled() const { return _state == state::enabled; }
 
     // Submit a column family to be compacted.
     void submit(column_family* cf);
