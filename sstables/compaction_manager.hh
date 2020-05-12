@@ -165,6 +165,11 @@ public:
     // Stop all fibers. Ongoing compactions will be waited.
     future<> stop();
 
+    // cancels all running compactions and moves the compaction manager into disabled state.
+    // The compaction manager is still alive after drain but it will not accept new compactions
+    // unless it is moved back to enabled state.
+    future<> drain();
+
     // FIXME: should not be public. It's not anyone's business if we are enabled.
     // distributed_loader.cc uses for resharding, remove this when the new resharding series lands.
     bool enabled() const { return _state == state::enabled; }

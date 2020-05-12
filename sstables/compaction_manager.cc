@@ -461,19 +461,15 @@ void compaction_manager::postpone_compaction_for_column_family(column_family* cf
     _postponed.push_back(cf);
 }
 
-future<> compaction_manager::stop() {
-    if (_state == state::none || _state == state::stopped) {
-        return make_ready_future<>();
-    }
+future<> compaction_manager::drain() {
+    _state = state::disabled;
+    cmlog.info("Draining {} ongoing compactions", _compactions.size());
 
-    cmlog.info("Asked to stop");
-    _state = state::stopped;
-    // Reset the metrics registry
-    _metrics.clear();
     // Stop all ongoing compaction.
     for (auto& info : _compactions) {
-        info->stop("shutdown");
+        info->stop("drain");
     }
+
     // Wait for each task handler to stop. Copy list because task remove itself
     // from the list when done.
     auto tasks = _tasks;
@@ -481,10 +477,22 @@ future<> compaction_manager::stop() {
         return parallel_for_each(tasks, [this] (auto& task) {
             return this->task_stop(task);
         });
-    }).then([this] () mutable {
+    });
+}
+
+future<> compaction_manager::stop() {
+    if (_state == state::none || _state == state::stopped) {
+        return make_ready_future<>();
+    }
+
+    cmlog.info("Asked to stop");
+    // Reset the metrics registry
+    _metrics.clear();
+    return drain().then([this] () mutable {
         reevaluate_postponed_compactions();
         return std::move(_waiting_reevalution);
     }).then([this] {
+        _state = state::stopped;
         _weight_tracker.clear();
         _compaction_submission_timer.cancel();
         cmlog.info("Stopped");
