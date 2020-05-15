@@ -254,7 +254,7 @@ sstable_directory::sstable_directory(fs::path sstable_dir,
     , _allow_loading_materialized_view(allow_mv)
     , _sstable_object_from_existing_sstable(std::move(sstable_from_existing))
     , _unshared_remote_sstables(smp::count)
-    , _sstable_reshard_list(1)
+//    , _shared_sstables(boost::copy_range<shared_descriptor>(boost::irange(0, smp::count)))
 {}
 
 bool sstable_directory::manifest_json_filter(const fs::path& path, const directory_entry& entry) {
@@ -262,7 +262,7 @@ bool sstable_directory::manifest_json_filter(const fs::path& path, const directo
 }
 
 void
-sstable_directory::handle_component(sstables::entry_descriptor desc, fs::path filename) {
+sstable_directory::handle_component(scan_state& state, sstables::entry_descriptor desc, fs::path filename) {
     // If not owned by us, skip
     if ((desc.generation % smp::count) != this_shard_id()) {
         return;
@@ -271,18 +271,18 @@ sstable_directory::handle_component(sstables::entry_descriptor desc, fs::path fi
     if (desc.component != component_type::TemporaryStatistics) {
         // Will delete right away so don't store here. We could just ignore the
         // ENOENT error, but better to not even issue the operation.
-        _generations_found.emplace(desc.generation, filename);
+        state.generations_found.emplace(desc.generation, filename);
     }
 
     switch (desc.component) {
     case component_type::TemporaryStatistics:
-        _files_for_removal.insert(filename.native());
+        state.files_for_removal.insert(filename.native());
         break;
     case component_type::TOC:
-        _descriptors.push_back(std::move(desc));
+        state.descriptors.push_back(std::move(desc));
         break;
     case component_type::TemporaryTOC:
-        _temp_toc_found.push_back(std::move(desc));
+        state.temp_toc_found.push_back(std::move(desc));
         break;
     default:
         // Do nothing, and will validate when trying to load the file.
@@ -330,7 +330,11 @@ sstable_directory::process_descriptor(sstables::entry_descriptor desc) {
                     _unshared_remote_sstables[shards[0]].push_back(std::move(info));
                 }
             } else {
-                _shared_sstable_info.push_back(std::move(info));
+#if 0
+                auto shard_it = boost::min_element(_shared_sstable_info);
+                shard_it->total_size += sst->data_size();
+                shard_it->info.push_back(std::move(info));
+#endif
             }
             return make_ready_future<>();
         });
@@ -349,59 +353,59 @@ sstable_directory::highest_version_seen() const {
 
 future<>
 sstable_directory::process_sstable_dir() {
-    return lister::scan_dir(_sstable_dir, { directory_entry_type::regular },
-            [this] (fs::path parent_dir, directory_entry de) {
-        // Dir here may not be the same as the path we are scanning. For example we may
-        // be scanning data/ks/table/upload, but for the descriptor we still want to use
-        // data/ks/table.
-        auto comps = sstables::entry_descriptor::make_descriptor(_sstable_dir.native(), de.name);
-        handle_component(std::move(comps), parent_dir / fs::path(de.name));
-        return make_ready_future<>();
-    }, &manifest_json_filter).then([this] {
-        // Always okay to delete files with a temporary TOC.
-        for (auto& desc: _temp_toc_found) {
-            auto range = _generations_found.equal_range(desc.generation);
-            for (auto it = range.first; it != range.second; ++it) {
-                auto& path = it->second;
-                dblog.info("Scheduling to remove file {}, from an SSTable with a Temporary TOC", path.native());
-                _files_for_removal.insert(path.native());
-            }
-            _generations_found.erase(range.first, range.second);
-        }
-
-        if (_generations_found.size()) {
-            _max_generation_seen =  *(boost::max_element(_generations_found | boost::adaptors::map_keys));
-        }
-
-        dblog.debug("{} After {} scanned, seen generation {}. {} descriptors found, {} different files found ",
-                _sstable_dir, _max_generation_seen, _descriptors.size(), _generations_found.size());
-
-
-        // _descriptors is everything with a TOC. So after we remove this, what's left is
-        // SSTables for which a TOC was not found.
-        return parallel_for_each(_descriptors, [this] (sstables::entry_descriptor desc) {
-            return with_semaphore(_load_semaphore, 1, [this, desc = std::move(desc)] () mutable {
-                _generations_found.erase(desc.generation);
-                // This will try to pre-load this file and throw an exception if it is invalid
-                return process_descriptor(std::move(desc));
-            });
-        }).then([this] {
-            // For files missing TOC, it depends on where this is coming from.
-            // If scylla was supposed to have generated this SSTable, this is not okay and
-            // we refuse to proceed. If this coming from, say, an import, then we just delete
-            // log and proceed.
-            for (auto& path : _generations_found | boost::adaptors::map_values) {
-                if (_throw_on_missing_toc == lack_of_toc_fatal::yes) {
-                    throw sstables::malformed_sstable_exception(format("At directory: {}: no TOC found for SSTable {}!. Refusing to boot", _sstable_dir.native(), path.native()));
-                } else {
-                    dblog.info("Found incomplete SSTable {} at directory {}. Removing", path.native(), _sstable_dir.native());
-                    _files_for_removal.insert(path.native());
+    return do_with(scan_state{}, [this] (scan_state& state) {
+        return lister::scan_dir(_sstable_dir, { directory_entry_type::regular },
+                [this, &state] (fs::path parent_dir, directory_entry de) {
+            // Dir here may not be the same as the path we are scanning. For example we may
+            // be scanning data/ks/table/upload, but for the descriptor we still want to use
+            // data/ks/table.
+            auto comps = sstables::entry_descriptor::make_descriptor(_sstable_dir.native(), de.name);
+            handle_component(state, std::move(comps), parent_dir / fs::path(de.name));
+            return make_ready_future<>();
+        }, &manifest_json_filter).then([this, &state] {
+            // Always okay to delete files with a temporary TOC.
+            for (auto& desc: state.temp_toc_found) {
+                auto range = state.generations_found.equal_range(desc.generation);
+                for (auto it = range.first; it != range.second; ++it) {
+                    auto& path = it->second;
+                    dblog.info("Scheduling to remove file {}, from an SSTable with a Temporary TOC", path.native());
+                    state.files_for_removal.insert(path.native());
                 }
+                state.generations_found.erase(range.first, range.second);
             }
 
-            // Remove all files scheduled for removal
-            return parallel_for_each(_files_for_removal, [] (sstring path) {
-                return remove_file(std::move(path));
+            _max_generation_seen =  boost::accumulate(state.generations_found | boost::adaptors::map_keys, int64_t(0), max_class<int64_t>());
+
+            dblog.debug("{} After {} scanned, seen generation {}. {} descriptors found, {} different files found ",
+                    _sstable_dir, _max_generation_seen, state.descriptors.size(), state.generations_found.size());
+
+
+            // _descriptors is everything with a TOC. So after we remove this, what's left is
+            // SSTables for which a TOC was not found.
+            return parallel_for_each(state.descriptors, [this, &state] (sstables::entry_descriptor desc) {
+                return with_semaphore(_load_semaphore, 1, [this, &state, desc = std::move(desc)] () mutable {
+                    state.generations_found.erase(desc.generation);
+                    // This will try to pre-load this file and throw an exception if it is invalid
+                    return process_descriptor(std::move(desc));
+                });
+            }).then([this, &state] {
+                // For files missing TOC, it depends on where this is coming from.
+                // If scylla was supposed to have generated this SSTable, this is not okay and
+                // we refuse to proceed. If this coming from, say, an import, then we just delete
+                // log and proceed.
+                for (auto& path : state.generations_found | boost::adaptors::map_values) {
+                    if (_throw_on_missing_toc) {
+                        throw sstables::malformed_sstable_exception(format("At directory: {}: no TOC found for SSTable {}!. Refusing to boot", _sstable_dir.native(), path.native()));
+                    } else {
+                        dblog.info("Found incomplete SSTable {} at directory {}. Removing", path.native(), _sstable_dir.native());
+                        state.files_for_removal.insert(path.native());
+                    }
+                }
+
+                // Remove all files scheduled for removal
+                return parallel_for_each(state.files_for_removal, [] (sstring path) {
+                    return remove_file(std::move(path));
+                });
             });
         });
     });
@@ -457,44 +461,49 @@ sstable_directory::collect_resharded_sstables(std::vector<sstables::shared_sstab
 }
 
 future<>
-sstable_directory::reshard(compaction_manager& cm, table& table, sstables::creator_fn creator) {
+sstable_directory::reshard(sstable_info_vector shared_info, compaction_manager& cm, table& table, sstables::creator_fn creator) {
+    return make_ready_future<>();
+#if 0
     dblog.debug("{} Considering reshard on a batch of {} SSTables", _shared_sstable_info.size());
     // Resharding doesn't like empty sstable sets, so bail early. There is nothing
     // to reshard in this shard.
-    if (_shared_sstable_info.size() == 0) {
+    if (shared_info.empty()) {
         return make_ready_future<>();
     }
 
     // We want to reshard many SSTables at a time for efficiency. However if we have to many we may
     // be risking OOM.
-    auto num_jobs = _shared_sstable_info.size() / table.schema()->max_compaction_threshold() + 1;
-    auto sstables_per_job = _shared_sstable_info.size() / num_jobs;
+    auto num_jobs = shared_info.size() / table.schema()->max_compaction_threshold() + 1;
+    auto sstables_per_job = shared_info.size() / num_jobs;
 
-    return parallel_for_each(_shared_sstable_info, [this, sstables_per_job] (sstables::foreign_sstable_open_info& info) {
-        auto sst = _sstable_object_from_existing_sstable(_sstable_dir, info.generation, info.version, info.format);
-        return sst->load(std::move(info)).then([this, sstables_per_job, sst = std::move(sst)] () mutable {
-            if (_sstable_reshard_list.back().size() >= sstables_per_job) {
-                _sstable_reshard_list.emplace_back();
-            }
-            _sstable_reshard_list.back().push_back(std::move(sst));
-        });
-    }).then([this, &cm, &table, creator = std::move(creator)] () mutable {
-        // There is a semaphore inside the compaction manager in run_resharding_jobs. So we
-        // parallel_for_each so the statistics about pending jobs are updated to reflect all
-        // jobs. But only one will run in parallel at a time
-        return parallel_for_each(_sstable_reshard_list, [this, &cm, &table, creator = std::move(creator)] (std::vector<sstables::shared_sstable>& sstlist) mutable {
-            return cm.run_resharding_job(&table, [this, &cm, &table, creator, &sstlist] () {
-                sstables::compaction_descriptor desc(_sstable_reshard_list[0]);
-                desc.options = sstables::compaction_options::make_reshard();
-                desc.io_priority = _io_priority;
-                desc.creator = std::move(creator);
+    using reshard_buckets = std::vector<std::vector<sstables::shared_sstable>>;
+    return do_with(reshard_buckets(1), [this, sstables_per_job] (reshard_buckets& buckets) {
+        return parallel_for_each(shared_info, [this, sstables_per_job, &buckets] (sstables::foreign_sstable_open_info& info) {
+            auto sst = _sstable_object_from_existing_sstable(_sstable_dir, info.generation, info.version, info.format);
+            return sst->load(std::move(info)).then([this, sstables_per_job, sst = std::move(sst)] () mutable {
+                if (buckets.back().size() >= sstables_per_job) {
+                    buckets.emplace_back();
+                }
+                buckets.back().push_back(std::move(sst));
+            });
+        }).then([this, &cm, &table, &buckets, creator = std::move(creator)] () mutable {
+            // There is a semaphore inside the compaction manager in run_resharding_jobs. So we
+            // parallel_for_each so the statistics about pending jobs are updated to reflect all
+            // jobs. But only one will run in parallel at a time
+            return parallel_for_each(buckets, [this, &cm, &table, creator = std::move(creator)] (std::vector<sstables::shared_sstable>& sstlist) mutable {
+                return cm.run_resharding_job(&table, [this, &cm, &table, creator, &sstlist] () {
+                    sstables::compaction_descriptor desc(_sstable_reshard_list[0], _io_priority);
+                    desc.options = sstables::compaction_options::make_reshard();
+                    desc.creator = std::move(creator);
 
-                return sstables::compact_sstables(std::move(desc), table).then([this, &sstlist] (sstables::compaction_info result) {
-                    return when_all_succeed(collect_resharded_sstables(std::move(result.new_sstables)), remove_resharded_sstables(sstlist));
+                    return sstables::compact_sstables(std::move(desc), table).then([this, &sstlist] (sstables::compaction_info result) {
+                        return when_all_succeed(collect_resharded_sstables(std::move(result.new_sstables)), remove_resharded_sstables(sstlist));
+                    });
                 });
             });
         });
     });
+#endif
 }
 
 future<>
@@ -513,10 +522,8 @@ sstable_directory::store_phaser(utils::phased_barrier::operation op) {
 
 future<>
 sstable_directory::process_sstable_dir(sharded<sstable_directory>& dir) {
-    return dir.invoke_on_all([&dir] (sstable_directory& d) {
-        return d.process_sstable_dir().then([&dir, &d] {
-            return d.move_foreign_sstables(dir);
-        });
+    return dir.local().process_sstable_dir().then([&dir] {
+        return dir.local().move_foreign_sstables(dir);
     });
 }
 
@@ -527,17 +534,13 @@ sstable_directory::highest_generation_seen(sharded<sstable_directory>& dir) {
     //
     // For example, different shards may scan different directories, or filter
     // earlier and not see some files
-    return dir.map_reduce0([] (sstable_directory& dir) {
-        return dir.highest_generation_seen();
-    }, int64_t(0), [] (int64_t a, int64_t b) { return std::max(a, b); });
+    return dir.map_reduce0(std::mem_fn(&sstable_directory::highest_generation_seen), int64_t(0), max_class<int64_t>());
 }
 
 future<sstables::sstable::version_types>
 sstable_directory::highest_version_seen(sharded<sstable_directory>& dir, sstables::sstable::version_types system_version) {
     using version = sstables::sstable::version_types;
-    return dir.map_reduce0([] (sstable_directory& dir) {
-        return dir.highest_version_seen();
-    }, system_version, [] (version a, version b) {
+    return dir.map_reduce0(std::mem_fn(&sstable_directory::highest_version_seen), system_version, [] (version a, version b) {
         return sstables::is_later(a, b) ? a : b;
     });
 }
@@ -551,12 +554,30 @@ sstable_directory::do_for_each_sstable(sharded<sstable_directory>& dir, std::fun
 
 future<>
 sstable_directory::reshard(sharded<sstable_directory>& dir, sharded<database>& db, sstring ks_name, sstring table_name, sstables::creator_fn creator) {
-    return dir.invoke_on_all([&dir, &db, ks_name, table_name, creator] (sstable_directory& d) {
-        auto& table = db.local().find_column_family(ks_name, table_name);
-        return d.reshard(table.get_compaction_manager(), table, creator).then([&d, &dir] {
-            return d.move_foreign_sstables(dir);
+#if 0
+    return parallel_for_each(dir.local()._shared_sstable_info, [&dir, &db, ks_name, table_name, creator] (shared_descriptor shared) {
+        auto shard = shared.shard;
+        return dir.invoke_on(shard, [&dir, &db, info = std::move(shared.info), ks_name, table_name, creator = std::move(creator)] (sstable_directory& d) mutable {
+            auto& table = db.local().find_column_family(ks_name, table_name);
+            return d.reshard(std::move(info), table.get_compaction_manager(), table, creator).then([&d, &dir] {
+                return d.move_foreign_sstables(dir);
+            });
+    });
+#endif
+    return make_ready_future<>();
+}
+
+future<>
+sstable_directory::spread_shared_sstables(sharded<sstable_directory>& dir) {
+    return make_ready_future<>();
+#if 0
+    return do_with(std::exchange(dir.local()._shared_sstable_info, {}),
+                                 std::vector<size_t>(smp::count, 0),
+                                 [&dir] (sstable_info_vector& all_shared, std::vector<size_t>& shard_sizes) {
+        return do_for_each(all_shared, [&shard_sizes] (sstables::foreign_sstable_open_info info) {
         });
     });
+#endif
 }
 
 // This function will iterate through upload directory in column family,
