@@ -38,13 +38,6 @@ namespace sstables {
     sstring pretty_print_data_size(uint64_t bytes);
     sstring pretty_print_throughput(uint64_t bytes, std::chrono::duration<float> dur);
 
-    struct resharding_descriptor {
-        std::vector<sstables::shared_sstable> sstables;
-        uint64_t max_sstable_bytes;
-        shard_id reshard_at;
-        uint32_t level;
-    };
-
     static inline sstring compaction_name(compaction_type type) {
         switch (type) {
         case compaction_type::Compaction:
