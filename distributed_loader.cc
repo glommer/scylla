@@ -854,92 +854,6 @@ future<> distributed_loader::handle_sstables_pending_delete(sstring pending_dele
     });
 }
 
-future<> distributed_loader::do_populate_column_family(distributed<database>& db, sstring sstdir, sstring ks, sstring cf) {
-    // We can catch most errors when we try to load an sstable. But if the TOC
-    // file is the one missing, we won't try to load the sstable at all. This
-    // case is still an invalid case, but it is way easier for us to treat it
-    // by waiting for all files to be loaded, and then checking if we saw a
-    // file during scan_dir, without its corresponding TOC.
-    enum class component_status {
-        has_some_file,
-        has_toc_file,
-        has_temporary_toc_file,
-    };
-
-    struct sstable_descriptor {
-        component_status status;
-        sstables::sstable::version_types version;
-        sstables::sstable::format_types format;
-    };
-
-    auto verifier = make_lw_shared<std::unordered_map<unsigned long, sstable_descriptor>>();
-
-    return do_with(std::vector<future<>>(), [&db, sstdir = std::move(sstdir), verifier, ks, cf] (std::vector<future<>>& futures) {
-        return lister::scan_dir(sstdir, { directory_entry_type::regular }, [&db, verifier, &futures] (fs::path sstdir, directory_entry de) {
-            // FIXME: The secondary indexes are in this level, but with a directory type, (starting with ".")
-
-            // push future returned by probe_file into an array of futures,
-            // so that the supplied callback will not block scan_dir() from
-            // reading the next entry in the directory.
-            auto f = distributed_loader::probe_file(db, sstdir.native(), de.name).then([verifier, sstdir, de] (auto entry) {
-                if (entry.component == component_type::TemporaryStatistics) {
-                    return remove_file(sstables::sstable::filename(sstdir.native(), entry.ks, entry.cf, entry.version, entry.generation,
-                        entry.format, component_type::TemporaryStatistics));
-                }
-
-                if (verifier->count(entry.generation)) {
-                    if (verifier->at(entry.generation).status == component_status::has_toc_file) {
-                        fs::path file_path(sstdir / de.name);
-                        if (entry.component == component_type::TOC) {
-                            throw sstables::malformed_sstable_exception("Invalid State encountered. TOC file already processed", file_path.native());
-                        } else if (entry.component == component_type::TemporaryTOC) {
-                            throw sstables::malformed_sstable_exception("Invalid State encountered. Temporary TOC file found after TOC file was processed", file_path.native());
-                        }
-                    } else if (entry.component == component_type::TOC) {
-                        verifier->at(entry.generation).status = component_status::has_toc_file;
-                    } else if (entry.component == component_type::TemporaryTOC) {
-                        verifier->at(entry.generation).status = component_status::has_temporary_toc_file;
-                    }
-                } else {
-                    if (entry.component == component_type::TOC) {
-                        verifier->emplace(entry.generation, sstable_descriptor{component_status::has_toc_file, entry.version, entry.format});
-                    } else if (entry.component == component_type::TemporaryTOC) {
-                        verifier->emplace(entry.generation, sstable_descriptor{component_status::has_temporary_toc_file, entry.version, entry.format});
-                    } else {
-                        verifier->emplace(entry.generation, sstable_descriptor{component_status::has_some_file, entry.version, entry.format});
-                    }
-                }
-                return make_ready_future<>();
-            });
-
-            futures.push_back(std::move(f));
-
-            return make_ready_future<>();
-        }, &sstables::manifest_json_filter).then([&futures] {
-            return execute_futures(futures);
-        }).then([verifier, sstdir, ks = std::move(ks), cf = std::move(cf)] {
-            return do_for_each(*verifier, [sstdir = std::move(sstdir), ks = std::move(ks), cf = std::move(cf), verifier] (auto v) {
-                if (v.second.status == component_status::has_temporary_toc_file) {
-                    unsigned long gen = v.first;
-                    sstables::sstable::version_types version = v.second.version;
-                    sstables::sstable::format_types format = v.second.format;
-
-                    if (this_shard_id() != 0) {
-                        dblog.debug("At directory: {}, partial SSTable with generation {} not relevant for this shard, ignoring", sstdir, v.first);
-                        return make_ready_future<>();
-                    }
-                    // shard 0 is the responsible for removing a partial sstable.
-                    return sstables::sstable::remove_sstable_with_temp_toc(ks, cf, sstdir, gen, version, format);
-                } else if (v.second.status != component_status::has_toc_file) {
-                    throw sstables::malformed_sstable_exception(format("At directory: {}: no TOC found for SSTable with generation {:d}!. Refusing to boot", sstdir, v.first));
-                }
-                return make_ready_future<>();
-            });
-        });
-    });
-
-}
-
 future<> distributed_loader::populate_column_family(distributed<database>& db, sstring sstdir, sstring ks, sstring cf) {
     return async([&db, sstdir = std::move(sstdir), ks = std::move(ks), cf = std::move(cf)] {
         assert(this_shard_id() == 0);
@@ -950,8 +864,62 @@ future<> distributed_loader::populate_column_family(distributed<database>& db, s
         if (exists) {
             handle_sstables_pending_delete(pending_delete_dir).get();
         }
-        // Second pass, cleanup sstables with temporary TOCs and load the rest.
-        do_populate_column_family(db, std::move(sstdir), std::move(ks), std::move(cf)).get();
+
+        global_column_family_ptr global_table(db, ks, cf);
+
+        sharded<sstables::sstable_directory> directory;
+        directory.start(fs::path(sstdir), db.local().get_config().initial_sstable_loading_concurrency(),
+            sstables::sstable_directory::need_mutate_level::yes,
+            sstables::sstable_directory::lack_of_toc_fatal::yes,
+            sstables::sstable_directory::enable_dangerous_direct_import_of_cassandra_counters(db.local().get_config().enable_dangerous_direct_import_of_cassandra_counters()),
+            sstables::sstable_directory::allow_loading_materialized_view::yes,
+            [&global_table] (fs::path dir, int64_t gen, sstables::sstable_version_types v, sstables::sstable_format_types f) {
+                return global_table->make_sstable(dir.native(), gen, v, f);
+        }).get();
+
+        auto stop = defer([&directory] {
+            directory.stop().get();
+        });
+
+        lock_table(directory, db, ks, cf).get();
+        process_sstable_dir(directory).get();
+
+        // If we are resharding system tables before we can read them, we will not
+        // know which is the highest format we support: this information is itself stored
+        // in the system tables. In that case we'll rely on what we find on disk: we'll
+        // at least not downgrade any files. If we already know that we support a higher
+        // format than the one we see then we use that.
+        auto sys_format = global_table->get_sstables_manager().get_highest_supported_format();
+        auto sst_version = highest_version_seen(directory, sys_format).get0();
+        auto generation = highest_generation_seen(directory).get0();
+
+        db.invoke_on_all([&global_table, generation] (database& db) {
+            global_table->update_sstables_known_generation(generation);
+            global_table->disable_auto_compaction();
+            return make_ready_future<>();
+        }).get();
+
+        reshard(directory, db, ks, cf, [&global_table, sstdir, sst_version] (shard_id shard) mutable {
+            auto gen = smp::submit_to(shard, [&global_table] () {
+                return global_table->calculate_generation_for_new_table();
+            }).get0();
+
+            return global_table->make_sstable(sstdir, gen, sst_version, sstables::sstable::format_types::big);
+        }).get();
+
+        // The node is offline at this point so we are very lenient with what we consider
+        // offstrategy.
+        unsigned offstrategy_threshold = global_table->schema()->max_compaction_threshold() * 2;
+        reshape(directory, db, offstrategy_threshold, ks, cf, [global_table, sstdir, sst_version] (shard_id shard) {
+            auto gen = global_table->calculate_generation_for_new_table();
+            return global_table->make_sstable(sstdir, gen, sst_version, sstables::sstable::format_types::big);
+        }).get();
+
+        directory.invoke_on_all([global_table] (sstables::sstable_directory& dir) {
+            return dir.do_for_each_sstable([&global_table] (sstables::shared_sstable sst) {
+                return global_table->add_sstable_and_update_cache(sst);
+            });
+        }).get();
     });
 }
 
