@@ -28,6 +28,7 @@
 #include "sstables/shared_sstable.hh"
 #include "exceptions/exceptions.hh"
 #include "sstables/compaction_backlog_manager.hh"
+#include "sstables/compaction_descriptor.hh"
 #include "compaction_strategy_type.hh"
 
 class table;
@@ -135,6 +136,15 @@ public:
 
     // Returns whether or not interposer consumer is used by a given strategy.
     bool use_interposer_consumer() const;
+
+    // Informs the caller (usually the compaction manager) about what would it take for this set of
+    // SSTables to become in-strategy.
+    //
+    // The caller may choose to restrict how many SSTables are present in a compaction, at most.
+    // This can usually be done due to concerns about memory usage. (like input.size()) is
+    // equivalent to a major compaction.
+    std::vector<compaction_descriptor> get_reshaping_jobs(std::vector<shared_sstable> input, unsigned max_set_size, schema_ptr schema, const ::io_priority_class& iop);
+
 };
 
 // Creates a compaction_strategy object from one of the strategies available.

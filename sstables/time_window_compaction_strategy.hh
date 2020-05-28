@@ -351,6 +351,8 @@ public:
     virtual bool use_interposer_consumer() const override {
         return true;
     }
+
+    virtual std::vector<compaction_descriptor> get_reshaping_jobs(std::vector<shared_sstable> input, unsigned max_set_size, schema_ptr schema, const ::io_priority_class& iop) override;
 };
 
 }

@@ -80,4 +80,36 @@ reader_consumer time_window_compaction_strategy::make_interposer_consumer(const 
     };
 }
 
+std::vector<compaction_descriptor> time_window_compaction_strategy::get_reshaping_jobs(std::vector<shared_sstable> input, unsigned max_set_size, schema_ptr schema, const ::io_priority_class& iop) {
+    std::vector<compaction_descriptor> desc;
+    std::vector<shared_sstable> single_window;
+    std::vector<shared_sstable> multi_window;
+
+    for (auto& sst : input) {
+        auto min = sst->get_stats_metadata().min_timestamp;
+        auto max = sst->get_stats_metadata().max_timestamp;
+        if (get_window_for(_options, min) != get_window_for(_options, max)) {
+            multi_window.push_back(sst);
+        } else {
+            single_window.push_back(sst);
+        }
+    }
+
+    if (!multi_window.empty()) {
+        // Everything that spans multiple windows will need reshaping
+        desc.emplace_back(std::move(multi_window), std::optional<sstables::sstable_set>(), iop);
+    }
+
+    // For things that don't span multiple windows, we compact windows that are individually too big
+    auto all_buckets = get_buckets(single_window, _options);
+    for (auto& pair : all_buckets.first) {
+        auto ssts = std::move(pair.second);
+        if (ssts.size() > max_set_size) {
+            desc.emplace_back(std::move(ssts), std::optional<sstables::sstable_set>(), iop);
+        }
+    }
+
+    return desc;
+}
+
 }

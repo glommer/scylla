@@ -208,4 +208,16 @@ size_tiered_compaction_strategy::most_interesting_bucket(const std::vector<sstab
     return most_interesting;
 }
 
+std::vector<compaction_descriptor> size_tiered_compaction_strategy::get_reshaping_jobs(std::vector<shared_sstable> input, unsigned max_set_size, schema_ptr schema, const ::io_priority_class& iop) {
+
+    std::vector<compaction_descriptor> desc;
+    for (auto& bucket : get_buckets(input)) {
+        if (bucket.size() >= max_set_size) {
+            desc.emplace_back(std::move(bucket), std::optional<sstables::sstable_set>(), iop);
+        }
+    }
+
+    return desc;
+}
+
 }
