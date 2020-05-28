@@ -171,4 +171,60 @@ int64_t leveled_compaction_strategy::estimated_pending_compactions(column_family
     return manifest.get_estimated_tasks();
 }
 
+compaction_descriptor
+leveled_compaction_strategy::get_reshaping_job(std::vector<shared_sstable> input, size_t offstrategy_threshold, size_t max_sstables,
+        schema_ptr schema, const ::io_priority_class& iop) {
+    std::array<std::vector<shared_sstable>, leveled_manifest::MAX_LEVELS> level_info;
+
+    auto is_disjoint = [this, schema] (const std::vector<shared_sstable>& sstables) {
+        auto prev_last = dht::ring_position::min();
+        for (auto& sst : sstables) {
+            if (dht::ring_position(sst->get_first_decorated_key()).less_compare(*schema, prev_last)) {
+                return false;
+            }
+            prev_last = dht::ring_position(sst->get_last_decorated_key());
+        }
+        return true;
+    };
+
+    for (auto& sst : input) {
+        auto sst_level = sst->get_sstable_level();
+        if (sst_level >= leveled_manifest::MAX_LEVELS) {
+            leveled_manifest::logger.warn("Found SSTable with level {}, higher than the maximum. This is unexpected, so assuming max level ({})", sst_level, leveled_manifest::MAX_LEVELS);
+            sst_level = leveled_manifest::MAX_LEVELS;
+        }
+        level_info[sst_level].push_back(sst);
+    }
+
+    for (auto& level : level_info) {
+        std::sort(level.begin(), level.end(), [this, schema] (shared_sstable a, shared_sstable b) {
+            return dht::ring_position(a->get_first_decorated_key()).less_compare(*schema, dht::ring_position(b->get_first_decorated_key()));
+        });
+    }
+
+    bool offstrategy = false;
+    unsigned max_filled_level = 0;
+
+    if (level_info[0].size() > offstrategy_threshold) {
+        return compaction_descriptor(trim_to_size(level_info[0], max_sstables), std::optional<sstables::sstable_set>(), iop);
+    }
+
+    for (unsigned level = 1; level < leveled_manifest::MAX_LEVELS; ++level) {
+        if (level_info[level].empty()) {
+            continue;
+        }
+        max_filled_level = std::max(max_filled_level, level);
+
+        if (!is_disjoint(level_info[level])) {
+            offstrategy = true;
+        }
+    }
+
+    std::vector<compaction_descriptor> desc;
+    if (offstrategy) {
+        return compaction_descriptor(std::move(input), std::optional<sstables::sstable_set>(), iop, max_filled_level, _max_sstable_size_in_mb * 1024 * 1024);
+    }
+    return compaction_descriptor();
+}
+
 }

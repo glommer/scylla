@@ -481,6 +481,18 @@ reader_consumer compaction_strategy_impl::make_interposer_consumer(const mutatio
     return end_consumer;
 }
 
+compaction_descriptor
+compaction_strategy_impl::get_reshaping_job(std::vector<shared_sstable> input, size_t offstrategy_threshold, size_t max_sstables,
+        schema_ptr schema, const ::io_priority_class& iop) {
+    return compaction_descriptor();
+}
+
+std::vector<sstables::shared_sstable> trim_to_size(std::vector<sstables::shared_sstable> input, size_t max_sstables) {
+    std::vector<sstables::shared_sstable> ssts;
+    std::move(input.begin(), input.begin() + std::min(input.size(), max_sstables), std::back_inserter(ssts));
+    return ssts;
+}
+
 } // namespace sstables
 
 size_tiered_backlog_tracker::inflight_component
@@ -1009,6 +1021,11 @@ compaction_strategy::make_sstable_set(schema_ptr schema) const {
 
 compaction_backlog_tracker& compaction_strategy::get_backlog_tracker() {
     return _compaction_strategy_impl->get_backlog_tracker();
+}
+
+sstables::compaction_descriptor
+compaction_strategy::get_reshaping_job(std::vector<shared_sstable> input, size_t offstrategy_threshold, size_t max_sstables, schema_ptr schema, const ::io_priority_class& iop) {
+    return _compaction_strategy_impl->get_reshaping_job(std::move(input), offstrategy_threshold, max_sstables, schema, iop);
 }
 
 uint64_t compaction_strategy::adjust_partition_estimate(const mutation_source_metadata& ms_meta, uint64_t partition_estimate) {

@@ -23,6 +23,7 @@
 
 #include <seastar/core/future.hh>
 #include <seastar/util/noncopyable_function.hh>
+#include <seastar/core/file.hh>
 
 #include "schema_fwd.hh"
 #include "sstables/shared_sstable.hh"
@@ -135,6 +136,21 @@ public:
 
     // Returns whether or not interposer consumer is used by a given strategy.
     bool use_interposer_consumer() const;
+
+    // Informs the caller (usually the compaction manager) about what would it take for this set of
+    // SSTables closer to becoming in-strategy. If this returns an empty compaction descriptor, this
+    // means that the sstable set is already in-strategy.
+    //
+    // The caller can specify an offstrategy_threshold, which is the threshold over which a set of
+    // SSTables is considered off-strategy for amount-of-sstables based decisions. For instance, for
+    // SizeTiered, a tier is considered to be offstrategy if a tier has more than
+    // offstrategy_threshold sstables.
+    //
+    // The caller should also pass a maximum number of SSTables which is the maximum amount of
+    // SSTables that can be added into a single job.
+    compaction_descriptor get_reshaping_job(std::vector<shared_sstable> input, size_t offstrategy_threshold, size_t max_sstables,
+                                            schema_ptr schema, const ::io_priority_class& iop);
+
 };
 
 // Creates a compaction_strategy object from one of the strategies available.

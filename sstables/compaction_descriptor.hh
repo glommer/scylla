@@ -164,4 +164,6 @@ struct compaction_descriptor {
     {}
 };
 
+std::vector<sstables::shared_sstable> trim_to_size(std::vector<sstables::shared_sstable> input, size_t max_sstables);
+
 }
