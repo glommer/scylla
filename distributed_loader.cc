@@ -406,11 +406,22 @@ distributed_loader::process_upload_dir(distributed<database>& db, sstring ks, ss
 
         lock_table(directory, db, ks, cf).get();
         process_sstable_dir(directory).get();
-        reshard(directory, db, ks, cf, [&global_table, upload] (shard_id shard) {
+        auto highest_generation_seen = directory.map_reduce0(
+            std::mem_fn(&sstables::sstable_directory::highest_generation_seen),
+            int64_t(0),
+            [] (int64_t a, int64_t b) { return std::max(a, b); }
+        ).get0();
+
+        // We still want to do our best to keep the generation numbers shard-friendly.
+        // Each destination shard will manage its own generation counter.
+        std::vector<std::atomic<int64_t>> shard_gen(smp::count);
+        for (shard_id s = 0; s < smp::count; ++s) {
+            shard_gen[s].store(highest_generation_seen, std::memory_order_relaxed);
+        }
+
+        reshard(directory, db, ks, cf, [&global_table, upload, &shard_gen] (shard_id shard) mutable {
             // we need generation calculated by instance of cf at requested shard
-            auto gen = smp::submit_to(shard, [&global_table] () {
-                return global_table->calculate_generation_for_new_table();
-            }).get0();
+            auto gen = shard_gen[shard].fetch_add(1, std::memory_order_relaxed) * smp::count + shard;
 
             return global_table->make_sstable(upload.native(), gen,
                     global_table->get_sstables_manager().get_highest_supported_format(),
