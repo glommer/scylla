@@ -26,6 +26,7 @@
 #include "log.hh"
 #include "sstable_directory.hh"
 #include "lister.hh"
+#include "database.hh"
 
 static logging::logger dirlog("sstable_directory");
 
@@ -274,6 +275,83 @@ sstable_directory::collect_output_sstables_from_resharding(std::vector<sstables:
         return sst->get_open_info().then([this, shard, sst] (sstables::foreign_sstable_open_info info) {
             _unshared_remote_sstables[shard].push_back(std::move(info));
             return make_ready_future<>();
+        });
+    });
+}
+
+future<>
+sstable_directory::remove_input_sstables_from_reshaping(std::vector<sstables::shared_sstable> sstlist) {
+    // When removing input sstables from reshaping: Those SSTables used to be in the unshared local
+    // list. So not only do we have to remove them, we also have to update the list. Because we're
+    // dealing with a vector it's easier to just reconstruct the list.
+    dirlog.debug("Removing {} reshaped SSTables", sstlist.size());
+    return do_with(std::move(sstlist), std::unordered_set<sstables::shared_sstable>(),
+            [this] (std::vector<sstables::shared_sstable>& sstlist, std::unordered_set<sstables::shared_sstable>& exclude) {
+        return parallel_for_each(sstlist, [this, &exclude] (sstables::shared_sstable sst) {
+            exclude.insert(sst);
+            return make_ready_future<>();
+        }).then([this, &exclude] {
+            return parallel_for_each(std::exchange(_unshared_local_sstables, {}), [this, &exclude] (sstables::shared_sstable sst) {
+                if (!exclude.count(sst)) {
+                    _unshared_local_sstables.push_back(sst);
+                }
+                return make_ready_future<>();
+            });
+        }).then([this, &exclude] {;
+            // Do this last for exception safety. If there is an exception on unlink we
+            // want to at least leave the SSTable unshared list in a sane state.
+            return parallel_for_each(exclude, [] (sstables::shared_sstable sst) {
+                return sst->unlink();
+            });
+        });
+    });
+}
+
+
+future<>
+sstable_directory::collect_output_sstables_from_reshaping(std::vector<sstables::shared_sstable> reshaped_sstables) {
+    dirlog.debug("Collecting {} reshaped SSTables", reshaped_sstables.size());
+    return parallel_for_each(std::move(reshaped_sstables), [this] (sstables::shared_sstable sst) {
+        _unshared_local_sstables.push_back(std::move(sst));
+        return make_ready_future<>();
+    });
+}
+
+future<size_t> sstable_directory::reshape(compaction_manager& cm, table& table, size_t reshape_threshold, size_t max_sstables,
+            sstables::compaction_sstable_creator_fn creator, const ::io_priority_class& iop)
+{
+    return do_with(size_t(0), [this, &cm, &table, creator, reshape_threshold, max_sstables, iop] (size_t& reshaped_size) mutable {
+        return repeat([this, &cm, &table, creator, reshape_threshold, max_sstables, iop, &reshaped_size] () mutable {
+            auto desc = table.get_compaction_strategy().get_reshaping_job(_unshared_local_sstables, reshape_threshold, max_sstables, table.schema(), iop);
+            if (desc.sstables.empty()) {
+                return make_ready_future<stop_iteration>(stop_iteration::yes);
+            }
+
+            if (!reshaped_size) {
+                dirlog.info("Found SSTables that need reshape. Starting reshape process");
+            }
+            std::vector<sstables::shared_sstable> sstlist;
+
+            for (auto& sst : desc.sstables) {
+                reshaped_size += sst->data_size();
+                sstlist.push_back(sst);
+            }
+
+            desc.options = sstables::compaction_options::make_reshape();
+            desc.creator = creator;
+
+            return cm.run_custom_job(&table, "reshape", [this, &table, desc = std::move(desc)] () mutable {
+                auto sstlist = desc.sstables;
+                return sstables::compact_sstables(std::move(desc), table).then([this, sstlist] (sstables::compaction_info result) mutable {
+                    return remove_input_sstables_from_reshaping(std::move(sstlist)).then([this, new_sstables = std::move(result.new_sstables)] () mutable {
+                        return collect_output_sstables_from_reshaping(std::move(new_sstables));
+                    });
+                });
+            }).then([] {
+                return make_ready_future<stop_iteration>(stop_iteration::no);
+            });
+        }).then([&reshaped_size] {
+            return make_ready_future<size_t>(reshaped_size);
         });
     });
 }

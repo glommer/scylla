@@ -400,6 +400,28 @@ highest_version_seen(sharded<sstables::sstable_directory>& dir, sstables::sstabl
 }
 
 future<>
+distributed_loader::reshape(sharded<sstables::sstable_directory>& dir, sharded<database>& db, size_t reshape_threshold, size_t max_sstables,
+        sstring ks_name, sstring table_name, sstables::compaction_sstable_creator_fn creator) {
+
+    auto start = std::chrono::steady_clock::now();
+    return dir.map_reduce0([&dir, &db, reshape_threshold, max_sstables, ks_name, table_name, creator] (sstables::sstable_directory& d) {
+        auto& table = db.local().find_column_family(ks_name, table_name);
+        auto& cm = table.get_compaction_manager();
+        auto& iop = service::get_local_streaming_read_priority();
+        return d.reshape(cm, table, reshape_threshold, max_sstables, creator, iop);
+    }, size_t(0), std::plus<size_t>()).then([start] (size_t total_size) {
+        if (total_size > 0) {
+            auto total_size_mb = total_size / 1000000.0;
+            // add a microsecond to prevent division by zero
+            auto now = std::chrono::steady_clock::now() + 1us;
+            auto seconds = std::chrono::duration_cast<std::chrono::duration<float>>(now - start).count();
+            dblog.info("{}", fmt::format("Reshaped {:.2f} MB in {:.2f} seconds, {:.2f} MB/s", total_size_mb, seconds, (total_size_mb / seconds)));
+        }
+        return make_ready_future<>();
+    });
+}
+
+future<>
 distributed_loader::process_upload_dir(distributed<database>& db, sstring ks, sstring cf) {
     seastar::thread_attributes attr;
     attr.sched_group = db.local().get_streaming_scheduling_group();
