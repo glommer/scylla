@@ -381,6 +381,17 @@ distributed_loader::reshard(sharded<sstables::sstable_directory>& dir, sharded<d
 }
 
 future<>
+distributed_loader::reshape(sharded<sstables::sstable_directory>& dir, sharded<database>& db,
+        unsigned reshape_threshold, sstring ks_name, sstring table_name, sstables::compaction_sstable_creator_fn creator) {
+    return dir.invoke_on_all([&dir, &db, reshape_threshold, ks_name, table_name, creator] (sstables::sstable_directory& d) mutable {
+        auto& table = db.local().find_column_family(ks_name, table_name);
+        auto& cm = table.get_compaction_manager();
+        auto& iop = service::get_local_streaming_read_priority();
+        return d.reshape(cm, table, reshape_threshold, std::move(creator), iop);
+    });
+}
+
+future<>
 distributed_loader::process_upload_dir(distributed<database>& db, sstring ks, sstring cf) {
     seastar::thread_attributes attr;
     attr.sched_group = db.local().get_streaming_scheduling_group();
