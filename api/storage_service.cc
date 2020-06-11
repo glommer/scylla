@@ -716,18 +716,29 @@ void set_storage_service(http_context& ctx, routes& r) {
     });
 
     ss::enable_auto_compaction.set(r, [&ctx](std::unique_ptr<request> req) {
-        auto keyspace = validate_keyspace(ctx, req->param);
-        auto tables = split_cf(req->get_query_param("cf"));
-        return set_tables_autocompaction(ctx, keyspace, tables, true).then([]{
-            return make_ready_future<json::json_return_type>(json_void());
+        return service::get_local_storage_service().is_initialized().then([&ctx, req = std::move(req)] (bool initialized) {
+            if (!initialized) {
+                return make_exception_future<json::json_return_type>(std::runtime_error("Too early: system not initialized yet"));
+            }
+            auto keyspace = validate_keyspace(ctx, req->param);
+            auto tables = split_cf(req->get_query_param("cf"));
+            return set_tables_autocompaction(ctx, keyspace, tables, true).then([]{
+                return make_ready_future<json::json_return_type>(json_void());
+            });
         });
     });
 
     ss::disable_auto_compaction.set(r, [&ctx](std::unique_ptr<request> req) {
-        auto keyspace = validate_keyspace(ctx, req->param);
-        auto tables = split_cf(req->get_query_param("cf"));
-        return set_tables_autocompaction(ctx, keyspace, tables, false).then([]{
-            return make_ready_future<json::json_return_type>(json_void());
+        return service::get_local_storage_service().is_initialized().then([&ctx, req = std::move(req)] (bool initialized) {
+            if (!initialized) {
+                return make_exception_future<json::json_return_type>(std::runtime_error("Too early: system not initialized yet"));
+            }
+
+            auto keyspace = validate_keyspace(ctx, req->param);
+            auto tables = split_cf(req->get_query_param("cf"));
+            return set_tables_autocompaction(ctx, keyspace, tables, false).then([]{
+                return make_ready_future<json::json_return_type>(json_void());
+            });
         });
     });
 
