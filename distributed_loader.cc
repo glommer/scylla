@@ -396,7 +396,7 @@ distributed_loader::process_upload_dir(distributed<database>& db, sstring ks, ss
             sstables::sstable_directory::enable_dangerous_direct_import_of_cassandra_counters(db.local().get_config().enable_dangerous_direct_import_of_cassandra_counters()),
             sstables::sstable_directory::allow_loading_materialized_view::no,
             [&global_table] (fs::path dir, int64_t gen, sstables::sstable_version_types v, sstables::sstable_format_types f) {
-                return global_table->make_sstable(dir.native(), gen, v, f);
+                return global_table->make_sstable(dir.native(), gen, v, f, [] (disk_error_signal_type&) { return error_handler_for_upload_dir(); });
 
         }).get();
 
@@ -427,7 +427,8 @@ distributed_loader::process_upload_dir(distributed<database>& db, sstring ks, ss
 
             return global_table->make_sstable(upload.native(), gen,
                     global_table->get_sstables_manager().get_highest_supported_format(),
-                    sstables::sstable::format_types::big);
+                    sstables::sstable::format_types::big,
+                    [] (disk_error_signal_type&) { return error_handler_for_upload_dir(); });
         }).get();
     });
 }
