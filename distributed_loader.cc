@@ -449,6 +449,21 @@ distributed_loader::load_new_sstables(sstables::sstable_directory& dir, sharded<
     });
 }
 
+future<int64_t>
+highest_generation_seen(sharded<sstables::sstable_directory>& directory) {
+    return directory.map_reduce0(std::mem_fn(&sstables::sstable_directory::highest_generation_seen), int64_t(0), [] (int64_t a, int64_t b) {
+        return std::max(a, b);
+    });
+}
+
+future<sstables::sstable::version_types>
+highest_version_seen(sharded<sstables::sstable_directory>& dir, sstables::sstable_version_types system_version) {
+    using version = sstables::sstable_version_types;
+    return dir.map_reduce0(std::mem_fn(&sstables::sstable_directory::highest_version_seen), system_version, [] (version a, version b) {
+        return sstables::is_later(a, b) ? a : b;
+    });
+}
+
 future<>
 distributed_loader::process_upload_dir(distributed<database>& db, distributed<db::system_distributed_keyspace>& sys_dist_ks,
         distributed<db::view::view_update_generator>& view_update_generator, sstring ks, sstring cf) {
@@ -476,13 +491,9 @@ distributed_loader::process_upload_dir(distributed<database>& db, distributed<db
 
         lock_table(directory, db, ks, cf).get();
         process_sstable_dir(directory).get();
-        auto highest_generation_seen = directory.map_reduce0(
-            std::mem_fn(&sstables::sstable_directory::highest_generation_seen),
-            int64_t(0),
-            [] (int64_t a, int64_t b) { return std::max(a, b); }
-        ).get0();
 
-        auto shard_generation_base = highest_generation_seen / smp::count + 1;
+        auto generation = highest_generation_seen(directory).get0();
+        auto shard_generation_base = generation / smp::count + 1;
 
         // We still want to do our best to keep the generation numbers shard-friendly.
         // Each destination shard will manage its own generation counter.
